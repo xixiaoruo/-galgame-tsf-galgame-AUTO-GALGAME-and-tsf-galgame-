@@ -95,7 +95,7 @@ async def _unhandled_exception(request, exc):
     return JSONResponse(status_code=500, content={
         "detail": f"服务器内部错误：{type(exc).__name__}: {exc}"})
 
-GAME_VERSION = "1.7.49"
+GAME_VERSION = "1.7.50"
 
 
 @app.get("/api/version")

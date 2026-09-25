@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>自动化AI Galgame · 即时物语生成器</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=1.7.51">
+  <link rel="stylesheet" href="style.css?v=1.7.52">
 </head>
 <body>
 
@@ -578,6 +578,21 @@
         </div>
       </div>
       <div class="config-section">
+        <h3>⬆ 从 GitHub 更新（检查新版本 · 下载整合包）</h3>
+        <p class="hint-line">查询项目仓库的最新 Release 并与当前版本比对；下载的整合包会解压到
+          <code>update\staging</code>，然后运行「开发者更新游戏状态.bat」即可应用并重启。
+          存档、CG、配置在独立数据目录，更新不会动它们。</p>
+        <div class="update-row">
+          <button id="btn-update-check" class="btn ghost">🔍 检查更新</button>
+          <button id="btn-update-download" class="btn primary hidden">⬇ 下载并解压</button>
+          <span id="update-hint" class="hint"></span>
+        </div>
+        <div id="update-bar-wrap" class="update-bar-wrap hidden">
+          <div id="update-bar" class="update-bar"></div>
+        </div>
+        <pre id="update-notes" class="update-notes hidden"></pre>
+      </div>
+      <div class="config-section">
         <h3>⚡ 操作与数据</h3>
         <label>打字机速度
           <select id="cfg-type-speed" class="text-input">
@@ -897,6 +912,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="main.js?v=1.7.51"></script>
+  <script src="main.js?v=1.7.52"></script>
 </body>
 </html>

@@ -8,6 +8,7 @@
 """
 import json
 import logging
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -42,12 +43,20 @@ def _new_id() -> str:
 
 
 def list_entries(resolver=None) -> list[dict]:
-    """画廊清单（新→旧）；bridge 条目通过 resolver(sid, cg_id) 解析图片文件。"""
+    """画廊清单（新→旧）；bridge 条目通过 resolver(sid, cg_id) 解析图片文件。
+
+    解析不到的旧桥段图（早期版本只登记引用、未落盘，缓存已被清理）标记
+    file_lost，前端据此提示「源图已丢失」，而不是一直显示「生成中」。
+    """
     items = _meta_load()[:MAX_CG]
+    now = time.time()
     for it in items:
         if it.get("type") == "bridge" and not it.get("file") and resolver:
             it["file"] = resolver(it.get("sid", ""), it.get("cg_id", ""))
         it["ready"] = bool(it.get("file"))
+        if (not it["ready"] and it.get("type") == "bridge"
+                and now - float(it.get("time") or 0) > 3600):
+            it["file_lost"] = True
     return items
 
 
@@ -240,3 +249,57 @@ def record_bridge(session: dict, turn: dict, note: str = "") -> dict:
     items.insert(0, item)
     _meta_save(items)
     return item
+
+
+def _find(cg_id: str) -> dict | None:
+    return next((i for i in _meta_load() if i.get("id") == cg_id), None)
+
+
+def saved_file(cg_id: str) -> str:
+    """CG 库里已落盘的文件名（不带路径）；没有则空串。
+
+    桥段 CG 原先只在清单里记一个指向「会话缓存」的引用，而 /cg/<文件名>
+    只服务 CG 目录、且不接受带斜杠的路径——缓存一旦被清理，图库里就只剩
+    一条打不开的空记录。落盘后与缓存无关，永久可用。
+    """
+    item = _find(cg_id)
+    if not item or not item.get("file"):
+        return ""
+    name = str(item["file"])
+    if "/" in name or "\\" in name:
+        return ""          # 历史数据里的缓存相对路径，不具备可用性
+    return name if (cfgmod.CG_DIR / name).is_file() else ""
+
+
+def save_bridge_image(cg_id: str, cache_rel: str) -> str:
+    """把桥段 CG 成品图从缓存复制进 CG 库，写回清单并返回库内文件名。
+
+    生成完成时调用一次即可永逸；图库清单再次遇到未落盘的老条目时会
+    顺带补做（自愈历史数据，只要缓存里那张图还在）。
+    """
+    if not cg_id:
+        return ""
+    existing = saved_file(cg_id)
+    if existing:
+        return existing
+    if not cache_rel:
+        return ""
+    items = _meta_load()
+    item = next((i for i in items if i.get("id") == cg_id), None)
+    if not item or item.get("type") != "bridge":
+        return ""
+    src = cfgmod.CACHE_DIR / str(cache_rel)
+    if not src.is_file():
+        return ""
+    cfgmod.CG_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"{cg_id}.png"
+    try:
+        shutil.copyfile(src, cfgmod.CG_DIR / name)
+    except OSError as e:
+        log.warning("cg save failed %s: %s", cg_id, e)
+        return ""
+    item["file"] = name          # 在同一个清单对象上改，再整体写回
+    item["saved"] = time.time()
+    _meta_save(items)
+    log.info("cg saved to library: %s", name)
+    return name

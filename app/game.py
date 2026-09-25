@@ -644,11 +644,13 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
                 # 同会话缓存命中（同键重试时直接复用成品）
                 item["status"] = "ready"
                 item["file"] = rel
+                _save_cg_if_bridge(session, key, rel)
                 persist(session)
                 return
             path.write_bytes(data)
             item["status"] = "ready"
             item["file"] = rel
+            _save_cg_if_bridge(session, key, rel)
             persist(session)
             log.info("asset task ready: %s", label)
         except Exception as e:
@@ -3926,8 +3928,41 @@ def save_cg(sid: str, cg_type: str = "manual", note: str = "") -> dict:
     return item
 
 
+def _save_cg_if_bridge(session: dict, key: str, rel: str) -> None:
+    """资产生成完成时，若是桥段 CG 就把成品图落盘进 CG 库（永久保存）。
+
+    桥段 CG 只登记在缓存里的话，缓存一清（或会话不在内存）图库就打不开，
+    所以在生成完成这一刻就复制进 data/cg/，与缓存解耦。
+    """
+    cid = _cg_id_of_key(session, key)
+    if not cid:
+        return
+    try:
+        from . import cgbook as cgbook_mod
+        cgbook_mod.save_bridge_image(cid, rel)
+    except Exception as e:      # 收藏失败绝不能影响图片资产本身
+        log.warning("cg library save skipped (%s): %s", cid, e)
+
+
+def _cg_id_of_key(session: dict, key: str) -> str:
+    """按资源键反查桥段 CG 编号（生成完成时据此把图落盘进 CG 库）。"""
+    for cid, meta in (session.get("cg_map") or {}).items():
+        if meta.get("key") == key:
+            return cid
+    return ""
+
+
 def resolve_cg_file(sid: str, cg_id: str) -> str:
-    """桥段 CG 的缓存文件名（可能仍在生成中，此时返回空）。"""
+    """桥段 CG 的可用文件名（CG 库内、不带路径）；必要时把缓存成品落盘。
+
+    顺序：CG 库里已落盘 → 在会话缓存里找到并落盘 → 空（仍在生成或已丢失）。
+    直接返回缓存相对路径是不行的：/cg/<文件名> 只服务 CG 目录、且不接受
+    带斜杠的路径，那样图库里会是打不开的破图。
+    """
+    from . import cgbook as cgbook_mod
+    saved = cgbook_mod.saved_file(cg_id)
+    if saved:
+        return saved
     s = SESSIONS.get(sid)
     if not s:
         return ""
@@ -3936,7 +3971,7 @@ def resolve_cg_file(sid: str, cg_id: str) -> str:
         return ""
     entry = (s.get("assets", {}).get("backgrounds", {}) or {}).get(meta["key"])
     if entry and entry.get("status") == "ready" and entry.get("file"):
-        return entry["file"]
+        return cgbook_mod.save_bridge_image(cg_id, entry["file"])
     return ""
 
 

@@ -796,6 +796,11 @@ select.text-input option { background: #16152a; color: #eceaf6; }
   color: var(--text-dim, #8a87a8); font-size: 13px;
   background: repeating-linear-gradient(45deg, #1d1b32, #1d1b32 12px, #232141 12px, #232141 24px);
 }
+/* 源图已丢失的旧条目（早期版本只登记引用、未落盘，缓存已清理） */
+.cg-pending.lost {
+  color: #d99a9a; font-size: 12.5px;
+  background: repeating-linear-gradient(45deg, #241c22, #241c22 12px, #2c2029 12px, #2c2029 24px);
+}
 .cg-caption {
   padding: 6px 8px; font-size: 12.5px; color: #dcd6ff;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -971,3 +976,23 @@ select.text-input option { background: #16152a; color: #eceaf6; }
 .comfy-row { display: flex; gap: 10px; align-items: center; margin: 6px 0; }
 .debug-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 .tgt-label { flex: 0 0 72px; color: #dcd6ff; font-size: 13px; }
+
+/* ---------- 设置面板：从 GitHub 更新 ---------- */
+.update-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.update-bar-wrap {
+  margin-top: 8px; height: 6px; border-radius: 3px;
+  background: rgba(255, 255, 255, 0.10); overflow: hidden;
+}
+.update-bar-wrap.hidden { display: none; }
+.update-bar {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #7c6cf0, #e58bc0);
+  transition: width .4s ease;
+}
+.update-notes {
+  margin-top: 8px; max-height: 160px; overflow: auto;
+  font-size: 11.5px; line-height: 1.5; color: #c9c5e2;
+  background: rgba(0, 0, 0, 0.25); border-radius: 8px; padding: 8px 10px;
+  white-space: pre-wrap;
+}
+.update-notes.hidden { display: none; }

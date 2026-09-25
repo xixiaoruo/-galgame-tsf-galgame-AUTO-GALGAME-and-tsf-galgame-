@@ -746,6 +746,81 @@ $("btn-add-inject").addEventListener("click", () => {
   renderInjects();
 });
 
+/* ---------- 从 GitHub 更新：检查 / 下载整合包 ---------- */
+
+let updateTimer = null;
+
+function renderUpdateStatus(st) {
+  const hint = $("update-hint");
+  const wrap = $("update-bar-wrap");
+  const bar = $("update-bar");
+  if (!st) return;
+  if (st.progress > 0 && st.status !== "done") {
+    wrap.classList.remove("hidden");
+    bar.style.width = st.progress + "%";
+  } else if (st.status === "done") {
+    wrap.classList.remove("hidden");
+    bar.style.width = "100%";
+  } else {
+    wrap.classList.add("hidden");
+    bar.style.width = "0%";
+  }
+  if (hint) hint.textContent = st.msg || "";
+}
+
+$("btn-update-check").addEventListener("click", async () => {
+  const hint = $("update-hint");
+  hint.textContent = "正在查询 GitHub…";
+  $("btn-update-download").classList.add("hidden");
+  $("update-notes").classList.add("hidden");
+  try {
+    const d = await api("/api/update/check");
+    if (d.error) { hint.textContent = d.error; return; }
+    const cur = d.current ? `v${d.current}` : "未知";
+    if (d.has_update) {
+      hint.textContent = `发现新版本 ${cur} → v${d.latest}`
+        + (d.proxy ? "（下载将走系统代理）" : "");
+      $("btn-update-download").classList.remove("hidden");
+    } else {
+      hint.textContent = `已是最新版本（${cur}）`;
+    }
+    if (d.notes) {
+      const box = $("update-notes");
+      box.textContent = d.notes;
+      box.classList.remove("hidden");
+    }
+  } catch (e) {
+    hint.textContent = "检查失败：" + e.message;
+  }
+});
+
+$("btn-update-download").addEventListener("click", async () => {
+  const hint = $("update-hint");
+  $("btn-update-download").classList.add("hidden");
+  try {
+    await api("/api/update/download", { method: "POST" });
+  } catch (e) {
+    hint.textContent = "启动下载失败：" + e.message;
+    return;
+  }
+  clearInterval(updateTimer);
+  updateTimer = setInterval(async () => {
+    try {
+      const st = await api("/api/update/status");
+      renderUpdateStatus(st);
+      if (st.status === "done") {
+        clearInterval(updateTimer);
+        toast(st.msg, 8000);
+      } else if (st.status === "error") {
+        clearInterval(updateTimer);
+      }
+    } catch (e) {
+      clearInterval(updateTimer);
+      hint.textContent = "进度查询中断：" + e.message;
+    }
+  }, 1200);
+});
+
 $("btn-injects-save").addEventListener("click", async () => {
   try {
     const current = (await api("/api/injects")).injects || [];
@@ -2308,7 +2383,9 @@ async function refreshCgList() {
       card.className = "cg-item" + (it.ready ? "" : " pending");
       const img = it.ready
         ? `<img src="/cg/${escapeHtml(it.file)}?v=${Date.now()}" alt="CG" loading="lazy">`
-        : '<div class="cg-pending">生成中…</div>';
+        : (it.file_lost
+           ? '<div class="cg-pending lost" title="旧版本只登记了引用、没有把图片落盘，缓存已清理，无法找回；删掉这条即可">源图已丢失</div>'
+           : '<div class="cg-pending">生成中…</div>');
       card.innerHTML = `
         ${img}
         <div class="cg-caption">${escapeHtml(it.scene || it.note || "CG")}

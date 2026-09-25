@@ -33,6 +33,7 @@ from app import inject
 from app import library
 from app import plugins as plugins_mod
 from app import story
+from app import updater
 from app import vn
 from app.llm import LLMError
 
@@ -95,7 +96,7 @@ async def _unhandled_exception(request, exc):
     return JSONResponse(status_code=500, content={
         "detail": f"服务器内部错误：{type(exc).__name__}: {exc}"})
 
-GAME_VERSION = "1.7.51"
+GAME_VERSION = "1.7.52"
 
 
 @app.get("/api/version")
@@ -657,6 +658,30 @@ def save_cg(sid: str, payload: CgPayload):
 @app.get("/api/cg")
 def cg_gallery():
     return {"items": cgbook.list_entries(game.resolve_cg_file)}
+
+
+# ---------- 更新：从 GitHub Releases 检查 / 下载新版本 ----------
+
+@app.get("/api/update/check")
+def update_check():
+    """查询仓库最新版本与当前版本对比（不下载）。"""
+    return updater.check()
+
+
+@app.get("/api/update/status")
+def update_status():
+    """下载进度（前端轮询）。"""
+    return updater.status()
+
+
+@app.post("/api/update/download")
+async def update_download():
+    """下载最新整合包到 update/staging，随后由更新脚本应用。"""
+    if updater.status().get("status") in ("checking", "downloading", "extracting"):
+        return updater.status()
+    import asyncio
+    asyncio.get_running_loop().run_in_executor(None, updater.download_and_stage)
+    return {"status": "started", "msg": "已开始下载…"}
 
 
 @app.delete("/api/cg/{cg_id}")
@@ -1267,11 +1292,14 @@ if __name__ == "__main__":
         try:
             _upd = ROOT / "update" / "TSF_Galgame.exe"
             if _upd.is_file():
-                _bat = ROOT / "安装更新.bat"
+                # 1.7.52 起改名为「开发者更新游戏状态.bat」；旧名仍兼容
+                _bat = ROOT / "开发者更新游戏状态.bat"
+                if not _bat.is_file():
+                    _bat = ROOT / "安装更新.bat"
                 print("=" * 46)
                 print("  [UPDATE] 检测到新版本更新包 (update\\TSF_Galgame.exe)")
                 if _bat.is_file():
-                    print("  [UPDATE] 在文件夹中双击「安装更新.bat」即可自动完成更新；")
+                    print(f"  [UPDATE] 在文件夹中双击「{_bat.name}」即可自动完成更新；")
                     print("  [UPDATE] 或者：先点 [X 关闭游戏]，把 update\\ 里的新 exe 覆盖即可")
                 print("  [UPDATE] 进度/档案不会丢失（数据在 D:\\TSF_Galgame_Data）")
                 print("=" * 46)

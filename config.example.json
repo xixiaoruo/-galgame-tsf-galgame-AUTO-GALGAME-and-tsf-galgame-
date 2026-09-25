@@ -1,0 +1,69 @@
+{
+  "llm": {
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "在此填入你的 API Key",
+    "model": "glm-4-flash",
+    "temperature": 0.9
+  },
+  "image": {
+    "provider": "openai",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "在此填入你的 API Key",
+    "model": "cogview-3-flash",
+    "comfy_checkpoint": "",
+    "size": "1024x1024",
+    "negative_prompt": "lowres, bad anatomy, bad hands, watermark, extra digits, blurry",
+    "sd_steps": 25,
+    "sd_cfg": 7,
+    "sd_sampler": "DPM++ 2M",
+    "edge_clean": true,
+    "edge_shrink": 1,
+    "sync_webui": true,
+    "auto_sdxl_styles": true,
+    "cutout_mode": "auto",
+    "model_presets": true,
+    "wai_adapt": true,
+    "stage_style": "auto",
+    "tsf_explicit": false,
+    "tsf_tagger_boost": true,
+    "tsf_plan_llm": true,
+    "vram_mode": "mid",
+    "portrait_quality": "mid",
+    "background_quality": "mid",
+    "cg_quality": "mid",
+    "auto_tune": true,
+    "pink_rim": true,
+    "face_refine": true,
+    "outfit_inpaint": true,
+    "tsf_stage_matcher": true,
+    "hi_res": false,
+    "uniform_keyword_en": "",
+    "uniform_keyword_neg": ""
+  },
+  "game": {
+    "emotions": [
+      "neutral",
+      "happy",
+      "shy",
+      "sad"
+    ],
+    "emotion_cn": {
+      "neutral": "平静自然的表情",
+      "happy": "开心灿烂的笑容，眼睛弯弯，心情愉悦",
+      "shy": "害羞脸红的表情，羞涩地移开视线",
+      "sad": "难过低落的表情，忧郁失落的眼神",
+      "angry": "生气鼓腮的表情，眉头紧锁",
+      "surprised": "惊讶睁大眼睛的表情",
+      "aroused": "面红耳赤、呼吸微乱的情动表情",
+      "flustered": "慌张惊讶、脸颊泛红的表情"
+    },
+    "style_suffix": "日系动漫视觉小说立绘风格，日式精致插画质感，细腻笔触，柔和光影氛围，精美赛璐璐上色，干净线条，全身像，面向镜头，浅灰色纯色背景，高质量",
+    "background_style_suffix": "日系动漫游戏背景插画风格，无人物，精美细腻，高分辨率",
+    "history_rounds": 12,
+    "portrait_update": "stage",
+    "stage_count": 6,
+    "style_mode": "default",
+    "inject_outline": true,
+    "history_max_per_label": 10
+  }
+}

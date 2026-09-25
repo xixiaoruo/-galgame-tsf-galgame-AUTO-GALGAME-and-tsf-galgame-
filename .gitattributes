@@ -1,0 +1,19 @@
+# 换行符与平台无关：提交统一存 LF，检出按平台转换
+* text=auto
+
+# Windows 脚本必须是 CRLF，否则部分环境下会报错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做换行转换，也不在 diff 里展示
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.zip binary
+*.onnx binary
+*.pth binary
+*.safetensors binary

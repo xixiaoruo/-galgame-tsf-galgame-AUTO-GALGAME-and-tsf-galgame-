@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>自动化AI Galgame · 即时物语生成器</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css?v=1.7.49">
+</head>
+<body>
+
+  <!-- ===== 开始界面 ===== -->
+  <section id="setup-screen" class="screen active">
+    <div class="setup-wrap">
+      <h1 class="logo">TSF <span>Galgame</span></h1>
+      <p class="subtitle">大模型 × 绘画 API · 转变之路的即时立绘与互动物语</p>
+      <div class="setup-topbar">
+        <button id="btn-shutdown-setup" class="btn mini ghost danger-text">⨯ 关闭游戏</button>
+      </div>
+      <div class="mode-switch-wrap">
+        <span class="mode-label">模式：</span>
+        <span id="version-tag" class="version-tag"></span>
+        <button id="mode-btn-vn" class="btn ghost mode-btn">♥ 普通 Galgame</button>
+        <button id="mode-btn-tsf" class="btn ghost mode-btn on">♀ TSF Galgame</button>
+        <button id="btn-credits" class="btn ghost mode-btn credits-link">🍰 制作名单</button>
+      </div>
+      <div id="mock-banner" class="mock-banner hidden">
+        当前为<b>演示模式</b>（未配置 API Key）：剧情与立绘使用内置占位内容。
+        <a href="#" id="mock-banner-link">前往配置 →</a>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>① 世界观 / 剧情设定</h2>
+          <button id="btn-random" class="btn ghost" title="让 AI 随机生成一套设定">🎲 随机生成设定</button>
+        </div>
+        <input id="inp-title" class="text-input" placeholder="作品标题（可留空）" maxlength="30">
+        <textarea id="inp-world" class="text-input" rows="4"
+          placeholder="例：现代都市。主角在旧货市场淘到一块古董怀表，从此身体开始悄然改变……"></textarea>
+      </div>
+
+      <div class="panel tsf-panel-setup">
+        <div class="panel-head"><h2 id="prot-head-title">② 主角设定（转变将从 TA 开始）</h2>
+          <button id="btn-lib-pick-prot" class="btn ghost" title="从角色库选择：自动填入主角设定，并直接复用已有立绘">📚 从角色库选</button>
+        </div>
+        <label class="vn-anchor-box hidden" id="vn-anchor-box">
+          <small>主角外貌描述（发色、瞳色、服装、气质，供立绘生成与剧情保持一致）：</small>
+          <input id="vn-anchor" class="text-input" placeholder="如：黑色短发，深色眼瞳，白衬衫" maxlength="200">
+        </label>
+        <div class="prot-grid">
+          <input id="prot-name" class="text-input" placeholder="主角名字" maxlength="12" value="">
+          <select id="prot-hair" class="text-input">
+            <option value="黑色短发">黑发·短发</option>
+            <option value="深棕色中长发">棕发·中长</option>
+            <option value="亚麻色及肩发">亚麻色·及肩</option>
+            <option value="银白色长发">银白·长发</option>
+            <option value="酒红色卷发">酒红·卷发</option>
+          </select>
+          <select id="prot-eyes" class="text-input">
+            <option value="深黑色眼瞳">黑瞳</option>
+            <option value="琥珀色眼瞳">琥珀瞳</option>
+            <option value="灰蓝色眼瞳">灰蓝瞳</option>
+            <option value="翠绿色眼瞳">翠绿瞳</option>
+          </select>
+          <select id="prot-outfit" class="text-input">
+            <option value="日常便装">日常便装</option>
+            <option value="休闲卫衣与牛仔裤">休闲卫衣</option>
+            <option value="通勤衬衫与西装外套">通勤衬衫</option>
+            <option value="奇幻风格的旅行装束">奇幻旅行装</option>
+          </select>
+          <select id="prot-vibe" class="text-input">
+            <option value="沉稳内敛的气质">沉稳内敛</option>
+            <option value="温和带点迟钝的气质">温和迟钝</option>
+            <option value="锐利干练的气质">锐利干练</option>
+            <option value="慵懒随性的气质">慵懒随性</option>
+          </select>
+        </div>
+        <textarea id="prot-extra" class="text-input" rows="2"
+          placeholder="外貌补充（可选：身高、体型、佩戴物等，会并入外貌锚点保持各阶段立绘一致）"></textarea>
+        <div class="anchor-preview">
+          <small>外貌锚点（注入各阶段立绘与剧情提示词，保证角色一致性）：</small>
+          <div id="anchor-text" class="anchor-text"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>③ 其他角色（0~4 个，可留空）</h2>
+          <span>
+            <button id="btn-add-char" class="btn ghost">＋ 添加角色</button>
+            <button id="btn-lib-pick-npc" class="btn ghost" title="从角色库导入：自动填入角色卡，并直接复用已有立绘">📚 从角色库导入</button>
+          </span>
+        </div>
+        <div id="char-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>④ 故事书（世界规则与设定，注入 AI 提示词）</h2>
+          <button id="btn-add-lore" class="btn ghost">＋ 添加条目</button>
+        </div>
+        <p class="hint-line">「常驻」条目每轮注入；带关键词的条目仅在近期剧情命中关键词时注入（节省 token）。可用来固定世界规则、伏笔、人物秘密。</p>
+        <div id="lore-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>④ 状态栏自定义（开局前编辑）</h2>
+          <span>
+            <button id="btn-stat-reset" class="btn ghost" title="恢复为本模式的默认状态">↺ 恢复默认</button>
+          </span>
+        </div>
+        <p class="hint-line">默认状态随模式不同（TSF：同化率/体质/感官/性征/洗脑/堕落度；普通：心情/好感/性敏感/高潮度）。
+          可改名、改初始值、删除内置状态，或直接「＋ 添加状态」自定义新状态（如「节操」）；
+          TSF 的「性别同化率」锁定不可删（阶段演化的核心）。自定义状态由剧情驱动、实时显示在游戏状态栏。</p>
+        <div id="stat-editor-list"></div>
+        <div class="directive-add">
+          <button id="btn-stat-add" class="btn ghost">＋ 添加状态</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>④ 制服设定（本局所有角色统一）</h2>
+        </div>
+        <p class="hint-line">填写的制服关键词会应用到<b>本局所有角色</b>的立绘（每局独立保存，别的局/存档互不干扰）；留空 = 使用全局设置中的制服词。</p>
+        <label>本局制服关键词（英文，逗号分隔）
+          <input id="uniform-en" class="text-input" placeholder="如：navy sailor uniform, white blouse, pleated skirt, ribbon tie, knee-high socks" maxlength="200">
+        </label>
+        <label>本局制服负面词（可选，压制非制服）
+          <input id="uniform-neg" class="text-input" placeholder="如：casual clothes, civilian dress, streetwear, jeans, t-shirt" maxlength="200">
+        </label>
+      </div>
+
+      <div class="panel" id="tsf-target-panel" style="display:none">
+        <div class="panel-head">
+          <h2>🎯 男主最终变化样式（开局预置转变目标）</h2>
+        </div>
+        <p class="hint-line">预置「转变目标」——立绘随同化率<b>渐变</b>靠近该样式（低进度仍男性/中性，高进度完全呈现）；不选 = 内置主线（男→娇小男→中性→少女→终形）。</p>
+        <div class="rating-grid">
+          <label>身材（最终形态）
+            <select id="tsf-target-build" class="text-input">
+              <option value="" selected>维持（内置路线）</option>
+              <option value="萝莉">萝莉（娇小幼态）</option>
+              <option value="少女">少女（纤细匀称）</option>
+              <option value="熟女">熟女（成熟风情）</option>
+              <option value="娇小幼态">娇小幼态（更小更萌）</option>
+              <option value="纤细均称">纤细均称</option>
+              <option value="丰盈曲线">丰盈曲线</option>
+              <option value="高挑苗条">高挑苗条</option>
+            </select>
+          </label>
+          <label>胸部大小
+            <select id="tsf-target-chest" class="text-input">
+              <option value="" selected>维持</option>
+              <option value="小巧">小巧</option>
+              <option value="适中">适中</option>
+              <option value="丰满">丰满（柔和曲线）</option>
+            </select>
+          </label>
+          <label>瞳色（最终）
+            <select id="tsf-target-eye" class="text-input">
+              <option value="" selected>维持</option>
+              <option value="黑色">黑色</option>
+              <option value="蓝色">蓝色</option>
+              <option value="紫色">紫色</option>
+              <option value="红色">红色</option>
+              <option value="金色">金色</option>
+              <option value="绿色">绿色</option>
+              <option value="银色">银色</option>
+            </select>
+          </label>
+          <label>发色（最终）
+            <select id="tsf-target-hair-color" class="text-input">
+              <option value="维持原色" selected>维持原色</option>
+              <option value="黑色">黑色</option>
+              <option value="银白色">银白色</option>
+              <option value="金色">金色</option>
+              <option value="棕色">棕色</option>
+              <option value="紫色">紫色</option>
+              <option value="粉色">粉色</option>
+              <option value="蓝色">蓝色</option>
+            </select>
+          </label>
+          <label>最终衣物
+            <select id="tsf-target-clothes" class="text-input">
+              <option value="" selected>维持</option>
+              <option value="白衬衫黑长裤">白衬衫黑长裤</option>
+              <option value="白色连衣裙">白色连衣裙</option>
+              <option value="学园制服">学园制服</option>
+              <option value="蕾丝裙装">蕾丝裙装</option>
+              <option value="便装卫衣">便装卫衣</option>
+            </select>
+          </label>
+          <label>气质（最终，可选）
+            <input id="tsf-target-aura" class="text-input" placeholder="如：软萌温婉的少女气质" maxlength="60">
+          </label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⑤ 内容分级（全年龄为默认安全档）</h2>
+        </div>
+        <div class="rating-grid">
+          <label>年龄分段
+            <select id="inp-rating" class="text-input">
+              <option value="all">全年龄（保守档，需手动选择）</option>
+              <option value="16">16+ 成人向氛围</option>
+              <option value="18" selected>18+ 成人向（默认，全解锁）</option>
+            </select>
+          </label>
+          <label class="rating-r18">
+            <input type="checkbox" id="inp-r18" checked>
+            开启 R18 情节（默认开启，勾选即解锁所有成人向内容）
+          </label>
+          <label class="rating-r18">
+            <input type="checkbox" id="inp-forced" checked>
+            允许强制 / 支配向情节（强吻、强行拥抱、侵犯等，虚构成年角色间）
+          </label>
+        </div>
+        <p class="hint-line">默认即为 18+ 全解锁；若想保守，可手动切到全年龄档。</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⑥ 固定话语（可选，每行一条，游戏内可随时说）</h2>
+        </div>
+        <p class="hint-line">角色不在场时画面只显示在场者；固定话语会作为选项之外的快捷发言按钮出现在选项上方。</p>
+        <textarea id="inp-catchphrases" class="text-input" rows="3"
+          placeholder="「我想看看怀表上的铭文」&#10;「别碰那只表」&#10;（每行一条，最多 5 条）"></textarea>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⑥ 故事大纲（可选，注入后 AI 按此脉络推进剧情）</h2>
+          <span>
+            <button id="btn-outline" class="btn ghost">🤖 用 AI 生成大纲</button>
+            <button id="btn-clear-outline" class="btn ghost">✕ 清空</button>
+          </span>
+        </div>
+        <textarea id="inp-outline" class="text-input" rows="5"
+          placeholder="可点右上按钮让 AI 根据世界观生成大纲，也可手动输入；留空则 AI 自由发挥。生成后可自由编辑。"></textarea>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⑥ AI 指令注入（文风 / 限度，可多选）</h2>
+        </div>
+        <p class="hint-line">勾选的指令将注入每一轮剧情生成；开局后可随时在游戏顶栏「⚡ 指令」中调整。立绘与背景的画面区分指令已内置，无需在此配置。</p>
+        <div id="preset-grid" class="preset-grid"></div>
+        <div class="directive-add">
+          <input id="preset-new" class="text-input" placeholder="自定义指令，如：多用比喻，文风更文艺…" maxlength="200">
+          <button id="btn-add-preset" class="btn ghost">＋ 添加</button>
+        </div>
+        <div id="preset-custom-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⑦ 设定档案（保存全部开局选项，下次一键使用）</h2>
+        </div>
+        <div class="preset-save-row">
+          <input id="setup-save-name" class="text-input" placeholder="档案名（如：雨夜怀表局）" maxlength="30">
+          <button id="btn-save-setup" class="btn ghost">📥 保存当前设定</button>
+        </div>
+        <div class="preset-load-row">
+          <select id="setup-load-select" class="text-input"></select>
+          <button id="btn-load-setup" class="btn ghost">📂 读取并覆盖</button>
+          <button id="btn-play-setup" class="btn ghost">▶ 用此档案直接开局</button>
+          <button id="btn-delete-setup" class="btn ghost">✕</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⑧ 我的存档（跨会话保存，可随时读取继续游戏）</h2>
+          <button id="btn-archives-setup" class="btn ghost" title="把整局（剧情+立绘+背景+历史）打包为 zip 档案，可分享/再导入继续玩">📦 对局归档</button>
+        </div>
+        <p class="hint-line">存档保存在游戏专属数据目录（更新或移动游戏都不会丢失；无 D 盘时会自动使用系统用户数据目录）。</p>
+        <div id="slot-list-setup" class="slot-list"></div>
+      </div>
+
+      <div class="setup-actions">
+        <button id="btn-open-settings" class="btn ghost">⚙ API 设置</button>
+        <button id="btn-start" class="btn primary big">▶ 开始游戏</button>
+      </div>
+    </div>
+    <footer class="credits-foot">
+      <button id="btn-credits" class="credits-btn">🍰 制作名单</button>
+    </footer>
+  </section>
+
+  <!-- ===== 制作名单弹窗 ===== -->
+  <div id="modal-credits" class="modal hidden">
+    <div class="modal-box credits-box">
+      <h2>🍰 制作名单</h2>
+      <div class="credits-list">
+        <div class="credits-item"><span class="credits-role">制作</span><span class="credits-name">希小若</span></div>
+        <div class="credits-item"><span class="credits-role">特别感谢</span><span class="credits-name">DeepSeek · GLM-5.3（作为程序员）</span></div>
+      </div>
+      <div class="modal-actions">
+        <span class="hint">感谢游玩</span>
+        <button id="btn-credits-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 游戏界面 ===== -->
+  <section id="game-screen" class="screen">
+    <div id="bg-layer" class="bg-layer"></div>
+    <div id="cg-layer" class="cg-layer hidden"></div>
+    <div id="bg-veil" class="bg-veil"></div>
+
+    <div id="top-bar" class="top-bar">
+      <button id="btn-shutdown" class="btn mini ghost danger-text" title="关闭游戏全部窗口与服务">⨯ 关闭游戏</button>
+      <span id="game-title" class="game-title"></span>
+      <span id="mock-badge" class="mock-badge hidden">演示模式（内置剧情·未配置对话API）</span>
+      <span class="top-actions">
+        <button id="btn-credits-game" class="btn mini ghost">🍰 制作名单</button>
+        <button id="btn-command" class="btn mini ghost">⚡ 命令</button>
+        <button id="btn-outfit" class="btn mini ghost">👗 换装</button>
+        <button id="btn-save-cg" class="btn mini ghost">📷 存为CG</button>
+        <button id="btn-cg-refresh" class="btn mini ghost" title="重新生成当前幕的桥段 CG（旧图保留）">🔄 刷新CG</button>
+        <button id="btn-cg" class="btn mini ghost">🎨 CG回廊</button>
+        <button id="btn-history" class="btn mini ghost">📜 历史</button>
+        <button id="btn-directives" class="btn mini ghost">⚡ 指令</button>
+        <button id="btn-context-reset" class="btn mini ghost" title="长局剧情压缩为前情提要并重置 AI 上下文（保留最近 6 幕；尺度语境不丢，AI 回到更开放的写作状态）">🧠 压缩上下文</button>
+        <button id="btn-save" class="btn mini ghost">💾 存档</button>
+        <button id="btn-load" class="btn mini ghost">📂 读档</button>
+        <button id="btn-fastforward" class="btn mini ghost">⏩ 快进</button>
+        <button id="btn-scene-mgr" class="btn mini ghost" title="读取/更换场景：进入已有场景或重生成当前场景背景">🌄 读取场景</button>
+        <button id="btn-settings-game" class="btn mini ghost">⚙ 设置</button>
+        <button id="btn-exit" class="btn mini ghost">↩ 重新开始</button>
+      </span>
+    </div>
+
+    <!-- 立绘生成提示横幅 -->
+    <div id="gen-banner" class="gen-banner hidden">🎨 立绘生成中，请稍等…</div>
+
+    <!-- TSF 状态框（可收起/调出） -->
+    <div id="tsf-panel" class="tsf-panel">
+      <div class="tsf-head">
+        <span>◈ 主角状态</span>
+        <button id="tsf-collapse" class="btn mini ghost" title="收起状态框">—</button>
+      </div>
+      <div class="tsf-body">
+        <div class="tsf-identity">
+          <small class="tsf-identity-label">目前身份</small>
+          <div id="tsf-identity-text"></div>
+          <div id="tsf-stage-name" class="tsf-stage-name"></div>
+        </div>
+        <div id="tsf-bars"></div>
+        <div id="tsf-stage-desc" class="tsf-stage-desc"></div>
+        <div class="tsf-foot">
+          <button id="btn-regen-prot" class="btn mini ghost" title="重置并重新生成主角当前立绘">🔄 重画主角立绘</button>
+          <button id="btn-tsf-target" class="btn mini ghost" title="设定主角转变的目标形态（体型/头发/发色等），保存后立即按新目标重画">🎯 转变目标</button>
+          <button id="btn-regen-all" class="btn mini ghost" title="重画全场立绘：主角当前阶段 + 所有 NPC 全部表情">🔁 重画全部立绘</button>
+          <button id="btn-prot-hist" class="btn mini ghost" title="查看主角/角色立绘的完整变化过程（旧版保留可回看）">📚 立绘历程</button>
+          <button id="btn-reload-assets" class="btn mini ghost" title="立绘不显示时点此：重新读取并校正本局全部立绘">🔄 重新读取立绘</button>
+          <button id="btn-recut" class="btn mini ghost" title="按当前抠图标准重新抠图（可指定角色/多方案）">🎨 重新抠图</button>
+          <button id="btn-restore-raw" class="btn mini ghost" title="还原为去除背景之前的原始立绘">↩ 还原原图</button>
+          <button id="btn-open-folder" class="btn mini ghost">📁 打开立绘文件夹</button>
+          <button id="btn-export" class="btn mini ghost" title="导出为修图软件友好的目录（透明PNG+白底JPG+清单）">📤 导出立绘</button>
+          <button id="btn-library" class="btn mini ghost" title="把角色立绘与设定导入「角色库」文件夹，可观看与二次利用">📚 角色库</button>
+        </div>
+      </div>
+    </div>
+    <button id="tsf-tab" class="tsf-tab hidden">◈ 状态 ▸</button>
+
+    <!-- 普通 Galgame 模式状态面板（右侧：心情 / 好感 / 性敏感 / 高潮度） -->
+    <div id="vn-panel" class="vn-panel hidden">
+      <div class="tsf-head">
+        <span>◈ 心情 · 状态</span>
+        <button id="vn-collapse" class="btn mini ghost" title="收起状态框">—</button>
+      </div>
+      <div class="tsf-body">
+        <div id="vn-bars"></div>
+        <div class="tsf-foot">
+          <button id="btn-vn-regen-prot" class="btn mini ghost" title="重画主角立绘（可描述需求）">🔄 重画主角立绘</button>
+          <button id="btn-vn-regen" class="btn mini ghost" title="重画全场角色立绘">🔁 重画全部立绘</button>
+          <button id="btn-vn-prot-hist" class="btn mini ghost" title="查看主角/角色立绘的完整变化过程（旧版保留可回看）">📚 立绘历程</button>
+          <button id="btn-vn-reload-assets" class="btn mini ghost" title="立绘不显示时点此：重新读取并校正本局全部立绘">🔄 重新读取立绘</button>
+          <button id="btn-vn-recut" class="btn mini ghost" title="按当前抠图标准重新抠图（可指定角色/多方案）">🎨 重新抠图</button>
+          <button id="btn-vn-restore-raw" class="btn mini ghost" title="还原为去除背景之前的原始立绘">↩ 还原原图</button>
+          <button id="btn-vn-open-folder" class="btn mini ghost">📁 打开立绘文件夹</button>
+          <button id="btn-vn-export" class="btn mini ghost" title="导出为修图软件友好的目录（透明PNG+白底JPG+清单）">📤 导出立绘</button>
+          <button id="btn-vn-library" class="btn mini ghost" title="把角色立绘与设定导入「角色库」文件夹，可观看与二次利用">📚 角色库</button>
+        </div>
+      </div>
+    </div>
+    <button id="vn-tab" class="tsf-tab hidden">◈ 状态 ▸</button>
+
+    <div id="sprite-layer" class="sprite-layer"></div>
+
+    <div id="scene-tag" class="scene-tag"></div>
+
+    <div id="dialog-box" class="dialog-box">
+      <div id="name-tag" class="name-tag hidden"></div>
+      <div id="dialog-text" class="dialog-text"></div>
+      <div id="next-hint" class="next-hint hidden">▼</div>
+    </div>
+
+    <div id="choices-wrap" class="choices-wrap hidden"></div>
+    <div id="catchphrase-bar" class="catchphrase-bar hidden"></div>
+
+    <div id="stageup-overlay" class="stageup-overlay hidden">
+      <div class="stageup-flash"></div>
+      <div class="stageup-text" id="stageup-text"></div>
+    </div>
+
+    <div id="loading-overlay" class="loading-overlay hidden">
+      <div class="spinner"></div>
+      <div id="loading-text">正在书写剧情……</div>
+    </div>
+  </section>
+
+  <!-- ===== 设置弹窗 ===== -->
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <button id="btn-settings-exit" class="btn mini ghost" title="退出设置（Esc）">✕ 退出设置</button>
+        <h2>⚙ API 设置（OpenAI 兼容接口）</h2>
+      </div>
+      <div class="config-section">
+        <h3>对话 / 剧情生成（Chat Completions）</h3>
+        <div id="cfg-llm-status" class="model-info"></div>
+        <label>Base URL<input id="cfg-llm-url" class="text-input" placeholder="https://api.deepseek.com/v1"></label>
+        <label>API Key<input id="cfg-llm-key" class="text-input" placeholder="sk-...（保存时不显示已存 Key，留空=不修改）"></label>
+        <label>模型名<input id="cfg-llm-model" class="text-input" placeholder="deepseek-chat / glm-4-flash / gpt-4o-mini"></label>
+      </div>
+      <div class="config-section">
+        <h3>内容分级（下一幕生效，默认 18+ 全解锁）</h3>
+        <label>年龄分段
+          <select id="inp-rating-game" class="text-input">
+            <option value="all">全年龄（保守档）</option>
+            <option value="16">16+ 成人向氛围</option>
+            <option value="18" selected>18+ 成人向（默认，全解锁）</option>
+          </select>
+        </label>
+        <label class="rating-r18"><input type="checkbox" id="inp-r18-game" checked> 开启 R18 情节（默认开启）</label>
+        <label>成人向强度（默认浓烈 = 允许充分展开的性爱场面）
+          <select id="cfg-adult-intensity" class="text-input">
+            <option value="温和">温和 · 含蓄亲密氛围</option>
+            <option value="成熟">成熟 · 细腻情感尺度</option>
+            <option value="浓烈" selected>浓烈 · 强烈张力与身体亲密（默认）</option>
+          </select>
+        </label>
+        <label class="rating-r18">
+          <input type="checkbox" id="cfg-forced" checked>
+          允许强制 / 支配向情节（强吻、强行拥抱、侵犯等，虚构成年角色间）
+        </label>
+        <label><input type="checkbox" id="cfg-inject-outline" checked> 注入故事大纲（关闭后剧情自由发挥，不被旧大纲污染）</label>
+      </div>
+      <div class="config-section">
+        <h3>立绘 / 背景生成</h3>
+        <label>服务类型
+          <select id="cfg-img-provider" class="text-input">
+            <option value="openai">OpenAI 兼容（云端 API）</option>
+            <option value="sdwebui">SD WebUI（本地整合包，无需 Key）</option>
+            <option value="comfyui">ComfyUI（本地节点流，无需 Key）</option>
+          </select>
+        </label>
+        <label>Base URL<input id="cfg-img-url" class="text-input" placeholder="云端：https://open.bigmodel.cn/api/paas/v4 ｜ 本地SD：http://127.0.0.1:7860 ｜ 本地Comfy：http://127.0.0.1:8188"></label>
+        <label>API Key（SD WebUI / ComfyUI 留空）<input id="cfg-img-key" class="text-input" placeholder="sk-..."></label>
+        <label>模型名（SD WebUI 忽略，ComfyUI 留空=自动取第一个）<input id="cfg-img-model" class="text-input" placeholder="cogview-3-flash / dall-e-3"></label>
+        <div id="cfg-img-comfy-row" class="hidden">
+          <div class="comfy-row">
+            <button id="btn-comfy-scan" class="btn ghost">🔌 自动探测并连接桌面端</button>
+            <button id="btn-comfy-launch" class="btn ghost hidden">🚀 启动桌面端程序</button>
+          </div>
+          <span id="comfy-status" class="hint"></span>
+          <label>Comfy 模型（留空=自动取第一个可用模型）
+            <select id="cfg-img-comfy-ckpt" class="text-input">
+              <option value="">（自动）</option>
+            </select>
+          </label>
+        </div>
+        <label>尺寸（OpenAI 用）<input id="cfg-img-size" class="text-input" placeholder="1024x1024"></label>
+        <label class="rating-r18">
+          <input type="checkbox" id="cfg-img-hires">
+          超高清（Hi-Res，仅 OpenAI 线：基准尺寸×2，上限约 4.6MP——Seedream 5.0 Pro 实测支持）
+        </label>
+        <label>负面提示词（SD WebUI 用）<input id="cfg-img-neg" class="text-input" placeholder="lowres, bad anatomy, bad hands, blurry"></label>
+        <div id="cfg-model-info" class="model-info"></div>
+      </div>
+      <div class="config-section">
+        <h3>立绘生成选项</h3>
+        <label>抠图标准
+          <select id="cfg-cutout-mode" class="text-input">
+            <option value="ai" selected>AI 智能抠图（rembg，推荐）</option>
+            <option value="auto">保守自动（保配件优先）</option>
+            <option value="precise">严格（最强去背景）</option>
+            <option value="standard">标准（速度均衡）</option>
+            <option value="fast">快速（最简白底抠图）</option>
+          </select>
+        </label>
+        <label>角色立绘质量
+          <select id="cfg-portrait-quality" class="text-input">
+            <option value="low">低 · 快速出图（512×768 · 省显存）</option>
+            <option value="mid" selected>中 · 均衡（768×1344 · 默认）</option>
+            <option value="high">高 · 精细（1024×1760 · 满步数）</option>
+          </select>
+        </label>
+        <label>背景质量
+          <select id="cfg-bg-quality" class="text-input">
+            <option value="low">低 · 快速（640×448）</option>
+            <option value="mid" selected>中 · 均衡（768×512 · 默认）</option>
+            <option value="high">高 · 精细（1024×640）</option>
+          </select>
+        </label>
+        <label>CG 质量（事件 CG · 16:9 宽幅大图）
+          <select id="cfg-cg-quality" class="text-input">
+            <option value="low">低 · 快速（768×432）</option>
+            <option value="mid" selected>中 · 均衡（1152×648 · 默认）</option>
+            <option value="high">高 · 精细（1536×864）</option>
+          </select>
+        </label>
+        <label>主角立绘更新频率
+          <select id="cfg-portrait-update" class="text-input">
+            <option value="stage">仅阶段跃迁时（默认）</option>
+            <option value="every10">同化率每跨 10%</option>
+            <option value="every_turn">每一轮都更新</option>
+          </select>
+        </label>
+        <label>立绘风格
+          <select id="cfg-style-mode" class="text-input">
+            <option value="default">默认风格</option>
+            <option value="cinematic">电影风格</option>
+          </select>
+        </label>
+        <label>wai 模型特适配（1.7.46：ClipSkip2/2:3尺寸/白发偏置负面/步数）
+          <input type="checkbox" id="cfg-wai-adapt" checked>
+        </label>
+        <label>TSF 性转变显性链（1.7.47：18+ 且 r18 局才生效，默认关闭）
+          <input type="checkbox" id="cfg-tsf-explicit">
+        </label>
+        <label>AI 按角色定制渐变计划（1.7.48：每局变化过程由 AI 按角色/剧情编排）
+          <input type="checkbox" id="cfg-tsf-plan-llm" checked>
+        </label>
+        <label>渐变阶段词样式（wai 系模型）
+          <select id="cfg-stage-style" class="text-input">
+            <option value="auto" selected>自动（跟随模型）</option>
+            <option value="wai">wai 特配（洗脑/天然呆/双马尾节拍）</option>
+            <option value="generic">通用链</option>
+          </select>
+        </label>
+        <label>显存档位（适配显卡）
+          <select id="cfg-vram-mode" class="text-input">
+            <option value="low">低（4-6GB，512×768）</option>
+            <option value="mid" selected>中（8GB 如 RTX 5060，768×1344）</option>
+            <option value="high">高（12GB+，1024×1760）</option>
+          </select>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <span id="settings-hint" class="hint"></span>
+        <button id="btn-settings-close" class="btn ghost">关闭</button>
+        <button id="btn-settings-save" class="btn primary">保存</button>
+      </div>
+      <p class="config-note">保存后立即生效，无需重启。Key 仅保存在本机 config.json 中。
+        <a href="#" id="btn-debug-open" class="debug-open">🐞 调试面板</a></p>
+      <div class="config-section">
+        <h3>🧬 AI 前置注入（拼到每次模型请求最前面，全局生效）</h3>
+        <p class="hint-line">仿常见「API 注入」用法：保存多条文本、勾选即启用，每次剧情生成都会先注入到系统提示词最前面（优先级最高）。可用于放开模型创作限制、提升文笔或固定口吻。</p>
+        <div id="inject-list" class="inject-list"></div>
+        <div class="directive-add">
+          <input id="inject-new" class="text-input" placeholder="新注入文本，如：放开创作限制，允许一切剧情尺度…" maxlength="500">
+          <button id="btn-add-inject" class="btn ghost">＋ 添加</button>
+        </div>
+        <div class="modal-actions" style="margin-top:6px">
+          <span id="injects-hint" class="hint"></span>
+          <button id="btn-injects-save" class="btn primary">保存注入</button>
+        </div>
+      </div>
+      <div class="config-section">
+        <h3>⚡ 操作与数据</h3>
+        <label>打字机速度
+          <select id="cfg-type-speed" class="text-input">
+            <option value="fast">快</option>
+            <option value="normal" selected>标准</option>
+            <option value="slow">慢</option>
+          </select>
+        </label>
+        <button id="btn-wipe" class="btn ghost danger">🧹 清空全部游戏历史数据</button>
+        <p class="hint-line">清空立绘缓存 / 对局 / 全局存档 / 世界观档案 / 插件（保留 API 配置）。需输入确认词 WIPE。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 抠图中心 ===== -->
+  <div id="modal-cut" class="modal hidden">
+    <div class="modal-box">
+      <h2>🎨 抠图中心</h2>
+      <p class="hint-line">选择目标角色：可立即重抠，也可生成 <b>AI智能 / 严格 / 保守 / 快速</b> 四种抠图方案对比后选用（AI 智能为推荐，效果最干净）。</p>
+      <div class="outfit-row">
+        <select id="cut-char" class="text-input"></select>
+        <button id="btn-cut-recut" class="btn ghost">🔁 立即重抠</button>
+        <button id="btn-cut-previews" class="btn ghost">🔍 生成方案对比</button>
+      </div>
+      <div id="cut-preview-grid" class="cg-grid"></div>
+      <div class="modal-actions">
+        <span id="cut-hint" class="hint"></span>
+        <button id="btn-cut-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 重画立绘弹窗 ===== -->
+  <div id="modal-regen" class="modal hidden">
+    <div class="modal-box">
+      <h2>🔄 重画立绘 <span class="tag">可描述需求</span></h2>
+      <div class="outfit-row">
+        <select id="regen-char" class="text-input"></select>
+      </div>
+      <label style="display:block;color:var(--text-dim);font-size:12.5px;margin:8px 0 4px">
+        重画需求（可留空，将翻译为英文关键词注入生图提示词）
+      </label>
+      <textarea id="regen-note" class="text-input" rows="3"
+        maxlength="200" placeholder="例：更女性化的面容 / 去掉眼镜 / 要开心的表情 / 头发更长 / 更精致的头部细节"></textarea>
+      <label id="regen-initial-row" class="regen-initial hidden" title="以主角初始（阶段1）立绘为底图，按当前同化率重建当前阶段立绘；提示词由 AI 按同化率自动描写">
+        <input type="checkbox" id="regen-use-initial">
+        🔁 参考主角目前同化率重新生成（以主角初始立绘为参考）
+      </label>
+      <div id="regen-chips" class="cmd-actions"></div>
+      <div class="modal-actions">
+        <span id="regen-hint" class="hint"></span>
+        <button id="btn-regen-cancel" class="btn ghost">取消</button>
+        <button id="btn-regen-go" class="btn primary">🔄 开始重画</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 立绘历程弹窗 ===== -->
+  <div id="modal-prot-hist" class="modal hidden">
+    <div class="modal-box tall">
+      <h2>📚 立绘历程 <span class="tag">旧版全部保留</span></h2>
+      <p class="hint-line">角色立绘的完整变化过程（每次重画/阶段跃迁/换装的旧版都会保留；点图放大查看；
+        旧版卡片「⚡ 立刻使用」= 立即把这张图固定为舞台显示（无视当前阶段/表情/服装）；
+        「↩ 还原」= 只恢复为该标签的当前版；主角条目标注当时的同化率）。</p>
+      <div id="prot-hist-pinbar" class="pinbar hidden"></div>
+      <div id="prot-hist-grid" class="cg-grid"></div>
+      <div class="modal-actions">
+        <span id="prot-hist-hint" class="hint"></span>
+        <span class="pager">
+          <button id="btn-phist-prev" class="btn mini ghost">‹ 上一页</button>
+          <span id="phist-page" class="hint"></span>
+          <button id="btn-phist-next" class="btn mini ghost">下一页 ›</button>
+        </span>
+        <button id="btn-prot-hist-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 指令注入弹窗 ===== -->
+  <div id="modal-directives" class="modal hidden">
+    <div class="modal-box">
+      <h2>⚡ 指令注入 / 提示词</h2>
+      <p class="hint-line">勾选的指令会注入每一轮剧情生成的提示词，保存后<b>下一幕生效</b>；可多选，也可添加自定义指令。</p>
+      <div id="directive-list" class="directive-list"></div>
+      <div class="directive-add">
+        <input id="directive-new" class="text-input" placeholder="自定义指令，如：多用比喻，文风更文艺…" maxlength="200">
+        <button id="btn-add-directive" class="btn ghost">＋ 添加</button>
+      </div>
+      <div class="modal-actions">
+        <span id="directives-hint" class="hint"></span>
+        <button id="btn-directives-close" class="btn ghost">取消</button>
+        <button id="btn-directives-save" class="btn primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 隐藏 Debug 面板（F10 或 ?debug=1 呼出） ===== -->
+  <div id="modal-debug" class="modal hidden">
+    <div class="modal-box">
+      <h2>🐞 Debug 面板 <span class="tag">隐藏功能</span></h2>
+      <div class="debug-grid">
+        <button class="btn ghost" id="dbg-next-stage">▶ 直接进入下一阶段</button>
+        <button class="btn ghost" id="dbg-stat-add">📈 同化率 +25</button>
+        <button class="btn ghost" id="dbg-regen">🔄 重画全部立绘</button>
+      </div>
+      <div class="debug-row">
+        <input id="dbg-stat-key" class="text-input" placeholder="数值名(progress/physique/acuity/genital/habit/immersion)" value="progress">
+        <input id="dbg-stat-val" class="text-input" placeholder="0~100" value="50">
+        <button class="btn ghost" id="dbg-stat-set">设置</button>
+      </div>
+      <div class="debug-row">
+        <input id="dbg-outfit-char" class="text-input" placeholder="角色名(空=主角)">
+        <input id="dbg-outfit-name" class="text-input" placeholder="服饰(如：晚礼服/制服)">
+        <button class="btn ghost" id="dbg-outfit-go">强制换装差分</button>
+      </div>
+      <div class="debug-row">
+        <button class="btn ghost" id="dbg-scenes">🗺 场景清单（复用背景调试）</button>
+      </div>
+      <div id="debug-scene-list" class="debug-scene-list"></div>
+      <div class="modal-actions">
+        <span id="debug-hint" class="hint"></span>
+        <button id="btn-debug-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 主角转变目标设定弹窗（1.7.16） ===== -->
+  <div id="modal-tsf-target" class="modal hidden">
+    <div class="modal-box">
+      <h2>🎯 主角转变目标 <span class="tag">仅本局主角</span></h2>
+      <p class="hint-line">设定主角转变的<b>目标形态</b>（体型/头发/发色/气质）；保存后立即按新目标
+        重画主角当前阶段立绘。转变流程已放开女性特征限制（只压制男性特征），变化更明显；NPC 不受任何影响。</p>
+      <div class="debug-row">
+        <label class="tgt-label">目标发型</label>
+        <select id="tsf-t-hair" class="text-input">
+          <option value="维持">维持当前</option>
+          <option value="短发">短发</option>
+          <option value="及肩长发">及肩长发</option>
+          <option value="长发披肩">长发披肩</option>
+          <option value="及腰长发">及腰长发</option>
+        </select>
+      </div>
+      <div class="debug-row">
+        <label class="tgt-label">目标体型</label>
+        <select id="tsf-t-build" class="text-input">
+          <option value="维持">维持当前</option>
+          <option value="纤细均称">纤细均称</option>
+          <option value="丰盈曲线">丰盈曲线</option>
+          <option value="高挑苗条">高挑苗条</option>
+          <option value="娇小幼态">娇小幼态（萝莉化）</option>
+        </select>
+      </div>
+      <div class="debug-row">
+        <label class="tgt-label">目标发色</label>
+        <input id="tsf-t-haircolor" class="text-input" style="flex:1"
+               placeholder="如：银白色长发（仅未勾选「保持原色」时生效）">
+      </div>
+      <div class="debug-row">
+        <label class="tgt-label">目标气质</label>
+        <input id="tsf-t-aura" class="text-input" style="flex:1"
+               placeholder="如：温婉优雅 / 元气 / 清冷">
+      </div>
+      <label class="debug-row" style="gap:6px">
+        <input type="checkbox" id="tsf-t-keepcolor" checked>
+        <span>发色保持原色（不勾选则用目标发色替代）</span>
+      </label>
+      <div class="modal-actions">
+        <span id="tsf-target-hint" class="hint"></span>
+        <button class="btn ghost" id="btn-tsf-target-close">关闭</button>
+        <button class="btn" id="btn-tsf-target-save">✔ 保存并重画</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 命令弹窗 ===== -->
+  <div id="modal-command" class="modal hidden">
+    <div class="modal-box">
+      <h2>⚡ 命令面板</h2>
+      <p class="hint-line">选择目标角色与命令：更衣立即生效（立绘按新服装重新生成），
+        强制动作与更衣场面<b>自动收藏为 CG</b>。激烈命令需在设置中开启 18+ R18 与「允许强制/支配向」。</p>
+      <div id="cmd-char-row" class="cmd-row"></div>
+      <div id="cmd-actions" class="cmd-actions"></div>
+      <div class="modal-actions">
+        <span id="cmd-hint" class="hint"></span>
+        <button id="btn-command-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 换装弹窗 ===== -->
+  <div id="modal-outfit" class="modal hidden">
+    <div class="modal-box">
+      <h2>👗 换装</h2>
+      <p class="hint-line">先点选服装（或输入自定义服饰），再按「✔ 确定换装」立即生效；立绘后台重新生成，剧情描写也会同步。</p>
+      <div class="outfit-row">
+        <select id="outfit-char" class="text-input"></select>
+        <input id="outfit-preset" class="text-input" placeholder="或自定义服饰（如：晚礼服）" maxlength="40">
+      </div>
+      <div id="outfit-presets" class="cmd-actions"></div>
+      <div class="modal-actions">
+        <span id="outfit-hint" class="hint"></span>
+        <button id="btn-outfit-apply" class="btn primary">✔ 确定换装</button>
+        <button id="btn-outfit-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CG 回廊 ===== -->
+  <div id="modal-cg" class="modal hidden">
+    <div class="modal-box tall">
+      <h2>🎨 CG 回廊 <span class="tag">跨会话保存</span></h2>
+      <div id="cg-list" class="cg-grid"></div>
+      <div class="modal-actions">
+        <span id="cg-hint" class="hint"></span>
+        <button id="btn-cg-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CG 大图 ===== -->
+  <div id="modal-cg-view" class="modal hidden">
+    <div class="cg-view-box">
+      <img id="cg-view-img" alt="CG">
+      <div class="modal-actions">
+        <span id="cg-view-title" class="hint"></span>
+        <button id="btn-cg-set-current" class="btn ghost hidden" title="立刻把这张立绘设为舞台显示并固定（当前版自动归档保留；固定直到重新生成或取消）">⚡ 立刻使用此立绘</button>
+        <button id="btn-cg-del-hist" class="btn ghost hidden" title="删除这张历史立绘（文件删除+从历程移除；不再被还原/立刻使用/参考底图等系统调用；当前正在使用的立绘不可删）">🗑 删除此立绘</button>
+        <button id="btn-cg-regen-diff" class="btn ghost hidden" title="以该立绘为参照，只重画这张表情差分（脸之外的身材/服装/发型/姿势保持）">🔄 重绘差分</button>
+        <button id="btn-cg-view-close" class="btn ghost">✕ 关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 读取场景 ===== -->
+  <div id="modal-scenes" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <button id="btn-scenes-close" class="btn mini ghost">✕ 关闭</button>
+        <h2>🌄 读取场景</h2>
+      </div>
+      <div id="scenes-current" class="model-info"></div>
+      <div class="outfit-row">
+        <input id="scene-name" class="text-input" placeholder="输入要进入/更换的场景名（如：星冠学园 · 操场 · 樱花道）" maxlength="30">
+        <button id="btn-scene-enter" class="btn primary">🏞 进入/更换场景</button>
+      </div>
+      <button id="btn-scene-rerender" class="btn ghost">🔄 重生成当前场景背景</button>
+      <p class="hint-line">已记录的场景可以直接「进入」（复用其固定背景）；「更换场景」会按新场景名生成新背景；背景生成需要一点时间，完成后自动显示。</p>
+      <div id="scene-mgr-list" class="slot-list"></div>
+      <div class="modal-actions">
+        <span id="scenes-hint" class="hint"></span>
+        <button id="btn-scenes-close2" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 存档/读档弹窗 ===== -->
+  <div id="modal-slots" class="modal hidden">
+    <div class="modal-box">
+      <h2>💾 存档 / 读档 <button id="btn-archives-game" class="btn ghost" title="把整局打包为 zip 档案，可分享/再导入继续玩">📦 对局归档</button></h2>
+      <div class="slot-add">
+        <input id="slot-name" class="text-input" placeholder="存档名称（可留空）" maxlength="30">
+        <button id="btn-slot-save" class="btn primary">💾 立即存档</button>
+      </div>
+      <div id="slot-list" class="slot-list"></div>
+      <div class="modal-actions">
+        <span id="slots-hint" class="hint"></span>
+        <button id="btn-slots-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 历史弹窗 ===== -->
+  <div id="modal-history" class="modal hidden">
+    <div class="modal-box tall">
+      <h2>📜 剧情历史</h2>
+      <div id="history-list" class="history-list"></div>
+      <div class="modal-actions">
+        <button id="btn-history-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 角色库选择弹窗（开局导入复用） ===== -->
+  <div id="modal-libpick" class="modal hidden">
+    <div class="modal-box tall">
+      <h2>📚 从角色库选择角色 <span class="tag">已有立绘可复用</span></h2>
+      <label class="lib-pick-opt">
+        <input type="checkbox" id="libpick-reuse" checked>
+        复用已有立绘（勾选：新对局直接使用库内立绘，不再重新生成；取消：仅导入设定，立绘全新生成）
+      </label>
+      <div id="libpick-list" class="cg-grid"></div>
+      <div class="modal-actions">
+        <span id="libpick-hint" class="hint"></span>
+        <button id="btn-libpick-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 对局归档弹窗 ===== -->
+  <div id="modal-archives" class="modal hidden">
+    <div class="modal-box">
+      <h2>📦 对局归档 <span class="tag">zip 可分享·可再导入继续玩</span></h2>
+      <div class="archive-tools">
+        <button id="btn-archive-export" class="btn primary">📥 导出本局为档案</button>
+        <button id="btn-archive-import" class="btn ghost">📤 导入档案…</button>
+        <input id="archive-file" type="file" accept=".zip" hidden>
+      </div>
+      <p class="hint-line">档案含剧情文字、立绘（含原图与历史版本）、背景，保存在游戏专属数据目录的 archives\ 下；
+        导入后作为独立对局打开（同名自动加后缀，绝不覆盖原局）。</p>
+      <div id="archive-list" class="slot-list"></div>
+      <div class="modal-actions">
+        <span id="archive-hint" class="hint"></span>
+        <button id="btn-archives-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="main.js?v=1.7.49"></script>
+</body>
+</html>

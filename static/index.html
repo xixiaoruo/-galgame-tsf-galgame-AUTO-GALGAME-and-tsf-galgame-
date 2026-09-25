@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>自动化AI Galgame · 即时物语生成器</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=1.7.50">
+  <link rel="stylesheet" href="style.css?v=1.7.51">
 </head>
 <body>
 
@@ -345,7 +345,9 @@
         <button id="tsf-collapse" class="btn mini ghost" title="收起状态框">—</button>
       </div>
       <div class="tsf-body">
-        <div class="tsf-identity">
+        <!-- 状态面板角色切换：每个出场角色都有自己的一套数值 -->
+        <div id="tsf-who" class="stat-who"></div>
+        <div class="tsf-identity" id="tsf-identity">
           <small class="tsf-identity-label">目前身份</small>
           <div id="tsf-identity-text"></div>
           <div id="tsf-stage-name" class="tsf-stage-name"></div>
@@ -375,6 +377,8 @@
         <button id="vn-collapse" class="btn mini ghost" title="收起状态框">—</button>
       </div>
       <div class="tsf-body">
+        <!-- 状态面板角色切换：每个出场角色都有自己的一套数值 -->
+        <div id="vn-who" class="stat-who"></div>
         <div id="vn-bars"></div>
         <div class="tsf-foot">
           <button id="btn-vn-regen-prot" class="btn mini ghost" title="重画主角立绘（可描述需求）">🔄 重画主角立绘</button>
@@ -893,6 +897,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="main.js?v=1.7.50"></script>
+  <script src="main.js?v=1.7.51"></script>
 </body>
 </html>

@@ -441,6 +441,33 @@ select.text-input option { background: #16152a; color: #eceaf6; }
   font-size: 14px; font-weight: bold; letter-spacing: 1px;
 }
 .tsf-body { padding: 12px 14px 12px; }
+
+/* 状态面板：角色切换条（每个出场角色一套独立数值） */
+.stat-who {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  margin-bottom: 10px;
+}
+.stat-who.hidden { display: none; }
+.who-chip {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #cfcae6; font-size: 12px; line-height: 1;
+  padding: 5px 9px; border-radius: 11px;
+  cursor: pointer; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: background .2s, border-color .2s, color .2s;
+}
+.who-chip:hover { background: rgba(255, 255, 255, 0.13); }
+.who-chip.on {
+  background: linear-gradient(90deg, rgba(124, 108, 240, .85), rgba(229, 139, 192, .75));
+  border-color: transparent; color: #fff; font-weight: bold;
+}
+.tsf-subhead {
+  margin: 12px 0 7px;
+  padding-top: 9px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.14);
+  font-size: 11.5px; letter-spacing: 1px; color: #9a97b8;
+}
 .tsf-identity { margin-bottom: 10px; }
 #tsf-identity-text { font-size: 14.5px; line-height: 1.45; }
 .tsf-stage-name { font-size: 12.5px; color: #b9a8ff; margin-top: 3px; }

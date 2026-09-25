@@ -109,6 +109,154 @@ def states_block(states: dict, config: list[dict] | None = None) -> str:
     return "\n".join(lines)
 
 
+# ---------- 每角色独立数值（情绪 / 好感 / 身体敏感度 / 高潮度）----------
+#
+# 两种模式共用：每个出场角色（含主角）都有一套自己的数值，存在
+# session["char_states"] = {"角色名": {key: int}}。TSF 模式下主角另外还有
+# 一套转变数值（prot["stats"]），两者互不影响。
+
+def char_names(session: dict) -> list[str]:
+    """全部角色名：主角在前，其后为其他角色（去重保序）。"""
+    names = [session["protagonist"]["name"]]
+    names += [c["name"] for c in (session.get("characters") or [])]
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def _char_stat_config(session: dict) -> list[dict]:
+    """逐角色数值的键集合：普通模式沿用会话配置（玩家可自定义编辑），
+    TSF 模式固定用这四项（TSF 的转变数值是另一套，不混进来）。"""
+    if session.get("mode") == MODE:
+        return game.session_stat_config(session)
+    return _default_config()
+
+
+def resolve_char(name, names: list[str], prot: str) -> str | None:
+    """把 LLM 给的角色名归一到会话内角色；支持「主角/玩家/我」这类指代。"""
+    name = str(name or "").strip()
+    if not name:
+        return None
+    if name in names:
+        return name
+    if name in ("主角", "玩家", "我", "主人公", "ME", "me") or name == prot:
+        return prot
+    return None
+
+
+def ensure_char_states(session: dict) -> dict:
+    """确保 session["char_states"] 覆盖全部角色，并返回该存储。
+
+    迁移：老会话只有一份 session["states"]（语义是「角色对玩家的好感」，
+    即第一位其他角色），首次调用时归给它；其余角色取初始值。
+    """
+    store = session.get("char_states")
+    if not isinstance(store, dict):
+        store = {}
+    cfg = _char_stat_config(session)
+    legacy = session.get("states")
+    legacy = dict(legacy) if isinstance(legacy, dict) else None
+    for idx, name in enumerate(char_names(session)):
+        cur = store.get(name)
+        if not isinstance(cur, dict):
+            cur = {}
+        if not cur:
+            if legacy is not None and idx > 0:
+                cur = {k: int(v) for k, v in legacy.items()
+                       if isinstance(v, (int, float))}
+                legacy = None
+            else:
+                cur = initial_states(cfg)
+        for c in cfg:                 # 会话中途改过状态配置时补齐新键
+            cur.setdefault(c["key"], int(c["start"]))
+        store[name] = cur
+    session["char_states"] = store
+    return store
+
+
+def char_states_block(session: dict, config: list[dict] | None = None) -> str:
+    """逐角色状态块（注入剧情提示词）。"""
+    cfg = config if isinstance(config, list) and config else _char_stat_config(session)
+    store = ensure_char_states(session)
+    prot = session["protagonist"]["name"]
+    lines = ["每个角色一套独立数值（0-100），描写必须与各自数值相符："]
+    for name in char_names(session):
+        st = store.get(name) or {}
+        vals = "、".join(f"{c['name']} {int(st.get(c['key'], c['start']))}" for c in cfg)
+        lines.append(f"- {name}{'（主角）' if name == prot else ''}：{vals}")
+    lines.append("（含义：" + "；".join(f"{c['name']}={c['hint']}" for c in cfg) + "）")
+    lines.append("主角的「好感」指 TA 对当前互动对象的亲近度，其余角色的「好感」"
+                 "指该角色对主角的好感度。")
+    return "\n".join(lines)
+
+
+def sanitize_char_delta(delta, keys: list[str] | None = None,
+                        names: list[str] | None = None,
+                        prot: str = "") -> dict:
+    """清洗逐角色数值变化：{"角色名": {"affection": 2, ...}}，单项 ±15。
+
+    兼容旧版扁平格式 {"affection": 2, ...}：按旧语义归到第一位其他角色。
+    """
+    known = list(keys) if keys is not None else STATE_KEYS
+    names = list(names) if names else []
+    out: dict[str, dict] = {}
+    if not isinstance(delta, dict):
+        return out
+    if delta and not any(isinstance(v, (dict, list)) for v in delta.values()) \
+            and any(k in known for k in delta):
+        target = next((n for n in names if n != prot), None) or prot
+        clean = sanitize_delta(delta, known)
+        return {target: clean} if (target and clean) else {}
+    for name, d in delta.items():
+        target = resolve_char(name, names, prot)
+        if target is None:
+            continue
+        clean = sanitize_delta(d, known)
+        if not clean:
+            continue
+        merged = out.setdefault(target, {})
+        for k, v in clean.items():
+            merged[k] = max(-15, min(15, merged.get(k, 0) + v))
+    return out
+
+
+def apply_char_delta(session: dict, delta: dict) -> dict:
+    """把逐角色变化应用到 char_states，返回实际应用的部分。"""
+    store = ensure_char_states(session)
+    applied: dict[str, dict] = {}
+    if not isinstance(delta, dict):
+        return applied
+    for name, d in delta.items():
+        if name not in store or not isinstance(d, dict):
+            continue
+        apply_delta(store[name], d)
+        applied[name] = dict(d)
+    return applied
+
+
+def char_schema(session: dict) -> str:
+    """逐角色数值的 JSON schema 片段（供提示词使用）。"""
+    return ", ".join(f'"{c["key"]}": 0' for c in _char_stat_config(session))
+
+
+def panel_view_chars(session: dict, config: list[dict] | None = None) -> dict:
+    """前端右侧面板数据：每个角色一组数值 + 谁是主角。"""
+    cfg = config if isinstance(config, list) and config else _char_stat_config(session)
+    store = ensure_char_states(session)
+    prot = session["protagonist"]["name"]
+    return {
+        "characters": [
+            {"name": name,
+             "is_protagonist": name == prot,
+             "states": [
+                 {"key": c["key"], "name": c["name"], "icon": c["icon"],
+                  "value": int((store.get(name) or {}).get(c["key"], c["start"])),
+                  "hint": c["hint"]}
+                 for c in cfg
+             ]}
+            for name in char_names(session)
+        ]
+    }
+
+
 # ---------- 轮次清洗 ----------
 
 def _sanitize_turn(turn: dict, emotions: list[str], characters: list[dict],
@@ -199,7 +347,9 @@ def _sanitize_turn(turn: dict, emotions: list[str], characters: list[dict],
         ][:3],
         "outfit": outfit,
         "cg": {"active": cg_active, "title": cg_title, "prompt": cg_prompt},
-        "states_delta": sanitize_delta(turn.get("states_delta"), dialkeys),
+        "states_delta": sanitize_char_delta(
+            turn.get("states_delta"), dialkeys,
+            [pname] + [c["name"] for c in characters], pname),
     }
 
 
@@ -237,7 +387,7 @@ def _vn_system(session: dict) -> str:
                     or "（暂无，按默认风格创作）"),
         characters=vn_prompts.format_characters(session["characters"]),
         emotions="、".join(session["emotions"]),
-        states=states_block(session["states"], stat_cfg),
+        states=char_states_block(session, stat_cfg),
         states_schema=states_schema,
         bias_hint=bias_hint,
     )
@@ -344,15 +494,13 @@ def _apply_outfit_now(session: dict, name: str, outfit: str) -> None:
 # ---------- 数值与轮次收尾 ----------
 
 def _apply_turn_states(session: dict, turn: dict, mock: bool) -> None:
-    delta = turn["states_delta"]
+    delta = turn.get("states_delta") or {}
     if mock and not delta:
-        delta = {"mood": 1, "affection": 1, "arousal": 1, "climax": 0}
-        # 玩家自定义状态在演示模式下也缓慢增长，保证面板可见变化
-        for c in game.session_stat_config(session):
-            if c["key"] not in delta:
-                delta[c["key"]] = 1
+        # 演示模式下每个角色都缓慢增长，保证面板可见变化
+        cfg = _char_stat_config(session)
+        delta = {n: {c["key"]: 1 for c in cfg} for n in char_names(session)}
         turn["states_delta"] = delta
-    apply_delta(session["states"], delta)
+    apply_char_delta(session, delta)
 
 
 def _post_turn(session: dict, turn: dict) -> None:
@@ -414,6 +562,7 @@ def _post_turn(session: dict, turn: dict) -> None:
 
 def public_state(session: dict) -> dict:
     turn = session["log"][-1]["turn"]
+    char_panel = panel_view_chars(session)
     return {
         "sid": session["sid"],
         "mode": MODE,
@@ -450,7 +599,8 @@ def public_state(session: dict) -> dict:
         "llm_degraded": bool(session.get("llm_degraded")),
         "protagonist": session["protagonist"]["name"],
         "npcs": [c["name"] for c in session["characters"]],
-        "vn": panel_view(session["states"], game.session_stat_config(session)),
+        "vn": char_panel,
+        "char_stats": char_panel,
         "stat_config": game.session_stat_config(session),
         "assets": session["assets"],
         "bg_map": session["bg_map"],
@@ -520,6 +670,7 @@ async def start(payload: dict) -> dict:
         "uniform_en": uniform_en,
         "uniform_neg": uniform_neg,
         "states": initial_states(stat_cfg),
+        "char_states": {},        # 每角色独立数值，建会话后由 ensure_char_states 填充
         "emotions": emotions,
         "summary": "",
         "log": [],
@@ -530,6 +681,7 @@ async def start(payload: dict) -> dict:
         "created": time.time(),
     }
     game.SESSIONS[session["sid"]] = session
+    ensure_char_states(session)      # 每个角色一套独立数值（含主角）
     try:
         # 角色库导入：已有立绘直接复用（生成管线自动跳过匹配变体）
         game.inject_library_assets(session, payload.get("library_imports") or [], cfg)
@@ -713,8 +865,12 @@ async def apply_command(sid: str, character: str, action: str) -> dict:
     if not turn["cg"].get("prompt"):
         turn["cg"]["prompt"] = (f"室内暧昧光线中，{character}服从命令的瞬间，"
                                 "电影感广角构图，氛围张力拉满")
-    for k, v in VN_COMMAND_DELTA.get(action, {}).items():
-        turn["states_delta"][k] = turn["states_delta"].get(k, 0) + v
+    # 命令本身的数值影响：算在【被下令的角色】那一份上，与 LLM 给的变化叠加
+    cmd_delta = VN_COMMAND_DELTA.get(action, {})
+    if cmd_delta:
+        entry = turn["states_delta"].setdefault(character, {})
+        for k, v in cmd_delta.items():
+            entry[k] = max(-15, min(15, entry.get(k, 0) + v))
 
     _apply_turn_states(session, turn, mock=False)
     prev_hint = session["log"][-1]["turn"].get("background_hint", "")

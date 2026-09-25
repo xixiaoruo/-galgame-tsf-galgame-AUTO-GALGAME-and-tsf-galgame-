@@ -11,6 +11,10 @@ const S = {
   npcs: [],
   tsf: null,           // 状态面板数据
   vn: null,            // 普通模式状态数据
+  charStats: null,     // 每个角色一套数值（两种模式共用）
+  statWho: null,       // 状态面板当前查看的角色
+  charPrev: {},        // 上一幕各角色数值（算 ▲▼）
+  tsfPrev: null,       // 上一幕主角转变数值
   mode: "tsf",         // tsf / vn
   version: "",         // 服务端版本号
   assets: null,
@@ -787,6 +791,10 @@ function enterGame(state, { instant }) {
   S.imgVersion = (S.imgVersion || 0) + 1;
   S.tsf = state.tsf || null;
   S.vn = state.vn || null;
+  S.charStats = state.char_stats || null;
+  S.charPrev = {};
+  S.tsfPrev = null;
+  S.statWho = state.protagonist || null;   // 新局默认看主角
   if (state.stat_config) {
     if (!S.statCfg) S.statCfg = {};
     S.statCfg.session = state.stat_config;
@@ -802,11 +810,7 @@ function enterGame(state, { instant }) {
   $("tsf-tab").classList.add("hidden");
   $("vn-tab").classList.add("hidden");
   buildSprites();
-  if (isVn) {
-    renderVnPanel(state.vn, null);
-  } else {
-    renderTsfPanel(state.tsf, null);
-  }
+  renderStatsPanels();
   if (state.llm_degraded) {
     toast("对话 API 不可用，已切换演示剧情（可在设置中修正 Key）", 5000);
   }
@@ -955,10 +959,95 @@ function regenerateSprite(target) {
 $("btn-vn-regen-prot").addEventListener("click", () => openRegenModal("protagonist"));
 $("btn-vn-regen").addEventListener("click", () => openRegenModal("all"));
 
-/* ---------- TSF 状态面板 ---------- */
+/* ---------- 状态面板：每个出场角色一套数值，可切换查看 ---------- */
 
-function renderTsfPanel(tsfData, prevData) {
-  if (!tsfData) return;
+function charList() {
+  return (S.charStats && S.charStats.characters) || [];
+}
+
+// 各角色当前数值快照，用于下一幕计算 ▲▼
+function charSnapshot() {
+  const snap = {};
+  charList().forEach((c) => {
+    snap[c.name] = Object.fromEntries(c.states.map((s) => [s.key, s.value]));
+  });
+  return snap;
+}
+
+// 当前选中的角色；名字失效（换局/主角改名）时回落到主角
+function selectedChar() {
+  const list = charList();
+  if (!list.length) return null;
+  let c = list.find((x) => x.name === S.statWho);
+  if (!c) {
+    c = list.find((x) => x.is_protagonist) || list[0];
+    S.statWho = c.name;
+  }
+  return c;
+}
+
+function renderWhoChips(containerId) {
+  const box = $(containerId);
+  if (!box) return;
+  const list = charList();
+  box.innerHTML = "";
+  if (list.length < 2) {          // 只有主角时不显示切换条
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  list.forEach((c) => {
+    const b = document.createElement("button");
+    b.className = "who-chip" + (c.name === S.statWho ? " on" : "");
+    b.textContent = (c.is_protagonist ? "★ " : "") + c.name;
+    b.title = c.is_protagonist ? "主角（另有转变数值）" : "该角色自己的数值";
+    b.addEventListener("click", () => {
+      S.statWho = c.name;
+      renderStatsPanels();
+    });
+    box.appendChild(b);
+  });
+}
+
+// 渲染一组数值行（沿用 tsf-row 样式）；prev 为上一幕的值，用于 ▲▼ 标注
+function renderStatRows(box, states, prev, append) {
+  if (!box) return;
+  if (!append) box.innerHTML = "";
+  (states || []).forEach((s) => {
+    const before = (prev || {})[s.key];
+    const delta = before === undefined ? 0 : s.value - before;
+    const row = document.createElement("div");
+    row.className = "tsf-row";
+    row.innerHTML = `
+      <div class="tsf-row-label"><span class="tsf-ico">${s.icon}</span>${s.name}
+        <span class="tsf-delta ${delta > 0 ? "up" : delta < 0 ? "down" : ""}">
+          ${delta > 0 ? "▲" + delta : delta < 0 ? "▼" + Math.abs(delta) : ""}</span>
+        <span class="tsf-val">${s.value}</span>
+      </div>
+      <div class="tsf-bar"><div class="tsf-bar-fill" style="width:${s.value}%"></div></div>`;
+    if (delta !== 0) row.classList.add("tsf-changed");
+    row.title = s.hint;
+    box.appendChild(row);
+  });
+}
+
+function renderStatsPanels() {
+  if (S.mode === "vn") renderVnPanel();
+  else renderTsfPanel();
+}
+
+/* ---------- TSF 状态面板（主角：转变数值 + 自己的四项；其他角色：各自四项）---------- */
+
+function renderTsfPanel() {
+  const tsfData = S.tsf;
+  const who = selectedChar();
+  const prev = S.charPrev || {};
+  renderWhoChips("tsf-who");
+
+  if (!tsfData) {                 // 状态未就绪（如重载中）时至少显示选中角色
+    renderStatRows($("tsf-bars"), who && who.states, who ? prev[who.name] : {});
+    return;
+  }
   // 主角立绘徽章：同化率 X%（特殊标记）
   const prog = (tsfData.stats || []).find((s) => s.key === "progress");
   document.querySelectorAll(".sprite-badge").forEach((b) => {
@@ -968,57 +1057,43 @@ function renderTsfPanel(tsfData, prevData) {
       b.classList.toggle("hidden", prog === undefined);
     }
   });
+  const isProt = !who || who.is_protagonist;
+  $("tsf-identity").classList.toggle("hidden", !isProt);
+  $("tsf-stage-desc").classList.toggle("hidden", !isProt);
+  const bars = $("tsf-bars");
+  if (!isProt) {                  // 其他角色：只显示 TA 自己的一套数值
+    renderStatRows(bars, who.states, prev[who.name]);
+    return;
+  }
   $("tsf-identity-text").textContent = tsfData.identity;
   $("tsf-stage-name").textContent = tsfData.stage_name;
   $("tsf-stage-desc").textContent = tsfData.stage_desc;
-  const prev = prevData
-    ? Object.fromEntries(prevData.stats.map((s) => [s.key, s.value]))
+  const prevTsf = S.tsfPrev
+    ? Object.fromEntries((S.tsfPrev.stats || []).map((s) => [s.key, s.value]))
     : {};
-  const bars = $("tsf-bars");
-  bars.innerHTML = "";
-  tsfData.stats.forEach((s) => {
-    const before = prev[s.key];
-    const delta = before === undefined ? 0 : s.value - before;
-    const row = document.createElement("div");
-    row.className = "tsf-row";
-    row.innerHTML = `
-      <div class="tsf-row-label"><span class="tsf-ico">${s.icon}</span>${s.name}
-        <span class="tsf-delta ${delta > 0 ? "up" : delta < 0 ? "down" : ""}">
-          ${delta > 0 ? "▲" + delta : delta < 0 ? "▼" + Math.abs(delta) : ""}</span>
-        <span class="tsf-val">${s.value}</span>
-      </div>
-      <div class="tsf-bar"><div class="tsf-bar-fill" style="width:${s.value}%"></div></div>`;
-    if (delta !== 0) row.classList.add("tsf-changed");
-    row.title = s.hint;
-    bars.appendChild(row);
-  });
+  renderStatRows(bars, tsfData.stats, prevTsf);
+  // 主角自己的情绪 / 好感 / 身体数值，接在转变数值之后
+  if (who && who.states && who.states.length) {
+    const hr = document.createElement("div");
+    hr.className = "tsf-subhead";
+    hr.textContent = "情绪 · 好感 · 身体";
+    bars.appendChild(hr);
+    renderStatRows(bars, who.states, prev[who.name], true);
+  }
 }
 
-/* ---------- 普通模式：心情 / 好感 / 性敏感 / 高潮度 面板 ---------- */
+/* ---------- 普通模式面板（每个角色各自的心情 / 好感 / 性敏感 / 高潮度）---------- */
 
-function renderVnPanel(vnData, prevData) {
-  if (!vnData) return;
-  const prev = prevData
-    ? Object.fromEntries(prevData.states.map((s) => [s.key, s.value]))
-    : {};
-  const bars = $("vn-bars");
-  bars.innerHTML = "";
-  vnData.states.forEach((s) => {
-    const before = prev[s.key];
-    const delta = before === undefined ? 0 : s.value - before;
-    const row = document.createElement("div");
-    row.className = "tsf-row";
-    row.innerHTML = `
-      <div class="tsf-row-label"><span class="tsf-ico">${s.icon}</span>${s.name}
-        <span class="tsf-delta ${delta > 0 ? "up" : delta < 0 ? "down" : ""}">
-          ${delta > 0 ? "▲" + delta : delta < 0 ? "▼" + Math.abs(delta) : ""}</span>
-        <span class="tsf-val">${s.value}</span>
-      </div>
-      <div class="tsf-bar"><div class="tsf-bar-fill" style="width:${s.value}%"></div></div>`;
-    if (delta !== 0) row.classList.add("tsf-changed");
-    row.title = s.hint;
-    bars.appendChild(row);
-  });
+function renderVnPanel() {
+  renderWhoChips("vn-who");
+  const box = $("vn-bars");
+  const who = selectedChar();
+  if (who) {
+    renderStatRows(box, who.states, (S.charPrev || {})[who.name]);
+    return;
+  }
+  // 兼容旧服务端（没有 char_stats 时退回单一数值集）
+  renderStatRows(box, (S.vn && S.vn.states) || []);
 }
 
 $("vn-collapse").addEventListener("click", () => {
@@ -1167,7 +1242,7 @@ $("btn-vn-export").addEventListener("click", exportSprites);
 
 function playTurn(state, { instant }) {
   const prevTsf = S.tsf;
-  const prevVn = S.vn;
+  const prevChars = charSnapshot();   // 更新前各角色数值，供面板算 ▲▼
   S.turn = state;
   S.tsf = state.tsf;
   S.vn = state.vn;
@@ -1184,11 +1259,12 @@ function playTurn(state, { instant }) {
   const tag = $("scene-tag");
   tag.textContent = `第 ${state.turn_no} 幕 · ${state.scene}`;
   tag.classList.add("show");
-  if (S.mode === "vn") {
-    renderVnPanel(state.vn, prevVn);
-  } else {
-    renderTsfPanel(state.tsf, prevTsf);
+  S.tsfPrev = prevTsf;
+  if (state.char_stats) {
+    S.charPrev = prevChars;
+    S.charStats = state.char_stats;
   }
+  renderStatsPanels();
   // 角色池随轮次更新（AI 引入的新角色立绘才能显示）
   if (state.npcs) S.npcs = state.npcs;
   // 每一幕都严格按「开场名单」重建立绘层：名单有谁就显示谁、

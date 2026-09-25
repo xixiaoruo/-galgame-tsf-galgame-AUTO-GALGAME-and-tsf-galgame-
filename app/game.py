@@ -204,6 +204,7 @@ def _sanitize_turn(turn: dict, emotions: list[str], characters: list[dict],
     stat_keys：会话级状态键（含玩家自定义），决定 bias 与 delta 白名单。
     """
     import re
+    from . import vn as vn_mod      # 逐角色数值清洗（两种模式共用）
     known = {c["name"] for c in characters} | {pname}
     if rename_hint:
         known.add(rename_hint)   # 本幕主角新名字：对话中的新名不再当作新 NPC
@@ -288,6 +289,10 @@ def _sanitize_turn(turn: dict, emotions: list[str], characters: list[dict],
         "outfit": outfit,
         "cg": {"active": cg_active, "title": cg_title, "prompt": cg_prompt},
         "stats_delta": tsf.sanitize_delta(turn.get("stats_delta"), known_keys),
+        # 各角色自己的情绪/好感/身体数值（与主角转变数值相互独立）
+        "states_delta": vn_mod.sanitize_char_delta(
+            turn.get("states_delta"), None,
+            [pname] + [c["name"] for c in characters], pname),
         "identity": str(turn.get("identity", "")).strip()[:60],
     }
 
@@ -320,6 +325,7 @@ def _stat_display_name(session: dict, key: str) -> str:
 
 
 def build_story_system(session: dict) -> str:
+    from . import vn as vn_mod      # 逐角色数值（两种模式共用），延迟导入避免循环依赖
     prot = session["protagonist"]
     _stages = tsf.stages_for(session)
     stage_idx = tsf.stage_of(prot["stats"]["progress"], _stages)
@@ -348,6 +354,8 @@ def build_story_system(session: dict) -> str:
         stats=tsf.stats_block(prot["stats"], prot["identity"], stage_idx,
                               stat_cfg, _stages),
         stats_schema=stats_schema,
+        char_states=vn_mod.char_states_block(session),
+        char_states_schema=vn_mod.char_schema(session),
         bias_hint=bias_hint,
         outfit_state=_outfit_state_block(session),
         lore=prompts.format_lore(
@@ -3037,6 +3045,10 @@ def _apply_rename(session: dict, new_name: str) -> bool:
         new_lbl = (new_name + lbl[len(old):]) if lbl.startswith(old + "·") else lbl
         new_pins[new_name if k == old else k] = new_lbl
     session["pinned_portraits"] = new_pins
+    # 逐角色数值跟着主角改名迁移（否则会另起一份初始值）
+    store = session.get("char_states")
+    if isinstance(store, dict) and old in store and new_name not in store:
+        store[new_name] = store.pop(old)
     return True
 
 
@@ -3163,7 +3175,11 @@ def cleanup_orphan_cache() -> dict:
 
 
 def _apply_turn_stats(session: dict, turn: dict, mock: bool) -> dict:
-    """应用本回合数值变化；TSF 稳定性：体质特征与性别同化率保持同步（差 ≤10）。"""
+    """应用本回合数值变化；TSF 稳定性：体质特征与性别同化率保持同步（差 ≤10）。
+
+    同时应用 states_delta：各角色自己的情绪 / 好感 / 身体数值（每角色一套）。
+    """
+    from . import vn as vn_mod
     prot = session["protagonist"]
     delta = turn["stats_delta"]
     if mock and not delta:
@@ -3173,6 +3189,13 @@ def _apply_turn_stats(session: dict, turn: dict, mock: bool) -> dict:
             if c["key"] not in delta:
                 delta[c["key"]] = 2
         turn["stats_delta"] = delta
+    # 各角色数值：演示模式下每个角色都缓慢增长，保证面板可见变化
+    char_delta = turn.get("states_delta") or {}
+    if mock and not char_delta:
+        keys = [c["key"] for c in vn_mod._char_stat_config(session)]
+        char_delta = {n: {k: 1 for k in keys} for n in vn_mod.char_names(session)}
+        turn["states_delta"] = char_delta
+    vn_mod.apply_char_delta(session, char_delta)
     _stages = tsf.stages_for(session)
     before_stage = tsf.stage_of(prot["stats"]["progress"], _stages)
     before = dict(prot["stats"])
@@ -3377,6 +3400,7 @@ def update_policy(sid: str, rating: str, r18: bool,
 
 
 def public_state(session: dict) -> dict:
+    from . import vn as vn_mod      # 逐角色数值视图（两种模式共用）
     turn = session["log"][-1]["turn"]
     prot = session["protagonist"]
     stage_idx = tsf.stage_of(prot["stats"]["progress"],
@@ -3401,6 +3425,8 @@ def public_state(session: dict) -> dict:
             {"name": c["name"], "auto_added": bool(c.get("auto_added"))}
             for c in session["characters"]
         ],
+        # 每个角色自己的情绪 / 好感 / 身体数值（含主角，与主角转变数值并存）
+        "char_stats": vn_mod.panel_view_chars(session),
         "catchphrases": session.get("catchphrases", []),
         "outfits": {
             char["name"]: session.get(f"{char['name']}|outfit", "")
@@ -3497,6 +3523,7 @@ async def generate_outline(world: str, pname: str, characters: list[dict]) -> di
 
 
 async def start_game(payload: dict) -> dict:
+    from . import vn as vn_mod      # 逐角色数值初始化（两种模式共用）
     world = str(payload.get("world", "")).strip()
     characters = payload.get("characters") or []
     prot_in = payload.get("protagonist") or {}
@@ -3571,6 +3598,7 @@ async def start_game(payload: dict) -> dict:
         },
         "stages": _stages0,   # 1.7.25：随档阶段表（4/6/10 段）
         "stat_config": stat_cfg,
+        "char_states": {},    # 每角色一套情绪/好感/身体数值（含主角），建会话后填充
         "uniform_en": uniform_en,
         "uniform_neg": uniform_neg,
         # 1.7.16：主角「转变目标设定」（开局可预置；游戏内可随时改）
@@ -3588,6 +3616,7 @@ async def start_game(payload: dict) -> dict:
         "created": time.time(),
     }
     SESSIONS[session["sid"]] = session
+    vn_mod.ensure_char_states(session)   # 每个角色一套情绪/好感/身体数值（含主角）
 
     # 角色库导入：已有立绘直接复用（生成管线自动跳过匹配变体，缺的照常生成）
     inject_library_assets(session, payload.get("library_imports") or [], cfg)
@@ -3765,6 +3794,7 @@ def _fallback_command_turn(pname: str, name: str, desc: str,
 
 async def apply_command(sid: str, character: str, action: str) -> dict:
     """下达命令：更衣立即生效；强制动作/更衣场面一律标记为 CG 自动收藏。"""
+    from . import vn as vn_mod      # 命令对角色自身数值的影响（两种模式共用一套系数）
     session = get_session(sid)
     known = {c["name"] for c in session["characters"]} | {session["protagonist"]["name"]}
     if character not in known:
@@ -3821,6 +3851,12 @@ async def apply_command(sid: str, character: str, action: str) -> dict:
                                 "电影感广角构图，氛围张力拉满")
     for k, v in action_delta.items():
         turn["stats_delta"][k] = turn["stats_delta"].get(k, 0) + v
+    # 命令对【被下令角色】自己的情绪/好感/身体数值的影响（叠加在 LLM 给的变化上）
+    cmd_char_delta = vn_mod.VN_COMMAND_DELTA.get(action, {})
+    if cmd_char_delta:
+        entry = turn["states_delta"].setdefault(character, {})
+        for k, v in cmd_char_delta.items():
+            entry[k] = max(-15, min(15, entry.get(k, 0) + v))
 
     _apply_turn_stats(session, turn, mock=False)
     prev_hint = session["log"][-1]["turn"].get("background_hint", "")

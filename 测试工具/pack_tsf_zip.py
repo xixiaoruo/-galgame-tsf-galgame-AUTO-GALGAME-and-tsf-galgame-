@@ -2,7 +2,7 @@ r"""重打 TSF_Galgame 可分发交付包（产物进 release/，文件名带版
 
 用法：
     python 测试工具\pack_tsf_zip.py            # 版本号自动读 server.py 的 GAME_VERSION
-    python 测试工具\pack_tsf_zip.py 1.7.50     # 手动指定版本号
+    python 测试工具\pack_tsf_zip.py 1.7.51     # 手动指定版本号
 产物：
     release\TSF_Galgame_v<版本>.zip   ← 上传到 GitHub Release 当附件（不能进仓库：
     内含 129MB 单文件 exe，超过 GitHub 单文件 100MB 上限）

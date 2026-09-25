@@ -665,7 +665,7 @@ def cg_gallery():
 @app.get("/api/update/check")
 def update_check():
     """查询仓库最新版本与当前版本对比（不下载）。"""
-    return updater.check()
+    return updater.check(GAME_VERSION)
 
 
 @app.get("/api/update/status")

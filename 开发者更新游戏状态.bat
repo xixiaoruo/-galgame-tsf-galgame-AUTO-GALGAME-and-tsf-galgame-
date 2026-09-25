@@ -24,7 +24,7 @@ taskkill /IM TSF_Galgame.exe /F >nul 2>nul
 
 if exist "%~dp0update\staging\TSF_Galgame.exe" (
     echo [2/4] 应用完整更新包（程序 + 界面 + 文档；保留个人配置与素材）...
-    robocopy "%~dp0update\staging\ " "%~dp0" /E /XF config.json /XD data update 角色库 /NFL /NDL /NJH /NJS /R:1 /W:1 >nul
+    robocopy "%~dp0update\staging" "%~dp0" /E /XF config.json /XD data update 角色库 /NFL /NDL /NJH /NJS /R:1 /W:1 >nul
     if errorlevel 8 (
         echo [ERROR] 覆盖失败：文件可能被占用，或需要以管理员身份运行。
         pause

@@ -62,14 +62,21 @@ def system_proxy() -> str:
     return ""
 
 
-def check() -> dict:
+def current_version() -> str:
+    """当前版本号：GAME_VERSION 定义在 server.py（以 __main__ 运行），
+    这里按实际加载的模块名去找，取不到就返回空串（界面显示「未知」）。"""
+    import sys
+    for name in ("__main__", "server", "app.server"):
+        mod = sys.modules.get(name)
+        v = getattr(mod, "GAME_VERSION", "") if mod is not None else ""
+        if v:
+            return str(v)
+    return ""
+
+
+def check(current: str = "") -> dict:
     """查询最新版本；返回与当前版本的比对结果（不下载）。"""
-    cur = ""
-    try:
-        from .game import GAME_VERSION
-        cur = GAME_VERSION
-    except Exception:
-        cur = ""
+    cur = str(current or current_version())
     out = {"current": cur, "latest": "", "has_update": False, "notes": "",
            "published_at": "", "asset": None, "proxy": system_proxy(), "error": ""}
     try:

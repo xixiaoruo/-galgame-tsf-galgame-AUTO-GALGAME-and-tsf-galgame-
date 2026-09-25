@@ -43,6 +43,8 @@ EXCLUDE_FILES = {
     "一键适配ComfyUI.bat",   # 见文件头说明：依赖的脚本含本机绝对路径，不随包分发
     ".gitignore", ".gitattributes",   # 仓库用文件，对终端用户无意义
     "GitHub上传教程.md",   # 本机发布流程说明，不随包分发
+    "使用说明.txt",   # 打包时由模板生成；磁盘上的同名文件（应用更新时留下的）
+                      # 也要排除，否则包里会出现两份
 }
 EXCLUDE_PREFIXES = {"loop_stdout.log", "loop_stderr.log", "debug.log"}
 

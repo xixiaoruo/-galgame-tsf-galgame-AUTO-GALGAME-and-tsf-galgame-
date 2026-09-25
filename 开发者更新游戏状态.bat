@@ -1,8 +1,9 @@
 @echo off
-rem 本脚本刻意保持纯 ASCII：UTF-8 的 .bat 配上 chcp 65001 会让 cmd 误解码后续行；
-rem 括号块内的 echo 文本也不能含裸括号（会被当成块定界符）。故用标签结构。
-rem 目标路径写成 "%~dp0."：%~dp0 自带结尾反斜杠，写成 "%~dp0" 会把闭合引号
-rem 转义掉（\"），导致 /E /XF 等开关被吞进目标路径（robocopy 报错 123/16）。
+rem Keep this file pure ASCII: a UTF-8 .bat with chcp 65001 makes cmd mis-decode
+rem the following lines, and bare parentheses inside a bracketed block are read
+rem as block delimiters. Hence: ASCII only, and labels instead of blocks.
+rem The destination MUST be written as %~dp0. -- %~dp0 ends with a backslash,
+rem so "%~dp0" escapes the closing quote and swallows /E /XF into the path.
 setlocal
 cd /d "%~dp0"
 title Update Game State

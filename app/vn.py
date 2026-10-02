@@ -9,6 +9,8 @@ import logging
 import time
 import uuid
 
+import asyncio   # B-05/M-02：命令场面 CG 合成走 asyncio.to_thread（t15 授权改动）
+
 from . import config as cfgmod
 from . import game
 from . import prompts
@@ -880,7 +882,11 @@ async def apply_command(sid: str, character: str, action: str) -> dict:
     turn["cmd_cg"] = True
     session["log"].append({"turn": turn, "choice": None})
     game.persist(session)
-    game.save_command_cg(session, turn, f"命令·{action_cn}")
+    # B-05/M-02：命令场面 CG 合成是 CPU 密集同步操作，必须丢线程池
+    # （本行在 t15 原 inScope 之外，改动由队长书面授权，语义等价：
+    #  原来直接在 async 上下文里同步调用 → 合成期间事件循环被独占）
+    await asyncio.to_thread(game.save_command_cg, session, turn,
+                            f"命令·{action_cn}")
     return public_state(session)
 
 

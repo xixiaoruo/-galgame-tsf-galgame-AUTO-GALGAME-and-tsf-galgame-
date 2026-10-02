@@ -36,6 +36,49 @@ def _params_tag(cfg: dict) -> str:
 SESSIONS: dict[str, dict] = {}
 # 持有后台任务引用，防止被垃圾回收
 _TASKS: set[asyncio.Task] = set()
+# 服务端主事件循环（由 server.py 在首个请求/启动时登记）。
+# 需要事件循环的后台生成任务若从同步端点（FastAPI 跑在线程池）发起，
+# 必须投递到它上面——否则 asyncio.create_task 在无循环的线程里必抛
+# RuntimeError: no running event loop（B-02/B-03 的根因）。
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """登记主事件循环（幂等；可在任意 async 上下文里调用）。"""
+    global _MAIN_LOOP
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+    _MAIN_LOOP = loop
+
+
+def _spawn_task(coro) -> bool:
+    """把后台协程排进事件循环；成功返回 True，失败返回 False。
+
+    当前线程有循环（async 端点）→ 直接 create_task；
+    当前线程是线程池 worker（同步端点）→ 用 run_coroutine_threadsafe
+    投递到主循环；两者都不可用（例如服务尚未起来）→ 返回 False，
+    由调用方回滚刚登记的 pending 资产（不能留下永不被推进的条目）。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        task = loop.create_task(coro)
+        _TASKS.add(task)
+        task.add_done_callback(_TASKS.discard)
+        return True
+    main = _MAIN_LOOP
+    if main is not None and not main.is_closed():
+        fut = asyncio.run_coroutine_threadsafe(coro, main)
+        _TASKS.add(fut)
+        fut.add_done_callback(_TASKS.discard)
+        return True
+    coro.close()   # 没能排上：显式关闭协程，避免 "never awaited" 警告
+    return False
 
 # 预置创作指令（开始界面「AI 指令注入」与游戏内「⚡ 指令」共用）
 PRESET_DIRECTIVES = [
@@ -112,11 +155,24 @@ def _save_path(sid: str) -> Path:
 def persist(session: dict) -> None:
     session["saved_at"] = time.time()
     try:
-        _save_path(session["sid"]).write_text(
-            json.dumps(session, ensure_ascii=False), encoding="utf-8"
-        )
+        # B-04：原子写（临时文件 + os.replace）——中途被强杀也不会留下半个
+        # JSON，否则下次启动 load_all 会静默跳过该局（整局从列表消失）
+        cfgmod.atomic_write_json(_save_path(session["sid"]), session)
     except OSError as e:
         log.warning("persist failed: %s", e)
+
+
+def persist_all() -> int:
+    """把手里的全部会话落盘（关机前调用），返回成功条数。"""
+    n = 0
+    for s in list(SESSIONS.values()):
+        try:
+            persist(s)
+            n += 1
+        except Exception as e:   # 单局失败不能挡住关机
+            log.warning("persist_all failed sid=%s: %s", s.get("sid"), e)
+    return n
+
 
 
 def load_all() -> None:
@@ -478,13 +534,13 @@ def _ensure_session_info(session: dict, dir_name: str) -> None:
     ip = cfgmod.CACHE_DIR / dir_name / "info.json"
     if not ip.is_file():
         try:
-            ip.write_text(json.dumps({
+            cfgmod.atomic_write_json(ip, {
                 "title": session.get("title", ""),
                 "protagonist": session["protagonist"]["name"],
                 "prot_handle": session.get("prot_handle", ""),
                 "created": session.get("created", 0),
                 "note": "本目录为该对局的立绘/背景/原图/预览，按角色规范命名；旧版立绘在 versions/。",
-            }, ensure_ascii=False, indent=1), encoding="utf-8")
+            }, indent=1)
         except OSError:
             pass
 
@@ -610,7 +666,7 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
     if key in assets[group]:
         return  # 已在生成或已就绪
     assets[group][key] = {"status": "pending", "file": "", "label": label,
-                          "error": ""}
+                          "error": "", "queued_at": time.time()}
     # 新图独占显示：同标签旧版先归档保留；生成失败时回退展示旧版
     _archive_same_label(session, group, label)
     sub = {"portraits": "portraits", "backgrounds": "backgrounds"}.get(group, group)
@@ -632,9 +688,10 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
             # 1.7.39 全局成品复检（写 ready 前的最后一道门——所有生成路径
             # 统一拦截：双人同框/绿色噪点绝不入库，合格才写文件；检出即
             # 抛异常 → 走失败回退/自动重画（含种子换簇）
-            from .image import _multi_figure_issue as _mfi
-            from .image import _green_noise_issue as _gni
-            _bad = (_mfi(data) or _gni(data))
+            # B-05/M-02：成品复检是 CPU/解码密集的同步函数，丢线程池
+            # （原来直接在事件循环上跑：一次复检要整图解码 + 像素循环）。
+            # 同时把「两次调用」合成一次（`_raw_quality_issue` 内部一次解码）。
+            _bad = await asyncio.to_thread(_raw_quality_issue, data)
             if _bad:
                 raise ImageGenError(f"成品复检未通过（{_bad}）")
             filename = _finish_file_name(base, seq, data, ext)
@@ -683,9 +740,15 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
             except Exception as re:
                 log.warning("asset auto-retry failed %s: %s", label, re)
 
-    task = asyncio.create_task(run())
-    _TASKS.add(task)
-    task.add_done_callback(_TASKS.discard)
+    if not _spawn_task(run()):
+        # B-02：没有任何事件循环可投递时，绝不能留下「永不被推进的 pending」
+        #（旧行为：create_task 抛 RuntimeError 被上层吞掉 → 条目永久 pending，
+        # 前端 hasPending() 据此每 2 秒无限轮询，bg_count 也白加一次）。
+        assets[group].pop(key, None)
+        log.warning("asset task not scheduled (no event loop) sid=%s group=%s "
+                    "key=%s label=%s -> pending entry rolled back",
+                    session.get("sid"), group, key, label)
+        raise GameError("后台生成任务未能排入事件循环（服务未就绪），请稍后重试")
 
 
 # 1.7.35 场景→制服自动映射（用户：学园背景角色应统一校服；神社/女仆店/
@@ -932,9 +995,7 @@ async def new_game_plus(source: dict, title: str = "") -> dict:
             except Exception as e:
                 log.warning("newgame-plus prior enhance failed: %s", e)
 
-        task = asyncio.create_task(_enhance_prior())
-        _TASKS.add(task)
-        task.add_done_callback(_TASKS.discard)
+        _spawn_task(_enhance_prior())   # B-02：统一经 _spawn_task 投递
     return state
 
 
@@ -1013,23 +1074,43 @@ def delete_portrait_version(sid: str, label: str, file: str) -> dict:
 def _final_check_issue(data: bytes, nude_ok: bool = False) -> str | None:
     """成品复检（抠图后）：完整性不过关的立绘不入 ready（前端自动回退
     基础立绘/表情，避免「半身/腿特写/双人同框/裸体」坏图出现在游戏里）。
-    1.7.37 新增双人同框与裸露硬拦截（nude_ok=True：命令裸体档跳裸露检查）。"""
+    1.7.37 新增双人同框与裸露硬拦截（nude_ok=True：命令裸体档跳裸露检查）。
+
+    B-05/M-02：整图只解码一次（`_check_bundle`），四个判据复用同一份缩图；
+    判据顺序/数值与命中结果不变。调用方请用
+    `await asyncio.to_thread(_final_check_issue, ...)`，不要直接同步调用。
+    """
     try:
-        import io as _io
-        from PIL import Image as _Img
-        from .image import _completeness_issue, _multi_figure_issue
-        from .image import _skin_excess_issue, _green_noise_issue
-        img = _Img.open(_io.BytesIO(data))
-        issue = (_completeness_issue(img) or _min_size_issue(img)
-                 or _multi_figure_issue(data)
+        from .image import (_check_bundle, _completeness_issue, _min_size_issue,
+                            _multi_figure_issue_b, _green_noise_issue_b,
+                            _skin_excess_issue_b)
+        bundle = _check_bundle(data)
+        issue = (_completeness_issue(bundle["full"])
+                 or _min_size_issue(bundle["full"])
+                 or _multi_figure_issue_b(bundle)
                  # 1.7.37 绿噪复检（raw 层漏网时 cutout 再拦——只查绿：
                  # 紫判据在抠图画布上会把蓝裙/蓝制服误判为紫斑）
-                 or _green_noise_issue(data))
+                 or _green_noise_issue_b(bundle))
         if issue:
             return issue
         if not nude_ok:
-            return _skin_excess_issue(data)
+            return _skin_excess_issue_b(bundle)
         return None
+    except Exception:
+        return None
+
+
+def _raw_quality_issue(data: bytes) -> str | None:
+    """raw 级成品复检（`_queue_asset` 写 ready 前的那道门）：双人同框 + 绿噪。
+
+    B-05/M-02：原来是一次 `_multi_figure_issue(data)` 再 `_green_noise_issue(data)`
+    （同一张图解码两次）；这里合成一个函数、共用一次解码，便于整体丢线程池。
+    """
+    try:
+        from .image import (_check_bundle, _multi_figure_issue_b,
+                            _green_noise_issue_b)
+        bundle = _check_bundle(data)
+        return _multi_figure_issue_b(bundle) or _green_noise_issue_b(bundle)
     except Exception:
         return None
 
@@ -1068,20 +1149,25 @@ def _chain_issue(out: bytes, prev: bytes | None = None) -> str | None:
     把全量质检家底 + 高频纹理异常（块方差）合并，命中即换种子重试。
     1.7.30 用户要求：游戏内变化要像人工精选种子那样精美——凭据就是这
     组检查（数分钟前的测试证明：选种后被弃的绿噪/紫斑/横纹/晶簇图全部
-    在此被拦截或部分拦截）。"""
+    在此被拦截或部分拦截）。
+
+    B-05/M-02：整图只解码一次（`_check_bundle`），判据/阈值不变；
+    调用方请用 `await asyncio.to_thread(_chain_issue, ...)`。
+    """
     from . import image as _im
     try:
-        import io as _io
-        import PIL.Image as _PIL
-        img = _PIL.Image.open(_io.BytesIO(out))
-        comp = (_im._completeness_issue(img) or _im._min_size_issue(img)
-                or _im._nan_issue(out) or _im._purple_blob_issue(out)
-                or _im._fast_face_test(out))
+        bundle = _im._check_bundle(out)
+        comp = (_im._completeness_issue(bundle["full"])
+                or _im._min_size_issue(bundle["full"])
+                or _im._nan_issue_b(bundle) or _im._purple_blob_issue_b(bundle)
+                or _im._fast_face_test_b(bundle))
         if comp:
             return comp
         # 高频纹理异常（晶簇/横纹家族：块内方差高占比）
-        im2 = img.convert("RGB").copy()
-        im2.thumbnail((48, 48), _PIL.Image.LANCZOS)
+        # B-05/M-02：复用 bundle 里那张 48px RGB 缩图（与原来这里
+        # 自己缩一次的参数完全一致：convert("RGB") + thumbnail((48,48), LANCZOS)），
+        # 不再为这一项多解码/多缩一次。
+        im2 = bundle["rgb48"]
         pw, ph = im2.size
         px = list(im2.getdata())
         B = 4
@@ -1119,7 +1205,7 @@ async def _refine_with_retry(client, prev_cut: bytes, prompt: str, seed: int,
             prev_cut, prompt, s, denoise=denoise,
             body_pass=True, body_denoise=body_dn,
             hair_words=hair_words, negative_extra=negative_extra)
-        issue = _chain_issue(out, prev_cut)
+        issue = await asyncio.to_thread(_chain_issue, out, prev_cut)
         if not issue:
             return out
         last = issue
@@ -1950,10 +2036,13 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
                         prev, inp_prompt,
                         _seed_for(session, f"fit|prot|{name}|{stage_idx}|{outfit_s}"),
                         nude_mode=_outfit_nude_mode(session, outfit_s))
-                    if _final_check_issue(out, nude_ok=_nude_hint_text(outfit_s)):
-                        log.warning("outfit inpaint result advisory: %s",
-                                    _final_check_issue(out,
-                                        nude_ok=_nude_hint_text(outfit_s)))
+                    # B-05/M-02：复检丢线程池；原来是「先调一次判断、
+                    # 再调一次取文案」（两次整图质检），现在算一次复用
+                    _advise = await asyncio.to_thread(
+                        _final_check_issue, out,
+                        nude_ok=_nude_hint_text(outfit_s))
+                    if _advise:
+                        log.warning("outfit inpaint result advisory: %s", _advise)
                     raw_name = f"{_session_dir_name(session)}/raw/{key}_raw.png"
                     (cfgmod.CACHE_DIR / raw_name).write_bytes(out)
                     return out, raw_name
@@ -2067,7 +2156,9 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
         raw_name = f"{_session_dir_name(session)}/raw/{key}_raw.png"
         (cfgmod.CACHE_DIR / raw_name).write_bytes(data)
         out = await process_portrait_async(data, _cutout_mode())
-        issue = _final_check_issue(out, nude_ok=_nude_hint_text(outfit_s, note_s))
+        issue = await asyncio.to_thread(
+            _final_check_issue, out,
+            nude_ok=_nude_hint_text(outfit_s, note_s))
         if issue and not outfit_s:
             raise ImageGenError(f"成品完整性复检未通过（{issue}）")
         # 脸部 img2img 一致性：仅同阶段重画/换装有可参考的原图时执行（禁跨阶段取脸）
@@ -2160,8 +2251,9 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
                         # 视为失败回退全量生成（否则该表情会变成 neutral）
                         if out is base or out == base:
                             raise ImageGenError("diff refine 未生效（守卫弃用）")
-                        issue = _final_check_issue(
-                            out, nude_ok=_nude_hint_text(outfit_s, note_s))
+                        issue = await asyncio.to_thread(
+                            _final_check_issue, out,
+                            nude_ok=_nude_hint_text(outfit_s, note_s))
                         if not issue:
                             raw_name = f"{_session_dir_name(session)}/raw/{key}_raw.png"
                             (cfgmod.CACHE_DIR / raw_name).write_bytes(out)
@@ -2222,11 +2314,13 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
                             nude_mode=_outfit_nude_mode(session, outfit_s))
                         (cfgmod.CACHE_DIR / raw_name).write_bytes(out)
                         _nude_npc = _nude_hint_text(outfit_s, note_s)
-                        _final_check_issue(out, nude_ok=_nude_npc)  # 软告警
-                        if _final_check_issue(out, nude_ok=_nude_npc):
+                        # B-05/M-02：复检丢线程池；原来这一处连调三次
+                        # （判断 + 取文案），现在算一次复用
+                        _advise = await asyncio.to_thread(
+                            _final_check_issue, out, nude_ok=_nude_npc)  # 软告警
+                        if _advise:
                             log.warning("outfit inpaint result advisory: %s",
-                                        _final_check_issue(out,
-                                            nude_ok=_nude_npc))
+                                        _advise)
                         return out, raw_name
                     except ImageGenError as e:
                         log.warning("npc outfit inpaint failed (%s), fallback full gen", e)
@@ -2242,7 +2336,9 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
             )
             (cfgmod.CACHE_DIR / raw_name).write_bytes(data)
             out = await process_portrait_async(data, _cutout_mode())
-            issue = _final_check_issue(out, nude_ok=_nude_hint_text(outfit_s, note_s))
+            issue = await asyncio.to_thread(
+                _final_check_issue, out,
+                nude_ok=_nude_hint_text(outfit_s, note_s))
             if issue and not outfit_s:
                 raise ImageGenError(f"成品完整性复检未通过（{issue}）")
             # 脸部 img2img 一致性：NPC 跨表情以 neutral 或同角色原图为参考
@@ -2811,8 +2907,14 @@ def _start_background_task(session: dict, hint: str,
         return await client.generate_background(
             prompt, cfg["game"].get("background_style_suffix", ""))
 
-    _queue_asset(session, "backgrounds", key, bg_id, factory,
-                 f"场景·{base_name[:12]}", fname)
+    try:
+        _queue_asset(session, "backgrounds", key, bg_id, factory,
+                     f"场景·{base_name[:12]}", fname)
+    except Exception:
+        # 任务没排上：把刚占用的编号与映射还回去（否则 bg_count 单调增长）
+        session["bg_count"] = max(0, int(session.get("bg_count", 0) or 0) - 1)
+        (session.get("bg_map") or {}).pop(bg_id, None)
+        raise
     session["bg_map"][bg_id] = key
     return bg_id
 
@@ -3005,21 +3107,68 @@ def _assign_scene_bg(session: dict, turn: dict) -> None:
     log.info("scene first visit '%s' -> new bg %s", scene_name, bg_id)
 
 
+def _bg_state_snapshot(session: dict, turn: dict) -> dict:
+    """背景相关内存态快照（补生成/重绘失败时回滚，B-03 的「内存态被半改」）。"""
+    return {
+        "scene": turn.get("scene"),
+        "background_hint": turn.get("background_hint"),
+        "bg_id": turn.get("background_id"),
+        "bg_count": int(session.get("bg_count", 0) or 0),
+        "scenes": json.loads(json.dumps(session.get("scenes", {}),
+                                       ensure_ascii=False)),
+        "bg_map": dict(session.get("bg_map", {}) or {}),
+        "backgrounds": json.loads(json.dumps(
+            (session.get("assets", {}) or {}).get("backgrounds", {}) or {},
+            ensure_ascii=False)),
+    }
+
+
+def _bg_state_restore(session: dict, turn: dict, snap: dict) -> None:
+    """回滚到快照（失败路径专用：内存态要么全新、要么和失败前一样）。"""
+    turn["scene"] = snap["scene"]
+    turn["background_hint"] = snap["background_hint"]
+    turn["background_id"] = snap["bg_id"]
+    session["bg_count"] = snap["bg_count"]
+    session["scenes"] = snap["scenes"]
+    session["bg_map"] = snap["bg_map"]
+    session.setdefault("assets", {})["backgrounds"] = snap["backgrounds"]
+
+
 def ensure_scene_bg(session: dict) -> None:
     """读档/进入对局时调用：当前幕背景不可用（旧档文件丢失/曾生成失败）
     立即补生成并持久化——否则前端只认 ready，读进旧档时背景区域黑屏，
-    要等再推进一幕才会由 _assign_scene_bg 触发（用户体感「旧档没背景」）。"""
+    要等再推进一幕才会由 _assign_scene_bg 触发（用户体感「旧档没背景」）。
+
+    B-02：调用方（GET /api/game/{sid}、读档端点）已在事件循环上，任务由
+    _spawn_task 真正排入循环；失败时带 sid 与原因落 debug.log，并回滚内存态，
+    不再静默吞掉。"""
+    sid = session.get("sid", "")
     try:
         turn = session["log"][-1]["turn"]
+    except (KeyError, IndexError) as e:
+        log.warning("ensure_scene_bg skipped sid=%s (no turn): %s: %s",
+                    sid, type(e).__name__, e)
+        return
+    snap = None
+    try:
         bg_id = turn.get("background_id")
-        key = session.get("bg_map", {}).get(bg_id or "")
-        entry = (session.get("assets", {}).get("backgrounds", {}) or {}).get(key or "")
+        key = (session.get("bg_map") or {}).get(bg_id or "")
+        entry = ((session.get("assets") or {}).get("backgrounds") or {}).get(key or "")
         if entry and entry.get("status") in ("ready", "pending"):
             return
+        snap = _bg_state_snapshot(session, turn)
         _assign_scene_bg(session, turn)
         persist(session)
+        log.info("ensure_scene_bg regenerated sid=%s bg_id=%s",
+                 sid, turn.get("background_id"))
     except Exception as e:
-        log.warning("ensure_scene_bg skipped: %s", e)
+        log.warning("ensure_scene_bg failed sid=%s: %s: %s",
+                    sid, type(e).__name__, e)
+        if snap is not None:
+            try:
+                _bg_state_restore(session, turn, snap)
+            except Exception as re:
+                log.warning("ensure_scene_bg rollback failed sid=%s: %s", sid, re)
 
 
 def _clean_rename(turn_raw: dict) -> str:
@@ -3116,64 +3265,304 @@ def rename_session_dirs_to_readable() -> dict:
                             changed = True
             if changed:
                 try:
-                    f.write_text(_json.dumps(d, ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+                    cfgmod.atomic_write_json(f, d, indent=1)
                 except OSError:
                     pass
     return {"renamed": renamed}
 
 
-def cleanup_orphan_cache() -> dict:
-    """删除无任何引用的立绘/背景文件（避免错误读取与混乱）。
+#: 清理时间宽限（小时）：mtime 比这更新的文件**一律不删**（M-05／B-06）。
+#: 依据：生成/重画/抠图是「先落盘、后登记引用」的多步过程，若在登记完成前
+#: 判孤儿就会删掉刚出炉的图；24h 足以跨过任何一次生成流程与一次重启。
+CLEANUP_GRACE_HOURS = 24.0
+#: 清理报告落盘文件名（落在 DATA_DIR 下，可复核）
+CLEANUP_REPORT_FILE = "cleanup-report.json"
+#: 允许被删除的二级子目录白名单（其余位置只报告、不删）
+_CLEANUP_DELETABLE_SUBDIRS = ("versions", "portraits", "backgrounds", "raw", "preview")
+#: 报告里各列表的保留上限（避免报告无限膨胀）
+_CLEANUP_LIST_CAP = 200
 
-    引用集 = 全部会话资产 file/raw + 全局存档槽 + CG 回廊 + 主缓存目录下的新格式树。
-    仅删除确认无引用的文件；被引用的（含根级旧哈希）一律保留。
+
+def _cleanup_session_dirs(d: dict) -> list[str]:
+    """一份快照可能对应的对局目录名（新可读名 + 旧 sid 名）。"""
+    out = []
+    try:
+        out.append(_session_dir_name(d))
+    except Exception:
+        pass
+    sid = str((d or {}).get("sid") or "")
+    if sid:
+        out.append(sid)
+    return out
+
+
+def cleanup_orphan_cache(*, dry_run: bool = False,
+                         grace_hours: float = CLEANUP_GRACE_HOURS) -> dict:
+    """删除无任何引用的立绘/背景文件（M-05 / B-06：红线「先建引用集」的完整实现）。
+
+    ## 引用集（构造位置就是本函数，字段见下）
+      1) **会话资产**：`SESSIONS[*]["assets"][*][*]` 的 `file` / `raw_file`
+      2) **立绘历程**：同一份快照的 `portrait_history[*]` 的 `file` / `raw_file`
+      3) **全局存档槽**：`data/slots/*.json` 快照（同上两个字段）
+      4) **存档**：`data/saves/*.json` 快照（同上两个字段）
+      5) **CG 回廊引用**（此前完全缺失）：`data/cg/meta.json` 每条记录的
+         `file`（历史条目里记的缓存相对路径）、`raw_file`，以及
+         `sid` + (`id`|`cg_id`) → 该局 `cg_map[cg_id].key` →
+         `assets.backgrounds[key].file`（CG 取图链的底图）
+      6) **归档兜底**：`data/archives/*.zip` 内 `session.json` 声明的引用
+      —— 引用一律规范成 `对局目录/子目录/文件名`（POSIX 分隔符）后比对。
+
+    ## 删除白名单（**同时**满足才可能删）
+      a) 位于 CACHE_DIR 之下且扩展名是图片；
+      b) **不是根级文件**（坑 #14：根级旧哈希只做 `_legacy/` 备份 copy，禁删）；
+      c) 二级目录 ∈ versions/portraits/backgrounds/raw/preview；
+      d) 路径不在任何引用集里；
+      e) `mtime` 早于 `now - grace_hours`（**宽限期内无论有无引用都不删**）；
+      f) 所在对局目录**可归属**（是本轮加载到的会话／存档槽的对局目录）；
+      g) 本轮引用集**完整**（没有任何读不出的 saves／slots／cg 清单）。
+
+    ## 宁留不删（两条兜底）
+      * 任一存档/清单读不出 → `aborted=True`，**本轮一个文件都不删**（报告里列出
+        本来会被删的候选），因为「读不出」无法证明「无引用」；
+      * 对局目录无法归属（存档被手动删除、损坏、或目录名不认识）→ 只报告不删。
+
+    返回 `{"deleted": n, "report": 报告路径, ...计数, "aborted": bool}`；
+    报告（候选／跳过原因／宽限跳过／实际删除）落盘 `DATA_DIR/cleanup-report.json`。
     """
     import json as _json
-    import glob as _glob
+    import time as _time
 
-    def _add_hist_refs(d: dict) -> None:
-        for e in d.get("portrait_history") or []:
-            if e.get("file"):
-                refs.add(e["file"])
-            if e.get("raw_file"):
-                refs.add(e["raw_file"])
+    started = _time.time()
+    now = started
+    grace_s = max(0.0, float(grace_hours)) * 3600.0
 
-    refs = set()
-    for s in SESSIONS.values():
-        for group in s.get("assets", {}).values():
+    refs: dict[str, set[str]] = {k: set() for k in
+                                 ("sessions", "history", "saves", "slots", "cg", "archives")}
+    parse_failed: list[dict] = []
+    known_dirs: set[str] = set()
+    snap_by_sid: dict[str, dict] = {}
+
+    def _norm(v) -> str:
+        return str(v or "").replace("\\", "/").lstrip("/")
+
+    def _take(d: dict, cat: str) -> None:
+        """收集一份快照的全部引用（资产 + 立绘历程 + CG 映射）。"""
+        if not isinstance(d, dict):
+            return
+        for group in (d.get("assets") or {}).values():
+            if not isinstance(group, dict):
+                continue
             for item in group.values():
-                if item.get("file"):
-                    refs.add(item["file"])
-                if item.get("raw_file"):
-                    refs.add(item["raw_file"])
-        _add_hist_refs(s)
-    for p in (_slots_dir().glob("*.json"), cfgmod.SAVES_DIR.glob("*.json")):
-        for f in p:
+                if not isinstance(item, dict):
+                    continue
+                for k in ("file", "raw_file"):
+                    v = _norm(item.get(k))
+                    if v:
+                        refs[cat].add(v)
+        for e in d.get("portrait_history") or []:
+            if not isinstance(e, dict):
+                continue
+            for k in ("file", "raw_file"):
+                v = _norm(e.get(k))
+                if v:
+                    refs["history"].add(v)
+        bgs = (d.get("assets") or {}).get("backgrounds") or {}
+        if not isinstance(bgs, dict):
+            return
+        for m in (d.get("cg_map") or {}).values():
+            key = (m or {}).get("key") if isinstance(m, dict) else ""
+            entry = bgs.get(key or "") or {}
+            f = _norm(entry.get("file"))
+            if f:
+                refs["cg"].add(f)
+
+    def _remember(d: dict) -> None:
+        for name in _cleanup_session_dirs(d):
+            if name:
+                known_dirs.add(name)
+        sid = str((d or {}).get("sid") or "")
+        if sid and sid not in snap_by_sid:
+            snap_by_sid[sid] = d
+
+    # ---- 1) 内存会话 ----
+    for s in list(SESSIONS.values()):
+        _take(s, "sessions")
+        _remember(s)
+    # ---- 2/3) 存档 + 全局存档槽（读不出 → 记 parse_failed，本轮放弃删除）----
+    for cat, d_ in (("saves", cfgmod.SAVES_DIR), ("slots", _slots_dir())):
+        for f in sorted(Path(d_).glob("*.json")):
             try:
-                d = _json.loads(f.read_text(encoding="utf-8"))
+                snap = _json.loads(f.read_text(encoding="utf-8"))
+                if not isinstance(snap, dict):
+                    raise ValueError("快照不是对象")
+            except Exception as e:
+                parse_failed.append({"source": cat, "file": f.name,
+                                     "error": f"{type(e).__name__}: {e}"})
+                continue
+            _take(snap, cat)
+            _remember(snap)
+    # ---- 4) CG 回廊引用集（此前完全缺失）----
+    cg_items: list = []
+    try:
+        raw_meta = cfgmod.CG_META_PATH.read_text(encoding="utf-8")
+        cg_items = _json.loads(raw_meta)
+        if not isinstance(cg_items, list):
+            raise ValueError("CG 清单不是列表")
+    except FileNotFoundError:
+        cg_items = []
+    except Exception as e:
+        parse_failed.append({"source": "cg_meta", "file": cfgmod.CG_META_PATH.name,
+                             "error": f"{type(e).__name__}: {e}"})
+        cg_items = []
+    for it in cg_items:
+        if not isinstance(it, dict):
+            continue
+        f = _norm(it.get("file"))
+        if f and "/" in f:
+            refs["cg"].add(f)            # 历史条目：清单里直接记缓存相对路径
+        raw = _norm(it.get("raw_file"))
+        if raw:
+            refs["cg"].add(raw)
+        cid = str(it.get("id") or it.get("cg_id") or "")
+        sid = str(it.get("sid") or "")
+        snap = snap_by_sid.get(sid)
+        if not (cid and snap):
+            continue
+        m = (snap.get("cg_map") or {}).get(cid) or {}
+        key = (m or {}).get("key") if isinstance(m, dict) else ""
+        entry = ((snap.get("assets") or {}).get("backgrounds") or {}).get(key or "") or {}
+        f2 = _norm(entry.get("file"))
+        if f2:
+            refs["cg"].add(f2)
+    # ---- 5) 归档兜底（zip 自包含；仅把包内声明的引用记入，避免误删导出源）----
+    try:
+        import zipfile as _zip
+        for z in sorted((cfgmod.DATA_DIR / "archives").glob("*.zip")):
+            try:
+                with _zip.ZipFile(z) as zf:
+                    info = zf.getinfo("session.json")
+                    if info.file_size > 8 * 1024 * 1024:
+                        continue
+                    snap = _json.loads(zf.read("session.json").decode("utf-8"))
             except Exception:
                 continue
-            _add_hist_refs(d)
-            for group in d.get("assets", {}).values():
-                for item in group.values():
-                    if item.get("file"):
-                        refs.add(item["file"])
-                    if item.get("raw_file"):
-                        refs.add(item["raw_file"])
-    deleted = 0
+            _take(snap, "archives")
+    except Exception as e:
+        log.warning("cleanup: archives refs skipped: %s", e)
+
+    all_refs: set[str] = set()
+    for v in refs.values():
+        all_refs |= v
+
+    aborted = bool(parse_failed)
+    abort_reason = ("引用集不完整：存在读不出的存档/清单 —— 宁留不删，本轮不删除任何文件"
+                    if aborted else "")
+
+    # ---- 扫描与逐条判定（判定顺序即报告里的跳过原因）----
+    deleted: list[dict] = []
+    skipped: dict[str, list] = {k: [] for k in
+                                ("grace", "unattributed", "root_protected", "legacy",
+                                 "aborted", "other")}
+    kept_referenced = 0
+    scanned = 0
+    bytes_freed = 0
+
     for f in cfgmod.CACHE_DIR.rglob("*"):
         if not f.is_file() or f.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
             continue
-        rel = str(f.relative_to(cfgmod.CACHE_DIR)).replace("\\", "/")
-        if rel in refs:
+        scanned += 1
+        try:
+            rel = f.relative_to(cfgmod.CACHE_DIR).as_posix()
+        except ValueError:
+            continue
+        parts = rel.split("/")
+        if rel in all_refs:
+            kept_referenced += 1
+            continue
+        if len(parts) == 1:
+            skipped["root_protected"].append(rel)     # 坑 #14：根级只备份不删
+            continue
+        if parts[0] == "_legacy":
+            skipped["legacy"].append(rel)             # 旧哈希备份目录，只留不删
+            continue
+        if parts[-2] not in _CLEANUP_DELETABLE_SUBDIRS:
+            skipped["other"].append(rel)
+            continue
+        try:
+            st = f.stat()
+            age = now - st.st_mtime
+        except OSError as e:
+            skipped["other"].append(f"{rel} (stat 失败: {e})")
+            continue
+        if age < grace_s:
+            skipped["grace"].append({"rel": rel, "age_hours": round(age / 3600, 2)})
+            continue
+        if parts[0] not in known_dirs:
+            skipped["unattributed"].append(rel)       # 无法证明无引用 → 宁留不删
+            continue
+        if aborted:
+            skipped["aborted"].append(rel)            # 本轮引用集不完整 → 一个不删
+            continue
+        if dry_run:
+            deleted.append({"rel": rel, "size": st.st_size,
+                            "age_hours": round(age / 3600, 1), "dry_run": True})
             continue
         try:
             f.unlink()
-            deleted += 1
-        except OSError:
+        except OSError as e:
+            skipped["other"].append(f"{rel} (unlink 失败: {e})")
             continue
-    return {"deleted": deleted}
+        deleted.append({"rel": rel, "size": st.st_size,
+                        "age_hours": round(age / 3600, 1)})
+        bytes_freed += st.st_size
+
+    report = {
+        "version": 1,
+        "generated_at": _time.strftime("%Y-%m-%d %H:%M:%S"),
+        "elapsed_s": round(_time.time() - started, 2),
+        "cache_dir": str(cfgmod.CACHE_DIR),
+        "dry_run": bool(dry_run),
+        "grace_hours": float(grace_hours),
+        "aborted": aborted,
+        "abort_reason": abort_reason,
+        "counts": {
+            "scanned_images": scanned,
+            "deleted": len(deleted),
+            "kept_referenced": kept_referenced,
+            "skipped_grace": len(skipped["grace"]),
+            "skipped_unattributed": len(skipped["unattributed"]),
+            "skipped_root_protected": len(skipped["root_protected"]),
+            "skipped_legacy": len(skipped["legacy"]),
+            "skipped_aborted": len(skipped["aborted"]),
+            "skipped_other": len(skipped["other"]),
+            "bytes_freed": bytes_freed,
+        },
+        "refs": dict({k: len(v) for k, v in refs.items()}, total=len(all_refs)),
+        "known_session_dirs": sorted(known_dirs)[:80],
+        "parse_failed": parse_failed,
+        "deleted": deleted[:_CLEANUP_LIST_CAP],
+        "deleted_truncated": max(0, len(deleted) - _CLEANUP_LIST_CAP),
+        "skipped_samples": {k: v[:_CLEANUP_LIST_CAP] for k, v in skipped.items() if v},
+    }
+    report_path: Path | None = cfgmod.DATA_DIR / CLEANUP_REPORT_FILE
+    try:
+        cfgmod.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(_json.dumps(report, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+    except OSError as e:
+        log.warning("cleanup report write failed: %s", e)
+        report_path = None
+    log.info("cleanup: 扫描=%d 删除=%d 引用保留=%d 宽限跳过=%d 不可归属=%d "
+             "根级保护=%d 本轮放弃=%s 报告=%s",
+             scanned, len(deleted), kept_referenced, len(skipped["grace"]),
+             len(skipped["unattributed"]), len(skipped["root_protected"]),
+             "是" if aborted else "否", report_path or "(未落盘)")
+    out = {"deleted": len(deleted),
+           "report": str(report_path) if report_path else "",
+           "aborted": aborted,
+           "abort_reason": abort_reason}
+    out.update(report["counts"])
+    return out
 
 
 def _apply_turn_stats(session: dict, turn: dict, mock: bool) -> dict:
@@ -3399,6 +3788,38 @@ def update_policy(sid: str, rating: str, r18: bool,
             "adult_intensity": intensity,
             "allow_forced": session["allow_forced"]}
 
+
+
+def tasks_view(session: dict) -> dict:
+    """M-07（后端部分）：把这个对局「在排队 / 在跑什么」变成可观测。
+
+    返回 pending 资产（含排队时长 elapsed）+ 资产计数 + SD 串行通道状态
+    （谁在生成、谁在等待、各等多久）。**只读**：不改任何状态、不触发生成。
+    """
+    from . import image as _im
+    now = time.time()
+    queue = []
+    counts = {"pending": 0, "ready": 0, "error": 0}
+    for group, bucket in (session.get("assets") or {}).items():
+        for key, item in (bucket or {}).items():
+            st = item.get("status") or "?"
+            if st in counts:
+                counts[st] += 1
+            if st != "pending":
+                continue
+            q0 = item.get("queued_at")
+            queue.append({"group": group, "key": key,
+                          "label": item.get("label", ""), "status": st,
+                          "queued_at": q0,
+                          "elapsed_s": round(now - q0, 1) if q0 else None})
+    queue.sort(key=lambda x: x.get("queued_at") or 0)
+    try:
+        sd = _im.sd_state()
+    except Exception as e:      # 观测不可用绝不能让接口挂掉
+        sd = {"error": f"{type(e).__name__}: {e}"}
+    return {"sid": session.get("sid", ""), "now": round(now, 3),
+            "assets": counts, "queue_len": len(queue), "queue": queue[:20],
+            "sd": sd}
 
 
 def public_state(session: dict) -> dict:
@@ -3869,7 +4290,10 @@ async def apply_command(sid: str, character: str, action: str) -> dict:
     session["log"].append({"turn": turn, "choice": None})
     persist(session)
     # 命令场面立即合成一张场景 CG 收藏（不依赖 LLM 生成的桥段图）
-    save_command_cg(session, turn, f"命令·{action_cn}")
+    # B-05/M-02：命令场面的 CG 合成是 CPU 密集（1600×900 画布 + 多张全尺寸
+    # 图 resize + 文字绘制），必须丢线程池——原来在 apply_command（async）
+    # 里同步跑，合成期间事件循环被独占。
+    await asyncio.to_thread(save_command_cg, session, turn, f"命令·{action_cn}")
     return public_state(session)
 
 
@@ -4015,8 +4439,7 @@ def save_slot(sid: str, name: str) -> dict:
     snapshot = json.loads(json.dumps(session, ensure_ascii=False))
     snapshot["slot_name"] = (name or "存档").strip()[:30]
     snapshot["slot_created"] = time.time()
-    (_slots_dir() / f"{slot_id}.json").write_text(
-        json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    cfgmod.atomic_write_json(_slots_dir() / f"{slot_id}.json", snapshot)
     return {"slot_id": slot_id, "name": snapshot["slot_name"],
             "turn_no": len(snapshot.get("log", []))}
 
@@ -4098,8 +4521,7 @@ def migrate_legacy_slots() -> int:
                 target = _slots_dir() / f"{new_id}.json"
                 if not target.is_file():
                     data.setdefault("slot_name", f"旧存档·{f.stem}")
-                    target.write_text(json.dumps(data, ensure_ascii=False),
-                                      encoding="utf-8")
+                    cfgmod.atomic_write_json(target, data)
                     moved += 1
             except (json.JSONDecodeError, OSError):
                 continue
@@ -4316,9 +4738,14 @@ def _cg_url(session: dict, turn: dict) -> str:
 
 def scene_set(sid: str, name: str, action: str = "enter") -> dict:
     """「读取场景」：进入已有/更换场景（复用或生成对应背景）或强制重生成
-    当前场景背景。TSF/VN 通用；返回前端状态供立即重绘。"""
+    当前场景背景。TSF/VN 通用；返回前端状态供立即重绘。
+
+    B-03：调用方（POST /api/game/{sid}/scene-set）已在事件循环上，背景任务
+    由 _spawn_task 真正排入循环；任何失败都回滚内存态（bg_id / scenes /
+    bg_count），不再把内存改坏且只留下 500。"""
     session = get_session(sid)
     turn = session["log"][-1]["turn"]
+    snap = _bg_state_snapshot(session, turn)
 
     def scene_entry(scn: str) -> tuple[str, dict]:
         import hashlib as _hl
@@ -4330,30 +4757,39 @@ def scene_set(sid: str, name: str, action: str = "enter") -> dict:
         sc["name"] = scn
         return scene_id, sc
 
-    if action == "rerender":
-        _, sc = scene_entry(turn.get("scene", "……"))
-        old_key = session.get("bg_map", {}).get(sc.get("bg_id", ""))
-        bgs = session.get("assets", {}).get("backgrounds", {}) or {}
-        if old_key and old_key in bgs:
-            bgs[old_key]["status"] = "error"
-            bgs[old_key]["error"] = "手动重生成场景背景"
-        sc.pop("bg_id", None)
-        _assign_scene_bg(session, turn)
-        _, sc = scene_entry(turn.get("scene", "……"))
+    try:
+        if action == "rerender":
+            _, sc = scene_entry(turn.get("scene", "……"))
+            old_key = session.get("bg_map", {}).get(sc.get("bg_id", ""))
+            bgs = session.get("assets", {}).get("backgrounds", {}) or {}
+            if old_key and old_key in bgs:
+                bgs[old_key]["status"] = "error"
+                bgs[old_key]["error"] = "手动重生成场景背景"
+            sc.pop("bg_id", None)
+            _assign_scene_bg(session, turn)
+            _, sc = scene_entry(turn.get("scene", "……"))
+            sc["bg_id"] = turn.get("background_id") or sc.get("bg_id")
+            persist(session)
+            return public_state_of(session)
+        name = (name or "").strip()[:30]
+        if not name:
+            raise GameError("请输入场景名")
+        turn["scene"] = name
+        if not turn.get("background_hint"):
+            turn["background_hint"] = name
+        _assign_scene_bg(session, turn)   # 已有场景记录 → 复用其固定背景
+        _, sc = scene_entry(name)
         sc["bg_id"] = turn.get("background_id") or sc.get("bg_id")
         persist(session)
         return public_state_of(session)
-    name = (name or "").strip()[:30]
-    if not name:
-        raise GameError("请输入场景名")
-    turn["scene"] = name
-    if not turn.get("background_hint"):
-        turn["background_hint"] = name
-    _assign_scene_bg(session, turn)   # 已有场景记录 → 复用其固定背景
-    _, sc = scene_entry(name)
-    sc["bg_id"] = turn.get("background_id") or sc.get("bg_id")
-    persist(session)
-    return public_state_of(session)
+    except GameError:
+        _bg_state_restore(session, turn, snap)   # 早退（空场景名）等价 no-op
+        raise
+    except Exception as e:
+        _bg_state_restore(session, turn, snap)
+        log.warning("scene_set failed sid=%s action=%s name=%s: %s: %s",
+                    sid, action, name, type(e).__name__, e)
+        raise GameError(f"场景切换失败：{e}") from e
 
 
 def delete_session(sid: str) -> None:

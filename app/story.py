@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 from . import config as cfgmod
+from . import safe as safemod
 
 
 def _dir() -> Path:
@@ -14,7 +15,14 @@ def _dir() -> Path:
 
 
 def _path(sid: str) -> Path:
-    return _dir() / f"{sid}.json"
+    """剧本文件绝对路径（B-01）。
+
+    id 先过 `safe_id` 白名单（只允许 `[A-Za-z0-9_-]{1,32}`），再经 `safe_join`
+    逐段校验 + `resolve()` 越界断言。`'../../../../TSF_Galgame/config'` 这类 id
+    在这里直接抛 ValueError——不拼出任何越界路径。
+    """
+    sid = safemod.safe_id(sid, what="剧本 id")
+    return safemod.safe_join(_dir(), f"{sid}.json", what="剧本文件")
 
 
 import re as _re
@@ -106,7 +114,10 @@ def list_all() -> list[dict]:
 
 
 def get(sid: str) -> dict | None:
-    p = _path(sid)
+    try:
+        p = _path(sid)
+    except ValueError:
+        return None          # 非法 id 一律按「不存在」处理：不拼路径、不抛 500
     if not p.is_file():
         return None
     try:
@@ -117,23 +128,40 @@ def get(sid: str) -> dict | None:
 
 def save(st: dict) -> dict:
     st = _clean(st)
-    _path(st["id"]).write_text(
-        json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    # B-04/t30：剧本是玩家可写数据，改走原子写（含 Windows 共享冲突退避重试）。
+    cfgmod.atomic_write_json(_path(st["id"]), st, indent=2)
     return st
 
 
 def delete(sid: str) -> bool:
     """删除档案：软删除——先移入 trash 备份目录（data/storylines_trash/），
-    防止任何误删/数据丢失，需要时可直接从备份恢复。"""
-    p = _path(sid)
+    防止任何误删/数据丢失，需要时可直接从备份恢复。
+
+    B-01：id 非法（含 `..`/分隔符/绝对路径/驱动器号等）一律返回 False，
+    **不碰文件系统**；备份路径同样走 safe_join。
+    """
+    try:
+        p = _path(sid)
+    except ValueError:
+        return False
     if not p.is_file():
         return False
     trash = cfgmod.DATA_DIR / "storylines_trash"
     trash.mkdir(parents=True, exist_ok=True)
     try:
-        (trash / f"{sid}.json").write_text(p.read_text(encoding="utf-8"),
-                                           encoding="utf-8")
+        backup = safemod.safe_join(trash, f"{sid}.json", what="备份文件")
+        text = p.read_text(encoding="utf-8")
+        try:
+            # B-04/t30：备份也走原子写（备份被截断 = 删了就真没了）。
+            # 源文件本身是 atomic_write_json 产物（indent=2），重新序列化后
+            # 与源文本逐字一致；这里传对象而不是原始文本，是为了复用同一套
+            # 原子写 + Windows 共享冲突退避重试（config.atomic_write_json）。
+            cfgmod.atomic_write_json(backup, json.loads(text), indent=2)
+        except json.JSONDecodeError:
+            # 兜底：源文件本身已损坏（历史残留）时，保留旧行为让删除仍能成功——
+            # 此时"能删掉坏文件"比"备份一个坏文件的原子性"更重要。
+            backup.write_text(text, encoding="utf-8")
         p.unlink()
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False

@@ -34,8 +34,9 @@ def _meta_load() -> list[dict]:
 
 def _meta_save(items: list[dict]) -> None:
     cfgmod.CG_DIR.mkdir(parents=True, exist_ok=True)
-    cfgmod.CG_META_PATH.write_text(
-        json.dumps(items[:MAX_CG], ensure_ascii=False, indent=1), encoding="utf-8")
+    # B-04/t30：CG 回廊清单是玩家收藏数据，改走原子写（含 Windows 共享冲突退避重试）。
+    # indent=1 透传，保持 meta.json 的既有缩进格式不变。
+    cfgmod.atomic_write_json(cfgmod.CG_META_PATH, items[:MAX_CG], indent=1)
 
 
 def _new_id() -> str:
@@ -115,7 +116,15 @@ def _pick_portrait(session: dict, turn: dict, name: str) -> dict | None:
 
 def compose_scene(session: dict, turn: dict, cg_type: str = "manual",
                   note: str = "") -> dict:
-    """把当前轮次的画面（背景 + 在场立绘）合成为场景 CG 并入库。"""
+    """把当前轮次的画面（背景 + 在场立绘）合成为场景 CG 并入库。
+
+    ⚠️ 调用契约（B-05/M-02）：本函数是**同步 CPU 密集**操作（1600×900 画布
+    + 多张全尺寸图 resize + 文字绘制），**异步调用方必须**
+    `await asyncio.to_thread(compose_scene, ...)`（或经
+    `game.save_command_cg` 之类的已包装入口），绝不要在事件循环上直接调用
+    ——否则合成期间整个服务（含前端轮询）都被堵住。
+    同步上下文（FastAPI 的 `def` 端点会跑在线程池里）可直接调用。
+    """
     cfgmod.CG_DIR.mkdir(parents=True, exist_ok=True)
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), (20, 18, 38))
 

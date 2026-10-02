@@ -16,6 +16,7 @@ import zipfile
 from pathlib import Path
 
 from . import config as cfgmod
+from . import safe as safemod
 
 MAX_ARCHIVE_BYTES = 500 * 1024 * 1024  # 500MB 上限（本地游戏，够用且防呆）
 CN = "\u4e00-\u9fa5"
@@ -207,10 +208,17 @@ def import_archive(path_or_bytes) -> dict:
 
 
 def delete_archive(name: str) -> bool:
-    """删除归档（仅限 archives 目录内的 .zip，文件名白名单校验）。"""
-    if not _ZIP_NAME_RE.fullmatch(name):
+    """删除归档（仅限 archives 目录内的 .zip）。
+
+    B-01 同批：文件名白名单之外再叠一层 `safe_join`——逐段拒绝 + resolve 后
+    断言仍在 archives 目录内，越界直接返回 False（不碰文件系统）。
+    """
+    if not isinstance(name, str) or not _ZIP_NAME_RE.fullmatch(name):
         return False
-    f = _archives_dir() / name
+    try:
+        f = safemod.safe_join(_archives_dir(), name, what="档案文件名")
+    except ValueError:
+        return False
     if not f.is_file():
         return False
     try:

@@ -4,10 +4,12 @@
 """
 import asyncio
 import colorsys
+import functools
 import hashlib
 import io
 import logging
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -476,15 +478,14 @@ class ImageGenError(Exception):
 
 
 # 全局 SD WebUI 生成信号量：所有任务（无论哪个 ImageClient 实例）共享，
-# 真正串行请求——避免多任务并发排队导致 A1111 内部队列堆积/超时卡死
+# 真正串行请求——避免多任务并发排队导致 A1111 内部队列堆积/超时卡死。
+#
+# ⚠️ 立绘 / 背景 / 桥段 CG / ComfyUI **共用这一条串行通道**（1.7.7 结论：
+# 三路并发时大图同占显存 → 8GB 显存爆掉、进程被拖死）。
+# 历史上曾有 `_GLOBAL_BG_SEM` / `_get_bg_sem()` / `_get_cg_sem()` 描述「背景/CG
+# 独立生成链」，但它们**除定义外零引用（死代码）**，注释会误导人以为存在三链路
+# ——B-15 清理时已删除；现在只有这一条链，注释与实现一致。
 _GLOBAL_SD_SEM = None
-# 背景/CG 独立生成链：立绘（1024x1760 大图）排长队时不再挤占背景/CG，
-# 两条链各自串行、互不阻塞——「CG/背景没请求到 SD」的感知多数来自被
-# 立绘长队列压住（无提交日志时像没发请求）。
-_GLOBAL_BG_SEM = None
-# CG 独享一条生成链（1.6.95）：CG 使用比普通背景更大的画布（16:9 宽幅），
-# 单独串行防止与背景/立绘并发把显存顶爆。
-_GLOBAL_CG_SEM = None
 
 
 def _get_sd_sem():
@@ -494,18 +495,148 @@ def _get_sd_sem():
     return _GLOBAL_SD_SEM
 
 
-def _get_bg_sem():
-    global _GLOBAL_BG_SEM
-    if _GLOBAL_BG_SEM is None:
-        _GLOBAL_BG_SEM = asyncio.Semaphore(1)
-    return _GLOBAL_BG_SEM
+# ---------- SD 调用观测（审计 2.6 / M-06 / B-15）：只记录，不改变互斥 ----------
+# 目的：把「生成（持信号量）与打标（interrogate/tagger，不持信号量）是否真的
+# 时间重叠」变成可导出、可复核的证据，供后续决定是否收紧互斥。
+# 约束：观测本身极轻（内存 list + time.time()），**不做同步 IO、不加锁、不改动
+# `_get_sd_sem()` 的容量与获取顺序**——本文件里 Semaphore(1) 仍是唯一串行闸门。
+_SD_OBS_MAX = 400
+_SD_OBS: list = []
+_SD_SEQ = 0
 
 
-def _get_cg_sem():
-    global _GLOBAL_CG_SEM
-    if _GLOBAL_CG_SEM is None:
-        _GLOBAL_CG_SEM = asyncio.Semaphore(1)
-    return _GLOBAL_CG_SEM
+def _sd_begin(kind: str, label: str) -> dict:
+    """登记一次 SD 调用的开始（kind: gen / meta / probe）。"""
+    global _SD_SEQ
+    _SD_SEQ += 1
+    rec = {"id": _SD_SEQ, "kind": kind, "label": label,
+           "t0": time.time(), "acquired_at": None, "t1": None}
+    _SD_OBS.append(rec)
+    if len(_SD_OBS) > _SD_OBS_MAX:
+        del _SD_OBS[: len(_SD_OBS) - _SD_OBS_MAX]
+    return rec
+
+
+def _sd_end(rec: dict) -> None:
+    rec["t1"] = time.time()
+
+
+def sd_call(kind: str, label: str = ""):
+    """装饰 async 的 SD 调用，记录其时间窗；返回值与异常原样透传。"""
+    def deco(fn):
+        name = label or fn.__name__
+
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            rec = _sd_begin(kind, name)
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                _sd_end(rec)
+
+        return wrapper
+
+    return deco
+
+
+class _SdGate:
+    """`self._sem`（= 全局 `Semaphore(1)`）的**观测**包装。
+
+    容量与语义完全不变：仍然是同一个 `Semaphore(1)` 对象、仍然只允许一个持有者、
+    获取顺序不变；只是额外记录「排队等了多久 / 持有到何时」，供任务可见性与
+    重叠报告使用。
+    """
+
+    __slots__ = ("_sem", "_label", "_rec")
+
+    def __init__(self, sem, label: str = ""):
+        self._sem = sem
+        self._label = label
+        self._rec = None
+
+    async def __aenter__(self):
+        rec = _sd_begin("gen", self._label)   # 排队即登记（wait 时间稍后补）
+        await self._sem.acquire()
+        rec["acquired_at"] = time.time()
+        self._rec = rec
+        return self
+
+    async def __aexit__(self, *exc):
+        if self._rec is not None:
+            _sd_end(self._rec)
+        self._sem.release()
+        return False
+
+
+def sd_state() -> dict:
+    """SD 串行通道当前状态：谁在生成、谁在排队、各等了多久（只读）。"""
+    now = time.time()
+    running = None
+    waiting = []
+    for rec in _SD_OBS:
+        if rec["t1"] is not None:
+            continue
+        if rec.get("acquired_at"):
+            if rec["kind"] == "gen" and running is None:
+                running = {"kind": rec["kind"], "label": rec["label"],
+                           "running_s": round(now - rec["acquired_at"], 3),
+                           "queued_s": round(rec["acquired_at"] - rec["t0"], 3)}
+        else:
+            waiting.append({"kind": rec["kind"], "label": rec["label"],
+                            "queued_s": round(now - rec["t0"], 3)})
+    return {"serial": True,
+            "semaphore": "Semaphore(1) 全局单例（观察代码未改动其容量）",
+            "generating": running,
+            "waiting": waiting,
+            "recent": [dict(r) for r in _SD_OBS[-8:]]}
+
+
+def sd_report(reset: bool = False, tail: int = 30) -> dict:
+    """导出「生成 / 打标 / 探测」时间窗与**重叠区间**报告（审计 2.6 / M-06）。
+
+    重叠定义：两个**不同类别**的窗口时间上有交集（gen×meta、gen×probe、
+    meta×probe）。结尾未闭合的窗口按 now 截断并标记 `open: true`。
+    `reset=True` 时导出后清空缓冲（便于分次采样）。
+    """
+    global _SD_OBS
+    now = time.time()
+    evs = [dict(e) for e in _SD_OBS]
+    open_n = 0
+    for e in evs:
+        if e["t1"] is None:
+            e["t1"] = now
+            e["open"] = True
+            open_n += 1
+    by_kind: dict = {}
+    for e in evs:
+        d = by_kind.setdefault(e["kind"], {"count": 0, "busy_s": 0.0})
+        d["count"] += 1
+        d["busy_s"] = round(d["busy_s"] + (e["t1"] - e["t0"]), 3)
+    overlaps = []
+    for i, a in enumerate(evs):
+        for b in evs[i + 1:]:
+            if a["kind"] == b["kind"]:
+                continue
+            s = max(a["t0"], b["t0"])
+            e2 = min(a["t1"], b["t1"])
+            if e2 > s:
+                overlaps.append({"a": f'{a["kind"]}:{a["label"]}',
+                                 "b": f'{b["kind"]}:{b["label"]}',
+                                 "start": round(s, 3), "end": round(e2, 3),
+                                 "overlap_s": round(e2 - s, 3)})
+    report = {"events": len(evs), "open_events": open_n,
+              "first_t0": round(evs[0]["t0"], 3) if evs else None,
+              "now": round(now, 3),
+              "by_kind": by_kind,
+              "overlap_count": len(overlaps),
+              "overlaps": overlaps[:60],
+              "note": ("gen=生成链（持有 Semaphore(1)）；meta=interrogate/tagger；"
+                       "probe=alive/options/reload 等探测。重叠 ≠ 违规，"
+                       "本报告只记录事实，未收紧任何互斥。"),
+              "events_tail": evs[-tail:]}
+    if reset:
+        _SD_OBS = []
+    return report
 
 
 def _hi_res_size(spec: str, max_pixels: int = 4624220) -> str:
@@ -623,7 +754,6 @@ def _validate_url(url: str, allow_local: bool) -> None:
 
     allow_local=True 仅供用户显式选择的本地后端（如 SD WebUI）使用。
     """
-    import ipaddress
     from urllib.parse import urlparse
 
     parsed = urlparse(url)
@@ -635,13 +765,98 @@ def _validate_url(url: str, allow_local: bool) -> None:
     if allow_local:
         return
     try:
-        addr = ipaddress.ip_address(host)
-        local = (addr.is_loopback or addr.is_private or addr.is_reserved
-                 or addr.is_unspecified or addr.is_link_local or addr.is_multicast)
+        port = parsed.port          # 非法端口（如 http://h:abc/）由 urlparse 延迟抛出
     except ValueError:
-        local = host.lower() in ("localhost",) or host.lower().endswith(".local")
-    if local:
+        raise ImageGenError("服务地址端口非法") from None
+    if _is_local_host(host, port):
         raise ImageGenError("该生图服务类型不允许使用本地/内网地址；本地整合包请将服务类型切换为 SD WebUI")
+
+
+def _is_local_ip(addr) -> bool:
+    """单个 IP 是否属于本地/内网/保留/不可路由类别（SSRF 判据，B-13）。"""
+    return bool(addr.is_loopback or addr.is_private or addr.is_reserved
+                or addr.is_unspecified or addr.is_link_local or addr.is_multicast)
+
+
+# DNS 判定预算与缓存（B-13 / O-02）。
+# `_validate_url` 的调用点全部位于 `async def` 体内（事件循环线程），而 DNS 解析
+# 是阻塞网络调用：直接同步解析会在热路径上引入"带 DNS 超时的阻塞"，与"事件循环
+# 只做 IO"相冲突。因此解析放到线程池里做，调用方最多等 _DNS_TIMEOUT_S；结果按
+# 主机缓存 _DNS_CACHE_TTL_S，稳态下同一主机不再触发解析。
+_DNS_TIMEOUT_S = 0.8          # 单次解析最多让调用方等多久（超时按"本地"拒绝）
+_DNS_CACHE_TTL_S = 300.0      # 同一主机判定结果的缓存时长
+_DNS_CACHE: dict = {}
+_DNS_POOL = None
+
+
+def _dns_pool():
+    """懒建的解析线程池（上限 4 线程：主机名被刷时不会无界建线程）。"""
+    global _DNS_POOL
+    if _DNS_POOL is None:
+        import concurrent.futures
+        _DNS_POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="dsh-url-dns")
+    return _DNS_POOL
+
+
+def _is_local_host(host: str, port: int | None) -> bool:
+    """主机名是否指向本地/内网/保留地址（B-13 / O-02 修复）。
+
+    字面量 IP 与明显的本地名同步判定（纯 CPU、微秒级）；其余主机名走
+    ``socket.getaddrinfo``，**任一**返回地址命中本地/内网/保留类别即判为本地——
+    这条堵的正是 ``http://127.0.0.1.nip.io:7860`` 这类"域名解析到回环"的绕过
+    （旧实现只看字面量 IP + ``localhost``/``*.local``）。
+
+    事件循环纪律：解析在**工作线程**里做，调用方最多等 ``_DNS_TIMEOUT_S``；
+    解析失败 / 超时 / 返回空 / 返回无法识别的地址，一律按本地处理（fail-closed，
+    宁可拒绝也不放行目标未知的出站请求）。判定结果按主机缓存，稳态零解析。
+
+    本地后端（SD WebUI 等）的放行不在这里——由调用方 ``_validate_url`` 在
+    ``allow_local=True`` 时**先于这里的一切动作**提前 return，语义与修复前一致。
+    """
+    import ipaddress
+
+    lowered = host.lower().strip().strip("[]")      # IPv6 字面量可能写作 [::1]
+    try:
+        return _is_local_ip(ipaddress.ip_address(lowered.split("%", 1)[0]))
+    except ValueError:
+        pass
+    # 明显的本地名先快速拒绝，省一次 DNS
+    if lowered == "localhost" or lowered.endswith(".localhost") or lowered.endswith(".local"):
+        return True
+
+    import time
+    key = (lowered, port or 0)
+    hit = _DNS_CACHE.get(key)
+    if hit is not None and (time.monotonic() - hit[0]) < _DNS_CACHE_TTL_S:
+        return hit[1]
+
+    import concurrent.futures
+    import socket
+    try:
+        future = _dns_pool().submit(socket.getaddrinfo, lowered, port or 80,
+                                    proto=socket.IPPROTO_TCP)
+    except RuntimeError:                 # 解释器正在关闭：按本地拒绝
+        return True
+    try:
+        infos = future.result(timeout=_DNS_TIMEOUT_S)
+    except (concurrent.futures.TimeoutError, OSError):
+        return True                      # 超时/解析失败不写缓存：下次仍会重新尝试
+
+    verdict = True
+    if infos:
+        verdict = False
+        for info in infos:
+            raw = str(info[4][0]).split("%", 1)[0]   # 去掉 IPv6 zone id
+            try:
+                if _is_local_ip(ipaddress.ip_address(raw)):
+                    verdict = True
+                    break
+            except ValueError:
+                verdict = True
+                break
+    _DNS_CACHE[key] = (time.monotonic(), verdict)
+    return verdict
 
 
 def _hash_key(*parts: object) -> str:
@@ -1757,17 +1972,111 @@ def _completeness_issue(img: Image.Image) -> str | None:
         return None
 
 
-def _nan_issue(raw: bytes) -> str | None:
-    """服务劣化检测（绿噪点/色彩噪声图）：相邻像素差均值过大 → NaN 落盘。
+class _CheckBundle:
+    """一次解码 + **按需**派生缩图（M-02 / B-05 的实现载体）。
 
-    A1111 长时间高强度大图生成后模型/采样状态可能劣化，输出整屏高饱和
-    噪点（绿/蓝/紫）。该信号指涉「服务状态」而非构图——命中后由
-    _sd_retry 触发一次 reload-checkpoint 恢复，并拒绝把噪声图当成品。
+    原先每个判据各自 `Image.open(BytesIO(raw)).convert(...).thumbnail(...)`，
+    同一张整图在一次 `_portrait_check` 里被解码 4~6 次（CPU 密集且都在事件
+    循环线程上）。这里：
+      - 整图只在第一次访问时 `open` + `load`，**整图只解码一次**；
+      - 各判据要的缩图**按需生成并缓存**——判据短路时（先命中噪点/污染）
+        不会白算后面用不到的缩图（这一点很关键：失败路径恰恰是高频路径）。
+
+    ⚠️ 缩图尺寸与重采样滤波与各判据**原来各自的那一份完全一致**
+    （48px 全图 / 48px 顶部 22% 带 / 160px 面部预检 / 220×260 双人基图 /
+    120×160 RGBA 裸露检查），因此判据数值与命中结果不变。
     """
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+        self._full = None
+        self._cache: dict = {}
+
+    # ---- 基础 ----
+    @property
+    def full(self):
+        if self._full is None:
+            self._full = Image.open(io.BytesIO(self._raw))
+            self._full.load()            # ← 唯一一次整图解码
+        return self._full
+
+    @property
+    def size(self):
+        return self.full.size
+
+    @property
+    def multi_is_alpha(self):
+        return self.full.mode in ("RGBA", "LA")
+
+    def _derive(self, key, fn):
+        if key not in self._cache:
+            self._cache[key] = fn(self.full)
+        return self._cache[key]
+
+    # ---- 各判据要求的缩图（懒生成）----
+    def _rgb_thumb(self, box, limit):
+        im = self.full.convert("RGB")
+        if box is not None:
+            im = im.crop(box)
+        else:
+            im = im.copy()
+        im.thumbnail(limit, Image.LANCZOS)
+        return im
+
+    @property
+    def rgb48(self):
+        return self._derive(
+            "rgb48", lambda full: self._rgb_thumb(None, (48, 48)))
+
+    @property
+    def band48(self):
+        return self._derive("band48", lambda full: self._rgb_thumb(
+            (0, 0, full.size[0], int(full.size[1] * 0.22)), (48, 48)))
+
+    @property
+    def face160(self):
+        return self._derive(
+            "face160", lambda full: self._rgb_thumb(None, (160, 160)))
+
+    @property
+    def rgba120(self):
+        def make(full):
+            im = full.convert("RGBA").copy()
+            im.thumbnail((120, 160), Image.LANCZOS)
+            return im
+        return self._derive("rgba120", make)
+
+    @property
+    def multi(self):
+        def make(full):
+            im = (full.convert("RGBA").getchannel("A").copy()
+                  if full.mode in ("RGBA", "LA") else full.convert("RGB").copy())
+            im.thumbnail((220, 260), Image.LANCZOS)
+            return im
+        return self._derive("multi", make)
+
+    # 让判据继续用原来的 b["xxx"] 取值方式（改动最小）
+    def __getitem__(self, key):
+        if key == "full":
+            return self.full
+        if key == "size":
+            return self.size
+        if key == "multi_is_alpha":
+            return self.multi_is_alpha
+        if key in ("rgb48", "band48", "face160", "rgba120", "multi"):
+            return getattr(self, key)
+        raise KeyError(key)
+
+
+def _check_bundle(raw: bytes) -> "_CheckBundle":
+    """构造「一次解码、按需派生」的质检素材包（见 `_CheckBundle`）。"""
+    return _CheckBundle(raw)
+
+
+def _nan_issue_b(b: dict) -> str | None:
+    """`_nan_issue` 的「已解码」版本：判据与阈值逐字一致（阈值 140）。"""
     try:
-        import io as _io
-        im = Image.open(_io.BytesIO(raw)).convert("RGB")
-        im.thumbnail((48, 48), Image.LANCZOS)
+        im = b["rgb48"]
         pw, ph = im.size
         px = list(im.getdata())
         n = len(px)
@@ -1780,8 +2089,8 @@ def _nan_issue(raw: bytes) -> str | None:
         cnt = 0
         for y in range(ph):
             for x in range(pw - 1):
-                a, b = px[y * pw + x], px[y * pw + x + 1]
-                diff += abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
+                a, b2 = px[y * pw + x], px[y * pw + x + 1]
+                diff += abs(a[0] - b2[0]) + abs(a[1] - b2[1]) + abs(a[2] - b2[2])
                 cnt += 1
         if cnt:
             diff /= cnt   # 1.7.27：同行相邻均值（旧尾行再除 n-1 = 双重归一）
@@ -1792,40 +2101,84 @@ def _nan_issue(raw: bytes) -> str | None:
         return "图片解码失败"
 
 
-def _purple_blob_issue(raw: bytes) -> str | None:
-    """1.7.30 颜色污染检测（紫斑/绿噪点）：SD 溢出失败的两种形态——
-    ①低周波「淡紫色彩斑」糊化；②**绿色高饱和噪点溢出**（1.7.29 六段 80%
-    实锤：整图绿色噪点+人物触手化，_nan_issue 与紫判据均漏检）。
-    判据（实测校准，缩图 48×48）：紫=偏蓝紫像素（B−R>15）、绿=绿显著像素
-    （G>R+25 且 G>B+25）；劣化图紫 1.5%/绿 23%，正常立绘（棕灰肤色系、
-    灰紫发色、绿衣）均 ≤0.1% → 统一阈值 0.8%。"""
+def _nan_issue(raw: bytes) -> str | None:
+    """服务劣化检测（绿噪点/色彩噪声图）：相邻像素差均值过大 → NaN 落盘。
+
+    A1111 长时间高强度大图生成后模型/采样状态可能劣化，输出整屏高饱和
+    噪点（绿/蓝/紫）。该信号指涉「服务状态」而非构图——命中后由
+    _sd_retry 触发一次 reload-checkpoint 恢复，并拒绝把噪声图当成品。
+
+    兼容入口：单图单判据（测试/独立调用）。热路径请用 `_check_bundle`
+    + `_nan_issue_b`，避免同一张图被重复解码。
+    """
     try:
-        import io as _io
-        im = Image.open(_io.BytesIO(raw)).convert("RGB")
-        im.thumbnail((48, 48), Image.LANCZOS)
+        return _nan_issue_b(_check_bundle(raw))
+    except Exception:
+        return "图片解码失败"
+
+
+def _purple_blob_issue_b(b: dict) -> str | None:
+    """`_purple_blob_issue` 的「已解码」版本：阈值逐字一致
+    （紫 B−R>15 / 绿 G>R+25 且 G>B+25 / 全图 0.8% / 顶部带 3%）。"""
+    try:
+        im = b["rgb48"]
         px = list(im.getdata())
         n = len(px)
         if n < 64:
             return None
-        purple = sum(1 for r, g, b in px if b - r > 15)
-        green = sum(1 for r, g, b in px if g > r + 25 and g > b + 25)
+        purple = sum(1 for r, g, b2 in px if b2 - r > 15)
+        green = sum(1 for r, g, b2 in px if g > r + 25 and g > b2 + 25)
         if purple / n > 0.008:
             return "颜色污染（紫斑糊化）"
         if green / n > 0.008:
             return "颜色污染（绿噪点）"
         # 1.7.37 头部带绿噪专项：小面积脸部绿噪（全图占比 <0.8% 漏网，
         # 实机 010：单人但全脸绿噪）——顶部 22% 带内绿占比 >3% 即拒
-        im2 = Image.open(_io.BytesIO(raw)).convert("RGB")
-        w, h = im2.size
-        band = im2.crop((0, 0, w, int(h * 0.22)))
-        band.thumbnail((48, 48), Image.LANCZOS)
+        band = b["band48"]
         px2 = list(band.getdata())
         n2 = len(px2)
         if n2 >= 64:
-            g2 = sum(1 for r, g, b in px2
-                     if g > r + 25 and g > b + 25)
+            g2 = sum(1 for r, g, b2 in px2
+                     if g > r + 25 and g > b2 + 25)
             if g2 / n2 > 0.03:
                 return "颜色污染（头部绿噪）"
+        return None
+    except Exception:
+        return None
+
+
+def _purple_blob_issue(raw: bytes) -> str | None:
+    """1.7.30 颜色污染检测（紫斑/绿噪点）：SD 溢出失败的两种形态——
+    ①低周波「淡紫色彩斑」糊化；②**绿色高饱和噪点溢出**（1.7.29 六段 80%
+    实锤：整图绿色噪点+人物触手化，_nan_issue 与紫判据均漏检）。
+    判据（实测校准，缩图 48×48）：紫=偏蓝紫像素（B−R>15）、绿=绿显著像素
+    （G>R+25 且 G>B+25）；劣化图紫 1.5%/绿 23%，正常立绘（棕灰肤色系、
+    灰紫发色、绿衣）均 ≤0.1% → 统一阈值 0.8%。
+
+    兼容入口：单图单判据。热路径请用 `_check_bundle` + `_purple_blob_issue_b`。
+    """
+    try:
+        return _purple_blob_issue_b(_check_bundle(raw))
+    except Exception:
+        return None
+
+
+def _green_noise_issue_b(b: dict) -> str | None:
+    """`_green_noise_issue` 的「已解码」版本：只查绿，阈值逐字一致
+    （全图 >0.8% / 顶部 22% 带 >3%）。"""
+    try:
+        im = b["rgb48"]
+        px = list(im.getdata())
+        n = len(px)
+        if n >= 64 and sum(1 for r, g, b2 in px
+                           if g > r + 25 and g > b2 + 25) / n > 0.008:
+            return "颜色污染（绿噪点）"
+        band = b["band48"]
+        px2 = list(band.getdata())
+        n2 = len(px2)
+        if n2 >= 64 and sum(1 for r, g, b2 in px2
+                            if g > r + 25 and g > b2 + 25) / n2 > 0.03:
+            return "颜色污染（头部绿噪）"
         return None
     except Exception:
         return None
@@ -1834,42 +2187,24 @@ def _purple_blob_issue(raw: bytes) -> str | None:
 def _green_noise_issue(data: bytes) -> str | None:
     """绿色噪点检查（1.7.37，cutout 复检专用）：绿判据（G>R+25 且 G>B+25）
     全图 >0.8% 或**顶部带（22%）>3%**——只查绿：**紫判据在抠图后会把
-    蓝裙/蓝制服误判紫斑**（实测标定：正常立绘绿占比 0.0、废图 3-5%）。"""
+    蓝裙/蓝制服误判紫斑**（实测标定：正常立绘绿占比 0.0、废图 3-5%）。
+
+    兼容入口：单图单判据。热路径请用 `_check_bundle` + `_green_noise_issue_b`。
+    """
     try:
-        im = Image.open(io.BytesIO(data)).convert("RGB")
-        imt = im.copy()
-        imt.thumbnail((48, 48), Image.LANCZOS)
-        px = list(imt.getdata())
-        n = len(px)
-        if n >= 64 and sum(1 for r, g, b in px
-                           if g > r + 25 and g > b + 25) / n > 0.008:
-            return "颜色污染（绿噪点）"
-        w, h = im.size
-        band = im.crop((0, 0, w, int(h * 0.22)))
-        band.thumbnail((48, 48), Image.LANCZOS)
-        px2 = list(band.getdata())
-        n2 = len(px2)
-        if n2 >= 64 and sum(1 for r, g, b in px2
-                            if g > r + 25 and g > b + 25) / n2 > 0.03:
-            return "颜色污染（头部绿噪）"
-        return None
+        return _green_noise_issue_b(_check_bundle(data))
     except Exception:
         return None
 
 
-def _multi_figure_issue(data: bytes) -> str | None:
-    """双人同框检测（1.7.37 硬拦截）：模型会把「转变中的同一人」具象化
-    成**两人并排**（实机连续两张：裸体双人/双人着装版）。
-    判据=**小腿段（下部 78%~96% 高度带）的「腿柱」**：单人=单组腿
-    （两腿间距窄、合并为一柱），双人=两柱且有 ≥0.05w 宽的深谷——
-    对散开长发/张开手臂的单身姿势不敏感（那些不在下带）；
-    cutout 用 alpha≥128，raw 用与边缘背景色差前景。"""
+def _multi_figure_issue_b(b: dict) -> str | None:
+    """`_multi_figure_issue` 的「已解码」版本：判据数值逐字一致
+    （上身柱 0.40/0.06/0.03/0.15、头部双峰 0.45/0.04/0.06/0.18、
+    alpha≥128、RGB 边缘底色差 26；基图 = 220×260 缩图，已在 bundle 里）。"""
     try:
-        im = Image.open(io.BytesIO(data))
-        w0 = 220
-        if im.mode in ("RGBA", "LA"):
-            a = im.convert("RGBA").getchannel("A")
-            a.thumbnail((w0, 260), Image.LANCZOS)
+        im = b["multi"]
+        if b["multi_is_alpha"]:
+            a = im
             w, h = a.size
             px = a.load()
             y0, y1 = int(h * 0.25), int(h * 0.55)
@@ -1877,8 +2212,7 @@ def _multi_figure_issue(data: bytes) -> str | None:
             def fg(x, y):
                 return px[x, y] >= 128
         else:
-            im2 = im.convert("RGB").copy()
-            im2.thumbnail((w0, 260), Image.LANCZOS)
+            im2 = im
             w, h = im2.size
             px = im2.load()
             y0, y1 = int(h * 0.25), int(h * 0.55)
@@ -1888,9 +2222,9 @@ def _multi_figure_issue(data: bytes) -> str | None:
             bg = tuple(sum(c[i] for c in border) / len(border) for i in range(3))
 
             def fg(x, y):
-                r, g, b = px[x, y]
+                r, g, b2 = px[x, y]
                 return (abs(r - bg[0]) > 26 or abs(g - bg[1]) > 26
-                        or abs(b - bg[2]) > 26)
+                        or abs(b2 - bg[2]) > 26)
         cols = [sum(1 for y in range(y0, y1) if fg(x, y)) / max(1, (y1 - y0))
                 for x in range(w)]
 
@@ -1930,12 +2264,27 @@ def _multi_figure_issue(data: bytes) -> str | None:
         return None
 
 
-def _skin_excess_issue(data: bytes) -> str | None:
-    """裸露检查（1.7.37）：cutout 上肤色像素占比 >0.80 判「裸体/缺衣」。
-    仅对已抠图透明立绘做；泳装/命令裸体等设定由调用方 nude_ok 跳检。"""
+def _multi_figure_issue(data: bytes) -> str | None:
+    """双人同框检测（1.7.37 硬拦截）：模型会把「转变中的同一人」具象化
+    成**两人并排**（实机连续两张：裸体双人/双人着装版）。
+    判据=**小腿段（下部 78%~96% 高度带）的「腿柱」**：单人=单组腿
+    （两腿间距窄、合并为一柱），双人=两柱且有 ≥0.05w 宽的深谷——
+    对散开长发/张开手臂的单身姿势不敏感（那些不在下带）；
+    cutout 用 alpha≥128，raw 用与边缘背景色差前景。
+
+    兼容入口：单图单判据。热路径请用 `_check_bundle` + `_multi_figure_issue_b`。
+    """
     try:
-        im = Image.open(io.BytesIO(data)).convert("RGBA")
-        im.thumbnail((120, 160), Image.LANCZOS)
+        return _multi_figure_issue_b(_check_bundle(data))
+    except Exception:
+        return None
+
+
+def _skin_excess_issue_b(b: dict) -> str | None:
+    """`_skin_excess_issue` 的「已解码」版本：阈值逐字一致
+    （HSV h≤0.09 / 0.12≤s≤0.85 / 0.35≤v≤1.0、alpha≥128、total>200、占比>0.80）。"""
+    try:
+        im = b["rgba120"]
         w, h = im.size
         px = im.convert("RGB").load()
         al = im.getchannel("A").load()
@@ -1944,8 +2293,8 @@ def _skin_excess_issue(data: bytes) -> str | None:
             for x in range(w):
                 if al[x, y] < 128:
                     continue
-                r, g, b = px[x, y]
-                hh, ss, vv = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+                r, g, b2 = px[x, y]
+                hh, ss, vv = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b2 / 255.0)
                 if (hh <= 0.09 and 0.12 <= ss <= 0.85 and 0.35 <= vv <= 1.0):
                     skin += 1
                 total += 1
@@ -1956,22 +2305,40 @@ def _skin_excess_issue(data: bytes) -> str | None:
         return None
 
 
+def _skin_excess_issue(data: bytes) -> str | None:
+    """裸露检查（1.7.37）：cutout 上肤色像素占比 >0.80 判「裸体/缺衣」。
+    仅对已抠图透明立绘做；泳装/命令裸体等设定由调用方 nude_ok 跳检。
+
+    兼容入口：单图单判据。热路径请用 `_check_bundle` + `_skin_excess_issue_b`。
+    """
+    try:
+        return _skin_excess_issue_b(_check_bundle(data))
+    except Exception:
+        return None
+
+
 def _portrait_check(raw: bytes) -> str | None:
     """立绘质检（统一用于 SD/API 两条线路）：构图 + 尺寸 + 面部黑斑 + 噪声
-    + 颜色污染（1.7.27 紫斑糊化）。"""
+    + 颜色污染（1.7.27 紫斑糊化）。
+
+    B-05/M-02：**整图只解码一次**（`_check_bundle`），六个判据复用同一份
+    缩图——原来是每个判据各自 `Image.open`（同一张图解码 4~6 次）。判据顺序、
+    数值与命中结果完全不变。
+    """
     try:
-        img = Image.open(io.BytesIO(raw))
+        bundle = _check_bundle(raw)
         # 1.7.32 顺序修正：噪点/污染判据**前置**——劣化图（绿蓝噪点雪花）
         # 曾被 _completeness_issue 抢先误述为「疑似腿特写」，绿判据
         # 短路漏检 → 不触发 reload+大步长换簇（实机：目标版两张字节级
         # 相同的噪点废图，簇内确定性崩溃；顺序修正后先报「颜色污染」）
         # 1.7.37 双人同框硬拦截（raw 级：模型把转变中同一人画成两人并排）
-        comp = (_nan_issue(raw) or _purple_blob_issue(raw)
-                or _completeness_issue(img) or _min_size_issue(img)
-                or _multi_figure_issue(raw))
+        comp = (_nan_issue_b(bundle) or _purple_blob_issue_b(bundle)
+                or _completeness_issue(bundle["full"])
+                or _min_size_issue(bundle["full"])
+                or _multi_figure_issue_b(bundle))
         if comp:
             return comp
-        return _fast_face_test(raw)
+        return _fast_face_test_b(bundle)
     except Exception:
         return "图片解码失败"
 
@@ -2038,16 +2405,12 @@ def _face_box(im: Image.Image) -> tuple[int, int, int, int] | None:
     return fx0, fy0, fx1, fy1
 
 
-def _fast_face_test(raw: bytes) -> str | None:
-    """极小代价的面部黑斑预检（生成后立即调用，每张约 20ms）。
-
-    降采样到 160px 内做「近白/近黑背景估透明」得到人物粗 alpha，取
-    面部带（bbox 顶部 8%~30%）黑色占比判定。与全量抠图后的 _quality_issue
-    互为补充；此处只用第一道低成本筛选。
-    """
+def _fast_face_test_b(b: dict) -> str | None:
+    """`_fast_face_test` 的「已解码」版本：判据数值逐字一致
+    （160px 缩图、边缘采样估背景、色差 45、面部带 0.28/0.08/0.30、
+    暗像素均值 <42、占比 >0.80）。"""
     try:
-        im = Image.open(io.BytesIO(raw)).convert("RGB")
-        im.thumbnail((160, 160), Image.LANCZOS)
+        im = b["face160"]
         w, h = im.size
         if w < 24 or h < 24:
             return None
@@ -2057,14 +2420,13 @@ def _fast_face_test(raw: bytes) -> str | None:
         border += [px[x, h - 1] for x in range(0, w, max(1, w // 8))]
         border += [px[0, y] for y in range(0, h, max(1, h // 8))]
         border += [px[w - 1, y] for y in range(0, h, max(1, h // 8))]
-        br = sum(c[0] for c in border) / len(border)
         bg = sum(c for c in border) / (len(border) * 3)
         # 人物粗掩码：明显非背景的像素
         minx, miny, maxx, maxy = w, h, 0, 0
         for y in range(0, h, 1):
             for x in range(0, w, 1):
-                r, g, b = px[x, y]
-                if abs(r - bg) > 45 and abs(g - bg) > 45 and abs(b - bg) > 45:
+                r, g, b2 = px[x, y]
+                if abs(r - bg) > 45 and abs(g - bg) > 45 and abs(b2 - bg) > 45:
                     if x < minx: minx = x
                     if x > maxx: maxx = x
                     if y < miny: miny = y
@@ -2078,13 +2440,28 @@ def _fast_face_test(raw: bytes) -> str | None:
         total = black = 0
         for y in range(fy0, fy1, 1):
             for x in range(fx0, fx1, 1):
-                r, g, b = px[x, y]
+                r, g, b2 = px[x, y]
                 total += 1
-                if (r + g + b) / 3 < 42:
+                if (r + g + b2) / 3 < 42:
                     black += 1
         if total and black / total > 0.80:
             return "面部黑斑/黑纱"
         return None
+    except Exception:
+        return None
+
+
+def _fast_face_test(raw: bytes) -> str | None:
+    """极小代价的面部黑斑预检（生成后立即调用，每张约 20ms）。
+
+    降采样到 160px 内做「近白/近黑背景估透明」得到人物粗 alpha，取
+    面部带（bbox 顶部 8%~30%）黑色占比判定。与全量抠图后的 _quality_issue
+    互为补充；此处只用第一道低成本筛选。
+
+    兼容入口：单图单判据。热路径请用 `_check_bundle` + `_fast_face_test_b`。
+    """
+    try:
+        return _fast_face_test_b(_check_bundle(raw))
     except Exception:
         return None
 
@@ -2472,7 +2849,11 @@ class ImageClient:
                                          soft=not strict)
 
     async def generate_background(self, hint: str, style_suffix: str) -> bytes:
-        """生成场景背景图 / 桥段 CG（背景专用生成链，与立绘互不挤占）。"""
+        """生成场景背景图 / 桥段 CG。
+
+        ⚠️ 背景**不是**独立生成链：与立绘/CG/ComfyUI 共用同一个全局
+        `Semaphore(1)`（见 `_get_sd_sem` 与 `__init__` 里的 `self._sem`），
+        1.7.7 实测三路并发会把 8GB 显存顶爆，故统一串行。"""
         if self.mock:
             await asyncio.sleep(0.8)
             return mock_background(hint)
@@ -2626,9 +3007,9 @@ class ImageClient:
         client_id = _uuid.uuid4().hex
         headers = self._auth_headers()
         last_err = None
-        for attempt in range(2):
+        for attempt in range(2):          # ComfyUI：同样走全局串行通道
             try:
-                async with self._sem:
+                async with _SdGate(self._sem, "comfy"):
                     async with httpx.AsyncClient(timeout=120) as client:
                         resp = await client.post(
                             f"{base}/prompt",
@@ -2768,7 +3149,10 @@ class ImageClient:
             if check is None:
                 issue = None
                 return True
-            issue = check(raw_b)
+            # B-05/M-02：质检是 CPU/解码密集的同步函数（一次质检 = 一次整图
+            # 解码 + 像素级 Python 循环），必须丢线程池——否则整张图处理期间
+            # 事件循环被独占，所有 HTTP 请求（含前端轮询）一起卡住。
+            issue = await _asyncio.to_thread(check, raw_b)
             if issue:
                 log.warning("sdwebui quality issue: %s", issue)
                 self._issue_count += 1
@@ -2851,7 +3235,8 @@ class ImageClient:
             last_raw = raw
             if check is None:
                 return raw
-            issue = check(raw)
+            # B-05/M-02：同上——质检走线程池，不占事件循环
+            issue = await _asyncio.to_thread(check, raw)
             if not issue:
                 return raw
             log.warning("openai quality issue: %s", issue)
@@ -2877,6 +3262,7 @@ class ImageClient:
         self._wai_adapt = wai_adapt_enabled(self.cfg, checkpoint)
         return self._model_preset
 
+    @sd_call("probe", "samplers")
     async def _webui_samplers(self) -> list[str]:
         """读取 WebUI 支持的采样器列表（60 秒缓存），用于检测 SDXL Styles。"""
         import time
@@ -2895,6 +3281,7 @@ class ImageClient:
             self._samp_cache = self._samp_cache or []
         return self._samp_cache
 
+    @sd_call("probe", "upscalers")
     async def _webui_upscalers(self) -> list[str]:
         """读取 WebUI 支持的放大算法列表（60 秒缓存），用于校验 HR 放大器存在性。"""
         import time
@@ -2913,6 +3300,7 @@ class ImageClient:
             self._up_cache = self._up_cache or []
         return self._up_cache
 
+    @sd_call("probe", "reload-checkpoint")
     async def _reload_checkpoint(self) -> None:
         """强制 WebUI 从磁盘重载当前模型（复位 OOM 后的 CPU/GPU 状态分裂）。
 
@@ -2928,6 +3316,7 @@ class ImageClient:
         except (httpx.HTTPError, ValueError) as e:
             log.warning("reload-checkpoint failed: %s", e)
 
+    @sd_call("probe", "schedulers")
     async def _webui_schedulers(self) -> list[str]:
         """读取 WebUI 支持的调度器列表（60 秒缓存）；老版本无此端点时返回 []。
 
@@ -2950,6 +3339,7 @@ class ImageClient:
             self._sch_cache = self._sch_cache or []
         return self._sch_cache
 
+    @sd_call("probe", "options")
     async def _webui_options(self) -> dict:
         """读取 WebUI 当前设置（= 页面上的参数），60 秒缓存。
 
@@ -2973,6 +3363,7 @@ class ImageClient:
             self._opts_cache = self._opts_cache or {}
         return self._opts_cache
 
+    @sd_call("probe", "alive")
     async def _sd_alive(self) -> None:
         """SD WebUI 前置健康探测（3 秒快速失败）：SD 掉线/半死时任务立即
         error（资产回退旧版、玩家可继续），绝不让主请求以分钟级超时卡住
@@ -3076,7 +3467,7 @@ class ImageClient:
         reloaded = False
         for attempt in range(3):
             try:
-                async with self._sem:
+                async with _SdGate(self._sem, "txt2img"):
                     await self._sd_alive()
                     async with httpx.AsyncClient(
                             timeout=httpx.Timeout(300.0, connect=5.0,
@@ -3150,7 +3541,7 @@ class ImageClient:
         last_err = None
         for attempt in range(2):
             try:
-                async with self._sem:
+                async with _SdGate(self._sem, "img2img"):
                     await self._sd_alive()
                     async with httpx.AsyncClient(
                             timeout=httpx.Timeout(300.0, connect=5.0,
@@ -3208,7 +3599,7 @@ class ImageClient:
         last_err = None
         for attempt in range(2):
             try:
-                async with self._sem:
+                async with _SdGate(self._sem, "inpaint"):
                     await self._sd_alive()
                     async with httpx.AsyncClient(
                             timeout=httpx.Timeout(300.0, connect=5.0,
@@ -3308,6 +3699,7 @@ class ImageClient:
             )
         return await self._request_retry(prompt, check=_bg_check)
 
+    @sd_call("meta", "interrogate")
     async def _interrogate(self, image_b64: str,
                            model: str = "clip",
                            timeout: float = 180.0) -> str:
@@ -3357,6 +3749,7 @@ class ImageClient:
         log.info("wd14-tagger %s", "available" if ok else "not found (fallback interrogate)")
         return ok
 
+    @sd_call("meta", "tagger")
     async def _tagger_interrogate(self, image_b64: str,
                                   timeout: float = 180.0) -> str:
         """wd14-tagger 打标（1.7.47）：booru 标签集——与转变判定器的

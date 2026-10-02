@@ -50,6 +50,9 @@ def export_session(session: dict) -> dict:
             count += 1
         if items:
             manifest["characters"].append({"name": name, "role": role, "images": items})
-    (out_root / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    # B-04/t30：manifest.json 是导出清单（玩家会用批处理脚本读它），改走原子写。
+    # 顺带修好一处既有缺陷：out_root 只在"有立绘被导出"时才 mkdir，
+    # 无立绘时这里会 FileNotFoundError（端点 500）；atomic_write_json 会
+    # 自行 mkdir(parents=True)，因此空导出现在能正常写出 manifest。
+    cfgmod.atomic_write_json(out_root / "manifest.json", manifest, indent=2)
     return {"path": str(out_root), "files": count}

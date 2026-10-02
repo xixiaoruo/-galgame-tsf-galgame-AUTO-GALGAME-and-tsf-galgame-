@@ -111,8 +111,8 @@ def _load_raw() -> list[dict]:
 
 
 def _save_raw(items: list[dict]) -> None:
-    _path().write_text(json.dumps(items, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
+    # B-04/t30：玩家可写数据（injects.json）改走原子写（含 Windows 共享冲突退避重试）。
+    cfgmod.atomic_write_json(_path(), items, indent=2)
 
 
 def _clean(item: dict) -> dict:

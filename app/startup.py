@@ -30,17 +30,27 @@ def set_status_file(path) -> None:
 def _write_status(done: bool = False) -> None:
     if not _status_file:
         return
+    payload = {
+        "stage": _idx,
+        "total": _TOTAL,
+        "msg": _msg_cn,
+        "ts": time.time(),
+        "done": done,
+    }
     try:
         _status_file.parent.mkdir(parents=True, exist_ok=True)
-        _status_file.write_text(
-            json.dumps({
-                "stage": _idx,
-                "total": _TOTAL,
-                "msg": _msg_cn,
-                "ts": time.time(),
-                "done": done,
-            }, ensure_ascii=False),
-            encoding="utf-8")
+        # B-04：统一走原子写（临时文件 + os.replace），避免任何读取方
+        #（诊断脚本/未来前端）读到半个 JSON。app.config 仅依赖标准库，
+        # 且此处为惰性导入，不破坏本模块「重依赖前即可用」的约定。
+        try:
+            from app import config as _cfgmod
+        except ImportError:
+            _cfgmod = None
+        if _cfgmod is not None:
+            _cfgmod.atomic_write_json(_status_file, payload)
+        else:
+            _status_file.write_text(json.dumps(payload, ensure_ascii=False),
+                                    encoding="utf-8")
     except OSError:
         pass
 

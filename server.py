@@ -32,6 +32,7 @@ from app import image as image_mod
 from app import inject
 from app import library
 from app import plugins as plugins_mod
+from app import safe as safemod
 from app import story
 from app import updater
 from app import vn
@@ -96,7 +97,41 @@ async def _unhandled_exception(request, exc):
     return JSONResponse(status_code=500, content={
         "detail": f"服务器内部错误：{type(exc).__name__}: {exc}"})
 
+# ---------- 版本号：单一真源（唯一权威）----------
+# `GAME_VERSION` 是版本号的唯一真源；`static/index.html` 里的两处 `?v=` 是**派生物**。
+# 改完版本号必须跑构建期闸门（不一致即非零退出并指出 文件:行）：
+#     python 测试工具/check_version_sync.py
+#     python 测试工具/check_version_sync.py --fix     # 用本常量回写 index.html 两处
+# 注意：不要用中间件注入 HTML 去改 `?v=`——StaticFiles 是流式响应、没有 body 可改。
 GAME_VERSION = "1.7.52"
+
+
+# ---------- 请求参数安全校验（B-01：路径穿越 / id 边界）----------
+# 统一连接器在 app/safe.py；这里只做「拒绝 → 4xx」的翻译。
+# 约定：detail 一律是拒绝原因，**不含服务器绝对路径**。
+
+def _req_id(value, what: str = "id") -> str:
+    """请求来的 id：白名单校验（默认 `[A-Za-z0-9_-]{1,32}`），非法直接 400。"""
+    try:
+        return safemod.safe_id(value, what=what)
+    except ValueError as e:
+        raise HTTPException(400, f"非法请求参数：{e}")
+
+
+def _req_name(value, what: str = "名称") -> str:
+    """请求来的文件名/目录名：逐段校验（拒绝分隔符/`..`/同形字符等），非法 400。"""
+    try:
+        return safemod.safe_name(value, what=what)
+    except ValueError as e:
+        raise HTTPException(400, f"非法请求参数：{e}")
+
+
+def _req_file(root, *parts, what: str = "文件路径", max_parts: int | None = None):
+    """把已校验的段安全拼到 root 下：越界（含链接/junction 逃逸）直接 400。"""
+    try:
+        return safemod.safe_join(root, *parts, what=what, max_parts=max_parts)
+    except ValueError as e:
+        raise HTTPException(400, f"非法请求参数：{e}")
 
 
 @app.get("/api/version")
@@ -114,6 +149,10 @@ def update_state():
 @app.middleware("http")
 async def no_cache_middleware(request, call_next):
     """禁用浏览器缓存：页面与脚本始终取最新版，避免升级后新旧文件混搭报错。"""
+    # B-02：任何 HTTP 处理都跑在服务端主事件循环上，顺手把循环登记给 game
+    # （幂等）——同步端点（线程池 worker）里的后台生成任务靠它投递，
+    # 否则 asyncio.create_task 会抛 "no running event loop"。
+    game.set_main_loop()
     response = await call_next(request)
     response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
@@ -371,7 +410,7 @@ def story_list():
 
 @app.get("/api/storylines/{sid}")
 def story_get(sid: str):
-    st = story.get(sid)
+    st = story.get(_req_id(sid, "剧本 id"))
     if not st:
         raise HTTPException(404, "剧本不存在")
     return st
@@ -384,7 +423,7 @@ def story_save(payload: StoryPayload):
 
 @app.delete("/api/storylines/{sid}")
 def story_delete(sid: str):
-    if not story.delete(sid):
+    if not story.delete(_req_id(sid, "剧本 id")):
         raise HTTPException(404, "剧本不存在")
     return {"ok": True}
 
@@ -411,7 +450,7 @@ def plugin_save(payload: PluginPayload):
 
 @app.delete("/api/plugins/{pid}")
 def plugin_delete(pid: str):
-    if not plugins_mod.delete(pid):
+    if not plugins_mod.delete(_req_id(pid, "插件 id")):
         raise HTTPException(404, "插件不存在")
     return {"ok": True}
 
@@ -438,7 +477,7 @@ def inject_save(payload: InjectPayload):
 
 @app.delete("/api/injects/{pid}")
 def inject_delete(pid: str):
-    if not inject.delete(pid):
+    if not inject.delete(_req_id(pid, "注入 id")):
         raise HTTPException(404, "注入不存在")
     return {"ok": True}
 
@@ -487,6 +526,37 @@ async def wipe_data(request: Request):
     return {"ok": True, "cleared": cleared}
 
 
+#: 正在运行的 uvicorn Server（由 __main__ 赋值），/api/shutdown 靠它优雅停机
+_UVICORN_SERVER = None
+
+
+def _graceful_shutdown() -> None:
+    """B-04：先落盘、再优雅停机。
+
+    旧实现是 `threading.Timer(0.6, os._exit(0))`——0.6 秒后无条件强杀进程，
+    若此刻正在写存档/配置，文件会被截断成半个 JSON（整局存档被 load_all
+    静默跳过 / config.json 静默回退默认值、API Key 丢失）。现在：
+    ① 把内存里的会话全部原子落盘；② 置 uvicorn `should_exit` 走正常关闭；
+    ③ 只在 3 秒宽限内没退干净时才强退兜底（此时关键状态已落盘）。
+    """
+    import os
+    time.sleep(0.5)          # 让 /api/shutdown 的响应先发回前端
+    try:
+        n = game.persist_all()
+        logging.info("shutdown: persisted %d session(s) before exit", n)
+    except Exception as e:   # 落盘失败也要能退出，但必须留痕
+        logging.warning("shutdown: persist_all failed: %s", e)
+    srv = _UVICORN_SERVER
+    if srv is None:          # 非 uvicorn 托管（测试/嵌入）时才直接退
+        os._exit(0)
+        return
+    srv.should_exit = True   # 关监听 → 等在途请求收尾 → serve() 正常返回
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        time.sleep(0.1)
+    os._exit(0)              # 宽限期内未退干净：数据已落盘，强退是安全的
+
+
 @app.post("/api/shutdown")
 async def shutdown_server(request: Request):
     """关闭游戏：仅限本机调用；只结束游戏自身进程（不影响绘图服务等其它程序）。"""
@@ -499,22 +569,22 @@ async def shutdown_server(request: Request):
             sd_running = True
     except OSError:
         pass
-    import os
     import threading
-    threading.Timer(0.6, lambda: os._exit(0)).start()
+    threading.Thread(target=_graceful_shutdown, daemon=True).start()
     return {"ok": True, "sd_running": sd_running}
 
 
 @app.post("/api/storylines/delete")
 def story_delete_by_id(payload: DeleteByIdPayload):
-    if not story.delete(payload.id):
+    # B-01：id 来自请求体，先过白名单再进 story.delete（无校验 = 可删任意 .json）
+    if not story.delete(_req_id(payload.id, "剧本 id")):
         raise HTTPException(404, "剧本不存在")
     return {"ok": True}
 
 
 @app.post("/api/plugins/delete")
 def plugin_delete_by_id(payload: DeleteByIdPayload):
-    if not plugins_mod.delete(payload.id):
+    if not plugins_mod.delete(_req_id(payload.id, "插件 id")):
         raise HTTPException(404, "插件不存在")
     return {"ok": True}
 
@@ -686,17 +756,16 @@ async def update_download():
 
 @app.delete("/api/cg/{cg_id}")
 def cg_delete(cg_id: str):
-    if not cgbook.delete(cg_id):
+    # B-01 同批：cg_id 用于拼 CG 目录下的文件名，先过白名单/越界断言
+    if not cgbook.delete(_req_id(cg_id, "CG id")):
         raise HTTPException(404, "CG 不存在")
     return {"ok": True}
 
 
 @app.get("/cg/{filename}")
 def serve_cg(filename: str):
-    # 文件名由服务端生成，仍做白名单校验防目录穿越
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "非法文件名")
-    path = cfgmod.CG_DIR / filename
+    # 文件名由服务端生成，仍做白名单校验 + safe_join（resolve 越界断言）防目录穿越
+    path = _req_file(cfgmod.CG_DIR, filename, what="CG 文件名")
     if not path.is_file():
         raise HTTPException(404, "图片不存在")
     return FileResponse(path)
@@ -870,7 +939,8 @@ def save_slot(sid: str, payload: SaveSlotPayload):
 
 
 @app.post("/api/slots/{slot_id}/load")
-def load_slot(slot_id: str):
+async def load_slot(slot_id: str):
+    slot_id = _req_id(slot_id, "存档槽 id")   # 同批：id 会拼 slots/{id}.json
     try:
         r = game.load_slot(slot_id)
     except game.GameError as e:
@@ -882,8 +952,9 @@ def load_slot(slot_id: str):
 
 
 @app.post("/api/game/{sid}/slots/{slot_id}/load")
-def load_slot_compat(sid: str, slot_id: str):
+async def load_slot_compat(sid: str, slot_id: str):
     # 兼容旧前端：读档改用全局存档库
+    slot_id = _req_id(slot_id, "存档槽 id")
     try:
         r = game.load_slot(slot_id)
     except game.GameError as e:
@@ -896,6 +967,10 @@ def load_slot_compat(sid: str, slot_id: str):
 
 @app.delete("/api/slots/{slot_id}")
 def remove_slot(slot_id: str):
+    try:
+        slot_id = safemod.safe_id(slot_id, what="存档槽 id")
+    except ValueError:
+        return {"ok": False}   # 非法 id 与 game.delete_slot 的旧行为一致：ok=false
     return {"ok": game.delete_slot(slot_id)}
 
 
@@ -938,8 +1013,12 @@ def list_library():
 @app.get("/api/library/{name}/preview")
 def library_preview(name: str, dir: str = ""):
     """角色库角色缩略图（取第一张变体立绘，只读库内已存在文件）。
-    同名多来源时用 ?dir= 指定具体那一份。"""
-    info = library.get_roster_char(name, dir)
+    同名多来源时用 ?dir= 指定具体那一份。
+
+    B-01 同批：name / dir 都来自请求，先过 safe 原语（library.variant_path
+    另有 safe_join 越界断言，被篡改的「角色设定.json」读不到库外文件）。"""
+    info = library.get_roster_char(_req_name(name, "角色名"),
+                                   _req_name(dir, "角色库目录名") if dir else "")
     if not info or not info.get("variants"):
         raise HTTPException(404, "该角色没有立绘")
     p = library.variant_path(info, str(info["variants"][0]["variant"]))
@@ -1083,9 +1162,10 @@ async def import_archive(request: Request):
 def download_archive(name: str):
     """下载档案文件（分享给他人）。"""
     import re as _re
+    name = _req_name(name, "档案文件名")
     if not _re.fullmatch(r"[\u4e00-\u9fa5A-Za-z0-9_\-（）() ·——]{1,90}\.zip", name):
         raise HTTPException(400, "非法文件名")
-    p = archive_mod._archives_dir() / name
+    p = _req_file(archive_mod._archives_dir(), name, what="档案文件")
     if not p.is_file():
         raise HTTPException(404, "档案不存在")
     from fastapi.responses import FileResponse
@@ -1096,9 +1176,10 @@ def download_archive(name: str):
 def import_local_archive(name: str):
     """导入本地档案库中的一份 zip（继续玩/另存为独立对局）。"""
     import re as _re
+    name = _req_name(name, "档案文件名")
     if not _re.fullmatch(r"[\u4e00-\u9fa5A-Za-z0-9_\-（）() ·——]{1,90}\.zip", name):
         raise HTTPException(400, "非法文件名")
-    p = archive_mod._archives_dir() / name
+    p = _req_file(archive_mod._archives_dir(), name, what="档案文件")
     if not p.is_file():
         raise HTTPException(404, "档案不存在")
     try:
@@ -1109,6 +1190,9 @@ def import_local_archive(name: str):
 
 @app.delete("/api/archives/{name}")
 def delete_archive(name: str):
+    # B-01 同批：name 来自请求路径，先过 safe_name（分隔符/`..`/同形字符一律 400），
+    # 再交给 archive.delete_archive（内含同一套 safe_join 越界断言）
+    name = _req_name(name, "档案文件名")
     if archive_mod.delete_archive(name):
         return {"ok": True}
     raise HTTPException(404, "档案不存在")
@@ -1146,8 +1230,11 @@ class SceneSetPayload(BaseModel):
 
 
 @app.post("/api/game/{sid}/scene-set")
-def scene_set(sid: str, payload: SceneSetPayload):
-    """「读取场景」：进入已有场景（复用固定背景）/ 更换到新场景 / 重生成当前背景。"""
+async def scene_set(sid: str, payload: SceneSetPayload):
+    """「读取场景」：进入已有场景（复用固定背景）/ 更换到新场景 / 重生成当前背景。
+
+    B-03：必须是 async——进入新场景/重绘背景会在 _assign_scene_bg →
+    _queue_asset 里排后台生成任务，同步端点跑在线程池里没有事件循环。"""
     try:
         return game.scene_set(sid, payload.name, payload.action)
     except game.GameError as e:
@@ -1169,9 +1256,11 @@ def open_folder(payload: OpenFolderPayload = OpenFolderPayload()):
     sid = (payload.sid or "").strip()
     if sid:
         try:
-            session = game.get_session(sid)
-            path = str((cfgmod.CACHE_DIR / game._session_dir_name(session)
-                        / "portraits").resolve())
+            session = game.get_session(_req_id(sid, "会话 id"))
+            # 目录名由会话数据（标题/文档名）拼成，仍走 safe_join 越界断言
+            path = str(_req_file(cfgmod.CACHE_DIR,
+                                 game._session_dir_name(session), "portraits",
+                                 what="对局立绘目录"))
         except game.GameError:
             pass
     try:
@@ -1199,7 +1288,12 @@ async def advance(sid: str, payload: AdvancePayload):
 
 
 @app.get("/api/game/{sid}")
-def game_state(sid: str):
+async def game_state(sid: str):
+    """进入对局/刷新页面：当前幕背景不可用时立即补生成。
+
+    B-02：必须是 async——ensure_scene_bg 会排后台生成任务，同步端点跑在
+    线程池里没有事件循环（旧行为：RuntimeError 被吞掉、背景永不补生成，
+    每次刷新还泄漏一个永久 pending 资产）。"""
     try:
         s = game.get_session(sid)
     except game.GameError as e:
@@ -1223,6 +1317,29 @@ def game_assets(sid: str):
     return {"assets": s["assets"], "bg_map": s["bg_map"]}
 
 
+@app.get("/api/game/{sid}/tasks")
+async def game_tasks(sid: str):
+    """M-07（后端部分）：当前对局的生成队列与 SD 串行通道状态。
+
+    解决「一直在跑但没新图」的可观测性：返回正在生成/正在排队的资产
+    （含各自 elapsed）、资产计数，以及 SD 闸门当前持有者与等待者。
+    **只读**：不触发任何生成、不改任何状态。"""
+    try:
+        s = game.get_session(sid)
+    except game.GameError as e:
+        raise HTTPException(404, str(e))
+    return game.tasks_view(s)
+
+
+@app.get("/api/sd/observe")
+def sd_observe(reset: int = 0):
+    """M-06：导出「生成 / 打标（interrogate/tagger）/ 探测」时间窗与重叠区间报告。
+
+    `reset=1` 时导出后清空观测缓冲（便于分次采样）。**只读观测**：
+    本端点不改变任何互斥/并发行为（Semaphore(1) 的容量与获取顺序未动）。"""
+    return image_mod.sd_report(reset=bool(reset))
+
+
 @app.get("/api/game/{sid}/history")
 def game_history(sid: str):
     try:
@@ -1233,7 +1350,8 @@ def game_history(sid: str):
 
 @app.delete("/api/game/{sid}")
 def remove_game(sid: str):
-    game.delete_session(sid)
+    # B-01 同批：sid 会拼成 saves/{sid}.json（delete_session），先过白名单
+    game.delete_session(_req_id(sid, "会话 id"))
     return {"ok": True}
 
 
@@ -1257,7 +1375,13 @@ def serve_image(filename: str):
         ok = ok or bool(_re.fullmatch(_FN, parts[2]))
     if not ok:
         raise HTTPException(400, "非法文件名")
-    path = cfgmod.CACHE_DIR / filename
+    # B-01 同批加固：白名单之外再断言 resolve 后仍在立绘缓存目录内
+    # （三层语义不变：sid/{portraits|backgrounds|raw|preview|versions}/文件）
+    try:
+        path = safemod.safe_relpath(filename, cfgmod.CACHE_DIR, max_parts=3,
+                                    what="图片路径")
+    except ValueError as e:
+        raise HTTPException(400, f"非法请求参数：{e}")
     if not path.is_file():
         raise HTTPException(404, "图片不存在")
     return FileResponse(path)
@@ -1393,4 +1517,5 @@ if __name__ == "__main__":
     _threading.Thread(target=_close_splash_online, daemon=True).start()
 
     server = uvicorn.Server(uvicorn.Config(app, log_level="info"))
+    _UVICORN_SERVER = server   # B-04：/api/shutdown 靠它优雅停机（should_exit）
     server.run(sockets=socks)

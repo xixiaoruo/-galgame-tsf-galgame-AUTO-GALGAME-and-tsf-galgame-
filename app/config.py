@@ -4,6 +4,8 @@ import os
 import re
 import shutil
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 # PyInstaller 冻结（单文件 exe）时：BUNDLE 为包内只读解压目录，
@@ -114,10 +116,51 @@ def load_config() -> dict:
     return cfg
 
 
+def atomic_write_json(path, obj, *, indent: int | None = None) -> None:
+    """原子写 JSON（B-04）：同目录临时文件 → flush + fsync → os.replace 覆盖。
+
+    直接覆盖写目标文件时，若进程在写入中途被强杀（旧版关机是
+    `threading.Timer(0.6, os._exit)`）或断电，会留下半个 JSON：
+    存档被 load_all 静默跳过（整局从列表消失）、config.json 静默回退默认值
+    （API Key 与全部设置丢失）。同一卷上 os.replace 是原子操作，
+    因此目标文件要么是旧的完整内容、要么是新的完整内容，绝不出现截断态。
+
+    临时文件与目标同目录（保证同卷）、文件名以 .tmp 结尾（不会被 *.json 扫到）。
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(obj, ensure_ascii=False, indent=indent)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())   # 先落盘数据，再原子换名
+        # Windows：目标文件被另一个线程/进程短暂打开时，os.replace 会抛
+        # PermissionError（共享冲突）。读取方通常毫秒级就释放，重试几次即可；
+        # 重试仍失败才抛出，由调用方按既有策略处理（不吞错）。
+        delay = 0.02
+        for _attempt in range(8):
+            try:
+                os.replace(tmp, p)
+                break
+            except PermissionError as e:
+                last_error = e
+                time.sleep(delay)
+                delay *= 1.6
+        else:
+            raise last_error
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_config(cfg: dict) -> None:
-    CONFIG_PATH.write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    atomic_write_json(CONFIG_PATH, cfg, indent=2)
 
 
 def masked(cfg: dict) -> dict:

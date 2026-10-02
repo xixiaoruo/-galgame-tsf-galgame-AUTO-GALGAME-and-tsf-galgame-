@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from . import config as cfgmod
+from . import safe as safemod
 
 
 def _path() -> Path:
@@ -69,8 +70,10 @@ def _load_raw() -> list[dict]:
 
 
 def _save_raw(items: list[dict]) -> None:
-    _path().write_text(json.dumps(items, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
+    # B-04/t30：玩家可写数据（plugins.json）改走原子写——mkstemp→fsync→os.replace，
+    # 并复用 config.py 里对 Windows 共享冲突（PermissionError[5]）的退避重试。
+    # indent=2 透传，保持文件格式与改造前一致。
+    cfgmod.atomic_write_json(_path(), items, indent=2)
 
 
 import re as _re
@@ -113,6 +116,11 @@ def save(pl: dict) -> dict:
 
 
 def delete(pid: str) -> bool:
+    """删除插件（B-01 同批边界：请求来的 id 先过白名单，再与清单比对）。"""
+    try:
+        pid = safemod.safe_id(pid, what="插件 id")
+    except ValueError:
+        return False
     items = _load_raw()
     keep = [x for x in items if x.get("id") != pid]
     if len(keep) == len(items):

@@ -9,21 +9,38 @@
 """
 import html as _html
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
 
 from . import config as cfgmod
+from . import safe as safemod
+
+log = logging.getLogger("galgame.library")
 
 ROSTER_DIR = cfgmod.ROOT / "角色库"
 
 
 def _safe_name(name: str) -> str:
-    return "".join(ch for ch in name if ch.isalnum() or ch in "_- ") or "角色"
+    """角色名→目录/文件名安全段：只留字母数字汉字与 `_- `，并去掉尾随空格/点
+    （Windows 会吃掉尾随空格与点，可能撞名或落到别的路径段）。"""
+    cleaned = "".join(ch for ch in str(name) if ch.isalnum() or ch in "_- ")
+    return cleaned.strip(" .") or "角色"
 
 
 def _read_roster_dir(d: Path) -> dict | None:
-    """读取一个角色目录的角色设定.json；损坏/缺失返回 None。"""
+    """读取一个角色目录的角色设定.json；损坏/缺失返回 None。
+
+    B-01 同批：目录名与被引用的变体文件名都先过 safe 原语——被手工篡改的
+    「角色设定.json」里即使写了 `../../config.json`，也不会被当成库内立绘。
+    """
+    if not d.is_dir():
+        return None
+    try:
+        safemod.safe_name(d.name, what="角色库目录名")
+    except ValueError:
+        return None
     p = d / "角色设定.json"
     if not p.is_file():
         return None
@@ -36,9 +53,16 @@ def _read_roster_dir(d: Path) -> dict | None:
     # 校验变体文件确实存在，避免库目录被手动改动后给出死引用
     variants = []
     for v in summary.get("variants") or []:
-        f = v.get("file", "")
-        if f and (d / f).is_file():
-            variants.append(v)
+        f = str(v.get("file", "") or "")
+        if not f:
+            continue
+        try:
+            fp = safemod.safe_join(d, f, what="角色库立绘")
+        except ValueError as e:
+            log.warning("roster variant skipped (%s/%s): %s", d.name, f, e)
+            continue
+        if fp.is_file():
+            variants.append(dict(v, file=f))
     return {
         "name": str(summary["name"]).strip()[:12],
         "dir": d.name,
@@ -102,10 +126,20 @@ def _target_dir(safe: str, role_name: str, source_game: str) -> Path:
 
 
 def variant_path(info: dict, variant: str) -> Path | None:
-    """库内某变体立绘的绝对路径；不存在返回 None。"""
+    """库内某变体立绘的绝对路径；不存在返回 None。
+
+    B-01 同批：目录名与文件名都经 safe_join（逐段白名单 + resolve 越界断言），
+    越界/非法一律返回 None，绝不把库外文件当成立绘返回。
+    """
     for v in info.get("variants") or []:
         if v.get("variant") == variant and v.get("file"):
-            p = ROSTER_DIR / info["dir"] / v["file"]
+            try:
+                p = safemod.safe_join(ROSTER_DIR, str(info.get("dir", "")),
+                                      str(v["file"]), what="角色库立绘")
+            except ValueError as e:
+                log.warning("roster variant rejected (%s): %s",
+                            info.get("dir", ""), e)
+                return None
             if p.is_file():
                 return p
     return None
@@ -144,6 +178,8 @@ def export_roster(session: dict) -> dict:
         }
 
         # ---- 2) 立绘差分复制 ----
+        # B-01 同批：源文件与目标文件名都经 safe 原语（标签里的表情/服装词来自
+        # LLM 与玩家输入，`..\..\x` 这类变体名不会再写到角色库之外）
         images = []
         for key, item in (session.get("assets", {}).get("portraits", {}) or {}).items():
             if item.get("status") != "ready":
@@ -151,13 +187,24 @@ def export_roster(session: dict) -> dict:
             label = item.get("label", "")
             if not label.startswith(name + "·"):
                 continue
-            src = cfgmod.CACHE_DIR / item.get("file", "")
+            try:
+                src = safemod.safe_join(cfgmod.CACHE_DIR,
+                                        str(item.get("file", "") or ""),
+                                        what="立绘文件")
+            except ValueError as e:
+                errors.append(f"{name}/{label}: {e}")
+                continue
             if not src.is_file():
                 continue
             variant = label[len(name) + 1:]
-            fname = f"{safe}_{variant}.png"
             try:
-                shutil.copy2(src, d / fname)
+                fname = safemod.safe_name(f"{safe}_{variant}.png", what="角色库文件名")
+                dst = safemod.safe_join(d, fname, what="角色库文件")
+            except ValueError as e:
+                errors.append(f"{name}/{variant}: {e}")
+                continue
+            try:
+                shutil.copy2(src, dst)
             except OSError as e:
                 errors.append(f"{name}/{variant}: {e}")
                 continue
@@ -169,8 +216,9 @@ def export_roster(session: dict) -> dict:
             })
             exported += 1
 
-        (d / "角色设定.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        # B-04/t30：角色设定.json 是导出给玩家复用的数据，改走原子写
+        # （含 Windows 共享冲突退避重试）；indent=2 透传保持格式不变。
+        cfgmod.atomic_write_json(d / "角色设定.json", summary, indent=2)
 
         # ---- 3) 角色卡 HTML（本地双击即可观看） ----
         cards = []

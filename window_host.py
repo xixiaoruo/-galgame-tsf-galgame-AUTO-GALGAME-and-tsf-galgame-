@@ -91,8 +91,32 @@ def _base_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _harden_stdio() -> str:
+    """把 stdout/stderr 钉成 **UTF-8 + errors="replace"**（t53 契约 ③ 的 gbk 隐患）。
+
+    实测：`console=False` 下 stdout **不是 None**，而是 `TextIOWrapper(encoding='gbk')`
+    ⇒ 打印非 GBK 字符（emoji / CJK 扩展 / 某些符号）会抛 `UnicodeEncodeError`
+    （别的任务就因 `gbk` 打印乱码 exit=1）。这里统一改成 UTF-8 且**永不抛**：
+    编码不了的字符按 `replace` 落成 `?`，进程不崩。
+    返回一句可写进日志的实际取值（供取证）。
+    """
+    notes = []
+    for name in ("stdout", "stderr"):
+        s = getattr(sys, name, None)
+        if s is None:
+            notes.append(f"{name}=None")
+            continue
+        try:
+            enc0 = getattr(s, "encoding", "?")
+            s.reconfigure(encoding="utf-8", errors="replace")
+            notes.append(f"{name}:{enc0}->utf-8/replace")
+        except Exception as e:
+            notes.append(f"{name}:reconfigure 失败({type(e).__name__})")
+    return " ".join(notes)
+
+
 def _log(msg: str) -> None:
-    """windowed 下没有 stdout：日志显式落盘（`<DATA_DIR>/window.log`）。"""
+    """windowed 下 stdout 可能是 gbk wrapper：统一走 UTF-8 文件日志 + 永不抛的 stderr。"""
     line = f"[WINDOW] {time.strftime('%H:%M:%S')} {msg}"
     try:
         sys.stderr.write(line + "\n")
@@ -107,6 +131,33 @@ def _log(msg: str) -> None:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def _notice(title: str, text: str) -> None:
+    """**可见提示**（不得静默退出）：优先 `MessageBoxTimeoutW`（自动关闭、不阻塞），
+    否则退到后台线程里的 `MessageBoxW`（进程退出即消失，也不会卡住调用方）。
+
+    t53 契约 ②：聚焦失败时第二实例必须让用户看见"游戏已经在运行"，
+    否则双击没反应会被当成程序坏了（与 t36 §1.2"系统浏览器回退须给可见提示"同源原则）。
+    """
+    ok = False
+    try:
+        import ctypes
+        # 0x40 = MB_ICONINFORMATION；超时 8000ms 后自动关闭 ⇒ 自动化验证不会卡住
+        ctypes.windll.user32.MessageBoxTimeoutW(0, text, title, 0x40, 0, 8000)
+        ok = True
+    except Exception as e:
+        _log(f"MessageBoxTimeoutW 不可用（{type(e).__name__}）→ 退到后台线程 MessageBoxW")
+    if not ok:
+        def _show():
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)
+            except Exception as e2:
+                _log(f"可见提示也无法显示：{type(e2).__name__}: {e2}")
+        threading.Thread(target=_show, daemon=True).start()
+    _log(f"已显示可见提示：{title} —— {text.splitlines()[0][:60]}")
+
 
 
 def _read_token() -> str:
@@ -181,18 +232,71 @@ def _wait_ready(deadline_s: float):
 
 
 def _focus_first_instance() -> bool:
+    """请首实例把窗口提到前台；返回**是否真的聚焦成功**。
+
+    端点 `POST /api/window/focus`（server.py）返回 `{"ok":true,"focused":<bool>}`：
+      · 200 + focused=true  → 窗口已前置（调用方无需提示）；
+      · 200 + focused=false → 对面进程里**没有原生窗口**（例如服务单独起）⇒ 调用方**必须给可见提示**；
+      · 非 200 / 异常        → 同理给可见提示（此前这里永久 405 ⇒ 用户双击图标后毫无反应）。
+    仍带 token（t39：从首实例的 `<DATA_DIR>/local_token.json` 读）。
+    """
     st, raw = _api("POST", "/api/window/focus", {}, timeout=5.0)
-    _log(f"第二实例请求聚焦: status={st} body={str(raw)[:120]}")
-    return st == 200
-
-
-def _notice(title: str, text: str) -> None:
-    """windowed 无控制台：降级/失败必须可见，不得静默。"""
+    _log(f"第二实例请求聚焦: status={st} body={str(raw)[:160]}")
+    if st != 200:
+        return False
     try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(None, text, title, 0x40)
+        return bool((json.loads(raw) or {}).get("focused"))
     except Exception:
-        pass
+        return False
+
+
+#: 跨线程"请把窗口提到前台"信号：服务线程 set、GUI 线程轮询时 consume（Qt/线程都安全）
+FOCUS_REQUEST = threading.Event()
+#: 已注册窗口的"提升"能力（由具体窗口后端在创建后写入；返回是否成功）
+_WINDOW_RAISER = {"fn": None}
+
+
+def _register_focus_hook() -> None:
+    """把聚焦钩子挂到 `__main__` 上供 `server.py` 的端点调用（同进程、两个命名空间）。
+
+    `server.py` 的端点用 `sys.modules["__main__"].WINDOW_FOCUS_HOOK` 取钩子：
+    冻结与源码形态下本文件都是 `__main__`，而 server 是被 runpy 跑起来的另一个
+    命名空间，两者只能靠 `__main__` 这个共同引用点握手。
+    """
+    def _hook() -> bool:
+        raiser = _WINDOW_RAISER.get("fn")
+        if not callable(raiser):
+            return False                      # 没有窗口（服务单独起）⇒ focused=false
+        FOCUS_REQUEST.set()                   # 交给 GUI 线程处理（绝不跨线程直接操作窗口）
+        for _ in range(30):                   # 最多等 3s，让 GUI 线程把它领走
+            if not FOCUS_REQUEST.is_set():
+                return True
+            time.sleep(0.1)
+        return False
+
+    try:
+        setattr(sys.modules["__main__"], "WINDOW_FOCUS_HOOK", _hook)
+        _log("聚焦钩子已注册（POST /api/window/focus 可用）")
+    except Exception as e:
+        _log(f"聚焦钩子注册失败：{type(e).__name__}: {e}")
+
+
+def _raise_window_qt(win, app) -> bool:
+    """把 Qt 窗口提到前台（GUI 线程内调用）。"""
+    try:
+        from PySide6.QtCore import Qt
+        if win.isMinimized():
+            win.showNormal()
+        win.setWindowState((win.windowState() & ~Qt.WindowState.WindowMinimized)
+                           | Qt.WindowState.WindowActive)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        app.setActiveWindow(win) if hasattr(app, "setActiveWindow") else None
+        return True
+    except Exception as e:
+        _log(f"Qt 窗口前置失败：{type(e).__name__}: {e}")
+        return False
 
 
 def _fallback_launch(url: str, orig_opens: dict) -> str:
@@ -319,6 +423,19 @@ def _run_qt(url: str) -> str:
     timer.timeout.connect(try_navigate)
     timer.start(400)
 
+    # ---- 聚焦通道（t53 契约 ①）：服务线程 set 事件 → GUI 线程在这里把它领走 ----
+    _WINDOW_RAISER["fn"] = lambda: _raise_window_qt(win, app)
+    focus_timer = QTimer()
+
+    def poll_focus():
+        if FOCUS_REQUEST.is_set():
+            ok = _raise_window_qt(win, app)
+            FOCUS_REQUEST.clear()             # 先清再记，避免钩子白等 3s
+            _log(f"收到聚焦请求 → 窗口前置{'成功' if ok else '失败'}")
+
+    focus_timer.timeout.connect(poll_focus)
+    focus_timer.start(200)
+
     def _on_close(ev):
         _log("Qt 窗口关闭 → 请求优雅停机")
         _log(f"shutdown status={_api('POST', '/api/shutdown', {}, timeout=10.0)[0]}")
@@ -339,6 +456,11 @@ def main() -> int:
     base = _base_dir()
     url = f"http://127.0.0.1:{PORT}/"
 
+    # ★ 先修 stdout/stderr 编码（t53 契约 ③）：实测 `console=False` 下 stdout **不是 None**，
+    # 而是 `TextIOWrapper(encoding='gbk')` ⇒ 打印非 GBK 字符（emoji/CJK 扩展）会 UnicodeEncodeError。
+    # `_harden_stdio()` 统一改成 UTF-8 + errors="replace"，之后任何打印都**不会崩**。
+    _log("启动自检：stdio 加固 " + _harden_stdio())
+
     # ★ 安全取证（t49 契约 ⑤）：交付物**绝不自行设置** `--no-sandbox`。
     # 这里只**记录**当前取值（冻结产物在干净环境下应为 None）；开发沙箱里为了
     # 让 Qt renderer 起来，才由外部 shell 设 `QTWEBENGINE_CHROMIUM_FLAGS`。
@@ -351,13 +473,16 @@ def main() -> int:
              + "  （未设置 / 不含 --no-sandbox）")
     _log("启动自检：frozen=" + str(getattr(sys, "frozen", False))
          + " stdout=" + repr(sys.stdout) + " stderr=" + repr(sys.stderr))
-    # windowed 下 stdout/stderr 为 None：证明"写入 None 不会抛异常"（print 是 no-op）
+    # 加固后：即使 stdout=None 或原编码是 gbk，打印（含非 GBK 字符）都不抛异常
     try:
-        print("[WINDOW] stdout probe（windowed 下应为 no-op）", flush=True)
-        _log("启动自检：print 到 stdout OK（stdout=None 时为 no-op，不抛异常）")
+        probe = "[WINDOW] stdout probe · 非GBK字符测试：𝔘𝔫𝔦𝔠𝔬𝔡𝔢 ✦ 🜁 🂡 ᚠ 日本語 中文 ✓"
+        print(probe, flush=True)
+        _log("启动自检：print 到 stdout OK（含非 GBK 字符：𝔘🜁🂡ᚠ —— 不抛 UnicodeEncodeError）")
     except Exception as e:
         _log("启动自检：print 到 stdout 抛异常（不应发生）："
              + type(e).__name__ + ": " + str(e))
+
+    _register_focus_hook()          # POST /api/window/focus 的处理钩子（t53 契约 ①）
 
     lock = None
     try:
@@ -367,17 +492,22 @@ def main() -> int:
         lock.bind(("127.0.0.1", FOCUS_LOCK_PORT))
         lock.listen(1)
     except OSError:
+        # 同端口已有实例：请它把窗口提到前台；**失败必须让用户看见**（不得静默退出）
         if not _focus_first_instance():
-            _notice("自动化AI Galgame", "游戏似乎已在运行，但没有找到它的窗口。\n"
-                                       "请在任务栏里切换到已有的游戏窗口。")
+            _notice("自动化AI Galgame",
+                    "游戏已经在运行中，但我没能把它的窗口提到前面来。\n\n"
+                    "请按 Alt+Tab 或点任务栏里的「自动化AI Galgame」切换到已有窗口。\n"
+                    "（本窗口不会再开第二个实例，以免两份存档互相覆盖。）")
         return 0
 
     # 端口上已有本游戏在跑（例如手动起的 server）：**绝不托管、更不关它**
     if _is_our_game_running():
         _log(f"{PORT} 上已有本游戏在运行 → 视为第二实例，请求聚焦后退出")
         if not _focus_first_instance():
-            _notice("自动化AI Galgame", "游戏已经在运行中。\n"
-                                       "请在任务栏里切换到已有的游戏窗口。")
+            _notice("自动化AI Galgame",
+                    "游戏已经在运行中，但我没能把它的窗口提到前面来。\n\n"
+                    "请按 Alt+Tab 或点任务栏里的「自动化AI Galgame」切换到已有窗口。\n"
+                    "（本窗口不会再开第二个实例，以免两份存档互相覆盖。）")
         return 0
 
     try:

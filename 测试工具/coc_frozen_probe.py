@@ -30,6 +30,17 @@ PROJ = r"D:\TSF_Galgame"
 SRC_COC = os.path.join(PROJ, "app", "coc")
 SRC_DATA = os.path.join(PROJ, "data", "coc")
 
+# ── 输出编码（防"判据全 PASS 却因打印崩掉而 exit=1"）────────────────────────
+# 本机控制台是 GBK（cp936），而 evidence 里可能含用 errors="replace" 解码出的
+# U+FFFD（项目路径含中文，某处解码会产出替换字符）⇒ print 到 GBK stdout 时抛
+# UnicodeEncodeError，整个探针以 exit=1 结束 —— 读退出码的人会误判成"布局有问题"。
+# 这说明"工具自身崩了"与"被测对象失败"在退出码上不可区分；先修工具。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
 results = []
 
 

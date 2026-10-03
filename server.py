@@ -329,6 +329,42 @@ def update_state():
             "version": GAME_VERSION}
 
 
+@app.post("/api/window/focus")
+def window_focus(request: Request):
+    """把**首实例的原生窗口**提到前台（第二实例双击图标时的正确反馈）。
+
+    为什么需要它：`window_host.py` 在检测到"本游戏已在运行"时会请求本端点；此前
+    该端点不存在 ⇒ 永久 405 ⇒ 第二实例只能退回"静默退出"，用户双击图标后
+    **看不到任何反应**（与 t36 契约 §2 F6 的要求不符）。
+
+    鉴权（按 t39 的既定口径）：
+      · **仅回环**调用方（`request.client.host` ∈ {127.0.0.1, ::1}）；
+      · **必须带本轮 token**（`X-Local-Token` 头 / `tsf_token` cookie / `?token=`），
+        用 `compare_digest` 常数时间比较——本端点属于**写操作**，不走"无 Origin 即放行"。
+
+    返回：`{"ok": true, "focused": <bool>}`。`focused=False` 表示本进程**没有原生窗口**
+    （例如直接 `python server.py` 起的服务）或窗口钩子未就绪，此时**调用方要给出可见提示**。
+    """
+    import secrets as _secrets
+    host = (request.client.host if request.client else "") or ""
+    if host not in ("127.0.0.1", "::1"):
+        raise HTTPException(403, "仅允许本机调用")
+    tok = _presented_token(request)
+    if not _LOCAL_TOKEN or not tok or not _secrets.compare_digest(tok, _LOCAL_TOKEN):
+        raise HTTPException(403, "缺少或错误的本地 token（聚焦需要 X-Local-Token）")
+    # 窗口钩子由 window_host.py 注册在 `__main__` 上（冻结与源码形态都是它当 __main__）；
+    # 服务单独起（python server.py）时没有钩子 ⇒ focused=False，由调用方提示用户。
+    hook = getattr(sys.modules.get("__main__"), "WINDOW_FOCUS_HOOK", None)
+    if not callable(hook):
+        return {"ok": True, "focused": False, "reason": "本进程没有原生窗口"}
+    try:
+        focused = bool(hook())
+    except Exception as e:
+        logging.warning("window focus 钩子失败：%s", e)
+        return {"ok": True, "focused": False, "reason": f"聚焦钩子异常：{type(e).__name__}"}
+    return {"ok": True, "focused": focused}
+
+
 @app.middleware("http")
 async def no_cache_middleware(request, call_next):
     """禁用浏览器缓存：页面与脚本始终取最新版，避免升级后新旧文件混搭报错。"""

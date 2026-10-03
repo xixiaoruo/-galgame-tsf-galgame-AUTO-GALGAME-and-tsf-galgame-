@@ -539,25 +539,41 @@ def main() -> int:
         _log(f"pywebview 不可用：{type(e).__name__}: {e}")
         _has_webview = False
 
+    # ★ 第二级首选 QtWebEngine 提到【最前】，优先于 pywebview。
+    #
+    # 为什么改顺序（第 19–20 轮实测）：
+    #   `_has_webview` 只用 `import webview` 判定，而 pythonnet 的 CLR 初始化是**延迟**到
+    #   `webview.start()` 才做的 ⇒ 该 import 成功并不代表后端可用。本机实测：
+    #     · `webview.start()` 抛异常（clr_loader 建临时目录失败 → pythonnet 起不来）
+    #     · 而 `on_ready` 线程已抢先调用 `win.load_url(url)` ⇒ 打出
+    #       「窗口导航失败：Main window failed to start」——那是 **pywebview 分支**的日志，
+    #       不是 Qt 的（曾被误读）。该线程与 `webview.start()` 并发，本身也是竞态。
+    #   Qt 路径则**已实测可用**：renderer 能起来（`QtWebEngineProcess ×2`）、窗口能显示、
+    #   无浏览器外壳（UIA 树无地址栏）⇒ 它才应该是首选。
+    # 若 Qt 因故不可用（PySide6 缺失等），`_run_qt` 返回 ""，继续走下面的 pywebview/回退链。
     if not _has_webview:
         for n in orig:                                  # 回退链里禁止拉起任何浏览器
             setattr(webbrowser, n, lambda *a, **k: False)
-        srv_t = _start_server_thread(base)
-        # 第二级首选：QtWebEngine（无浏览器外壳、不依赖 .NET）
-        if _run_qt(url):
-            srv_t.join(timeout=10.0)
-            if srv_t.is_alive():
-                os._exit(0)
-            return 0
+
+    srv_qt = _start_server_thread(base)
+    if _run_qt(url):
+        srv_qt.join(timeout=10.0)
+        if srv_qt.is_alive():
+            os._exit(0)
+        return 0
+    _log("QtWebEngine 路径未成功 → 继续尝试 pywebview / 回退链")
+    if srv_qt.is_alive():
+        srv_qt.join(timeout=5.0)
+
+    if not _has_webview:
         ok, ms = _wait_ready(READY_TIMEOUT)
         mode = _fallback_launch(url, orig) if ok else ""
         if not ok or not mode:
             _notice("自动化AI Galgame 启动失败",
                     "本地服务未能在预期时间内就绪。\n请查看游戏专属数据目录下的 debug.log 后重试。")
-        srv_t.join(timeout=10.0)
-        if srv_t.is_alive():
+        srv_qt.join(timeout=10.0)
+        if srv_qt.is_alive():
             os._exit(0)
-        return 0
         return 0
 
     for n in orig:                                      # 首选路径：禁止任何浏览器

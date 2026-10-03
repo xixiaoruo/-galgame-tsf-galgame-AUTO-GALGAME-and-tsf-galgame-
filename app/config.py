@@ -17,7 +17,8 @@ if _BUNDLE:
 else:
     BUNDLE = None
     ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = ROOT / "config.json"
+# 注意：CONFIG_PATH 在下面 `_resolve_config_path()` 里定义（需要先算出隔离根，
+# 而隔离根依赖 `_default_data_root()`）。此处不要提前赋值，否则会覆盖。
 EXAMPLE_PATH = (BUNDLE if BUNDLE else ROOT) / "config.example.json"
 # 数据目录：固定在 D 盘（D:\TSF_Galgame_Data），与 exe 放在哪无关——
 # 档案/存档/缓存永远不会因为移动、替换、打包 exe 而丢失；
@@ -48,6 +49,34 @@ CACHE_DIR = DATA_DIR / "cache"
 SAVES_DIR = DATA_DIR / "saves"
 CG_DIR = DATA_DIR / "cg"
 CG_META_PATH = CG_DIR / "meta.json"
+
+
+def _resolve_config_path() -> Path:
+    """配置文件路径：隔离根优先，否则项目根的 config.json。
+
+    为什么需要这一层（实测教训）：`TSF_DATA_DIR` 原先只覆盖**数据**目录，
+    `CONFIG_PATH` 恒为 `ROOT/config.json`。于是"设了 TSF_DATA_DIR 就当隔离好了"
+    的测试**仍会读到玩家真实 config**（含 API key）——
+    一次"想看 LLM 不可用时的降级链"的验证因此**打到了真实 DeepSeek**，
+    意外消耗额度。隔离必须覆盖**配置**，否则它不是隔离。
+
+    规则（保守，不改变未设置的既有行为）：
+      · 未设 TSF_DATA_DIR            → `ROOT/config.json`（与从前逐字一致）
+      · 设了、且 `<TSF_DATA_DIR>/config.json` 存在 → 用它（真隔离）
+      · 设了、但该文件不存在          → 仍用 `ROOT/config.json`（兼容只重定向数据的旧用法）
+    """
+    override = os.environ.get("TSF_DATA_DIR", "").strip()
+    if override:
+        try:
+            cand = Path(override) / "config.json"
+            if cand.is_file():
+                return cand
+        except (OSError, ValueError):
+            pass
+    return ROOT / "config.json"
+
+
+CONFIG_PATH = _resolve_config_path()
 
 
 def _copy_tree(src: Path, dst: Path, name: str, moved: list[str]) -> None:

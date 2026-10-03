@@ -1,0 +1,16 @@
+{
+  "_source": "成年人白名单。依据 COC-DESIGN §5.3 G1：情色相关场景的**全部参与者**必须命中本表白名单（age_flag=adult），缺省即拒；G1 在**加载期**校验，运行期不可能冲突。项目现有红线（app/game.py:3736 content_policy_text 的 base 句“所有角色均为成年人”）同源。",
+  "_note": "本表是 G1 的唯一数据来源。没有 age_flag=adult 的角色名一律视为未登记 → 相关卡在加载期被拒（验收 V-10 在 prompt 接线任务里做，本任务只保证数据与判定函数就位）。",
+  "cast": [
+    { "name": "Kirie", "display": "雾岛 桐惠", "age_flag": "adult", "role": "investigator",
+      "_unverified": true, "_source": "MECHANICS.md §6.1 可玩角色名单含 Kirie Minami（14 名，Steam 官方口径）；本模式的角色表为骨架，不照搬其专属特权数值" },
+    { "name": "Aiko", "display": "高桥 爱子", "age_flag": "adult", "role": "investigator",
+      "_unverified": true, "_source": "MECHANICS.md §6.1 名单含 Aiko Takahashi" },
+    { "name": "Mizuki", "display": "浜崎 瑞希", "age_flag": "adult", "role": "investigator",
+      "_unverified": true, "_source": "MECHANICS.md §6.1 名单含 Mizuki Hamasaki" },
+    { "name": "Ryuichi", "display": "龙一", "age_flag": "adult", "role": "ally",
+      "_unverified": true, "_source": "MECHANICS.md §6.4 盟友名单含 Ryuichi（付费 -0~3% DOOM）" },
+    { "name": "Hermit", "display": "隐士", "age_flag": "adult", "role": "ally",
+      "_unverified": true, "_source": "MECHANICS.md §6.4 盟友名单含 Hermit（招募后释放 -10% DOOM）" }
+  ]
+}

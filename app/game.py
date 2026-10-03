@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from . import config as cfgmod
+from . import pixel as pixel_mod
 from . import prompts
 from . import story_rules
 from . import tsf
@@ -685,6 +686,16 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
             if isinstance(data, tuple):
                 data, raw_name = data
                 item["raw_file"] = raw_name
+            # P10-A 像素画风（默认关）：**立绘写盘前的唯一闸门**。
+            # 位置选在这里而不是 image.process_portrait()，因为后者被 4 条真实
+            # 生成路径绕过（阶段渐变链式 2109-2127、换装限定重绘 2035-2048 与
+            # 2311-2324、初始参考重建 2010-2016），只挂钩子在那里会出现
+            # 「主角立绘是像素的、换装重绘那张不是」的功能不一致。
+            # 开关关闭时 apply_async 直接原样返回 data（零改动）；开启时是
+            # CPU 密集的整图解码+逐像素循环 → 内部走 asyncio.to_thread（B-05）。
+            if group == "portraits":
+                data = await pixel_mod.apply_async(
+                    data, (cfgmod.load_config().get("image") or {}))
             # 1.7.39 全局成品复检（写 ready 前的最后一道门——所有生成路径
             # 统一拦截：双人同框/绿色噪点绝不入库，合格才写文件；检出即
             # 抛异常 → 走失败回退/自动重画（含种子换簇）
@@ -1872,6 +1883,7 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
     note_s = (note or "").strip()
     mode_tag = "mock" if client.mock else "real"
     key = _skey(session, "tsf-portrait", mode_tag, PROMPT_VERSION, _params_tag(cfg),
+                *pixel_mod.key_parts(cfg.get("image")),
                 name, anchor, stage_idx, pband, outfit_s[:60], note_s[:60],
                 "initref" if use_initial else "", nonce)
     label = (f"{name}·阶段{stage_idx + 1}" if not outfit_s
@@ -2202,6 +2214,7 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
         name, appearance = character["name"], character.get("appearance", "")
         outfit_part = f"（服装：{outfit_s}）" if outfit_s else ""
         key = _skey(session, "portrait", mode_tag, PROMPT_VERSION, _params_tag(cfg),
+                    *pixel_mod.key_parts(cfg.get("image")),
                     name, appearance, emotion, outfit_s[:60], note_s[:60],
                     nonce)
         label = (f"{name}·{outfit_s}·{emotion}" if outfit_s
@@ -3067,6 +3080,47 @@ def regen_cg(sid: str, cg_id: str = "") -> dict:
     return {"ok": True, "cg_id": new_id, "title": meta.get("title", "桥段")}
 
 
+# 背景补生成的重试预算（t43 实测：旧实现无上限——每次 GET /api/game/{sid} 只要
+# 资产是 error 就 `unusable -> regenerate` 换一个新 background_id，实测 39 次轮询
+# 走到 bg41，bg_map 与 bg_count 无界增长，且失败尝试在日志里没有痕迹）。
+#
+# 为什么是 3 次：`_sd_retry` 每张图内部已经做了 3 个种子的变体轮换，所以
+# 「场景级 3 次」最坏 = 9 次 SD 调用，与一次阶段跃迁的量级相当；再多只会
+# 在必然失败的路径上白烧显存与时间。
+# 为什么退避是 20/40/80 秒：前端资产轮询与 `ensure_scene_bg` 的触发源都是
+# `GET /api/game/{sid}`，不设间隔的话用户每刷新一次界面就消耗一次预算；
+# 指数退避让「同一场景」的重试在时间维度上也可预测、可观察。
+BG_RETRY_MAX = 3
+BG_RETRY_BACKOFF = (20.0, 40.0, 80.0)
+
+
+def _bg_retry_state(session: dict, scene_id: str) -> dict:
+    """取（或建）某场景的补生成重试账本：{n, first_bg, last_ts, state}。"""
+    ledger = session.setdefault("bg_retry", {})
+    st = ledger.get(scene_id)
+    if not isinstance(st, dict):
+        st = {"n": 0, "first_bg": "", "last_ts": 0.0, "state": "retry"}
+        ledger[scene_id] = st
+    return st
+
+
+def _bg_backoff_secs(n: int) -> float:
+    """第 n 次尝试后应等待的秒数（n 从 0 起）。"""
+    if n < len(BG_RETRY_BACKOFF):
+        return BG_RETRY_BACKOFF[n]
+    return BG_RETRY_BACKOFF[-1]
+
+
+def _bg_retry_count(session: dict, scene_name) -> int:
+    """该场景已消耗的补生成尝试次数（0 = 没试过）。给 public_state 用。"""
+    try:
+        scene_id = hashlib.sha256(str(scene_name or "").encode("utf-8")).hexdigest()[:10]
+        st = (session.get("bg_retry") or {}).get(scene_id) or {}
+        return int(st.get("n", 0) or 0)
+    except Exception:
+        return 0
+
+
 def _assign_scene_bg(session: dict, turn: dict) -> None:
     """场景规划：同一场景名复用固定的背景图（首次访问生成，重访直接调用）。
 
@@ -3090,7 +3144,38 @@ def _assign_scene_bg(session: dict, turn: dict) -> None:
                      scene_name, sc["bg_id"])
             return
         # 旧存档背景文件丢失/曾生成失败：释放旧引用，按新背景重新生成
-        log.info("scene '%s' bg %s unusable -> regenerate", scene_name, sc["bg_id"])
+        # —— 但**受重试预算约束**（t43：旧实现无上限，每次 GET 都换新 id）。
+        rst = _bg_retry_state(session, scene_id)
+        if not rst.get("first_bg"):
+            rst["first_bg"] = sc["bg_id"]
+        if rst.get("state") == "unavailable":
+            # 预算用尽：保留**首次**分配的 id（不再换新 id、不再入队），
+            # 让前端拿到一个稳定的（不可用）引用而不是每轮刷新一个新背景号。
+            turn["background_id"] = sc["bg_id"]
+            turn["scene_revisit"] = True
+            turn["bg_unavailable"] = True
+            return
+        if rst["n"] >= BG_RETRY_MAX:
+            rst["state"] = "unavailable"
+            log.warning("背景补生成放弃：scene='%s' 已尝试 %d 次仍不可用"
+                        "（首次 %s，末次 %s）→ 标记永久不可用并停止重试（不再换新 id）",
+                        scene_name, rst["n"], rst["first_bg"], sc["bg_id"])
+            turn["background_id"] = sc["bg_id"]
+            turn["scene_revisit"] = True
+            turn["bg_unavailable"] = True
+            return
+        now = time.time()
+        wait = _bg_backoff_secs(rst["n"])
+        if now - float(rst.get("last_ts") or 0.0) < wait:
+            # 退避窗口内：不重试、不换 id（同一 GET 轮询风暴不会消耗预算）
+            turn["background_id"] = sc["bg_id"]
+            turn["scene_revisit"] = True
+            return
+        rst["n"] += 1
+        rst["last_ts"] = now
+        log.info("scene '%s' bg %s unusable -> regenerate"
+                 "（第 %d/%d 次尝试，上次间隔≥%.0fs）",
+                 scene_name, sc["bg_id"], rst["n"], BG_RETRY_MAX, wait)
         sc.pop("bg_id", None)
     hint = turn.get("background_hint") or scene_name
     if turn.get("is_new_background", False) or not hint:
@@ -3117,6 +3202,8 @@ def _bg_state_snapshot(session: dict, turn: dict) -> dict:
         "scenes": json.loads(json.dumps(session.get("scenes", {}),
                                        ensure_ascii=False)),
         "bg_map": dict(session.get("bg_map", {}) or {}),
+        "bg_retry": json.loads(json.dumps(session.get("bg_retry", {}) or {},
+                                          ensure_ascii=False)),
         "backgrounds": json.loads(json.dumps(
             (session.get("assets", {}) or {}).get("backgrounds", {}) or {},
             ensure_ascii=False)),
@@ -3131,6 +3218,7 @@ def _bg_state_restore(session: dict, turn: dict, snap: dict) -> None:
     session["bg_count"] = snap["bg_count"]
     session["scenes"] = snap["scenes"]
     session["bg_map"] = snap["bg_map"]
+    session["bg_retry"] = snap.get("bg_retry", {})
     session.setdefault("assets", {})["backgrounds"] = snap["backgrounds"]
 
 
@@ -3157,10 +3245,18 @@ def ensure_scene_bg(session: dict) -> None:
         if entry and entry.get("status") in ("ready", "pending"):
             return
         snap = _bg_state_snapshot(session, turn)
+        before_bg = turn.get("background_id")
         _assign_scene_bg(session, turn)
         persist(session)
-        log.info("ensure_scene_bg regenerated sid=%s bg_id=%s",
-                 sid, turn.get("background_id"))
+        # 只在**真的换了背景号**时记 regenerated：预算耗尽/退避窗口内是
+        # 「有意不补生成」，若照旧打印会把日志变成误导（t43 的观察之一）。
+        if turn.get("background_id") != before_bg:
+            log.info("ensure_scene_bg regenerated sid=%s bg_id=%s",
+                     sid, turn.get("background_id"))
+        else:
+            log.info("ensure_scene_bg skipped sid=%s bg_id=%s "
+                     "（补生成受预算/退避约束，或已标记永久不可用）",
+                     sid, turn.get("background_id"))
     except Exception as e:
         log.warning("ensure_scene_bg failed sid=%s: %s: %s",
                     sid, type(e).__name__, e)
@@ -3840,6 +3936,10 @@ def public_state(session: dict) -> dict:
         "scene_visits": turn.get("scene_visits", 1),
         "scene_roster": turn.get("scene_roster", []),
         "scene_revisit": bool(turn.get("scene_revisit")),
+        # 背景补生成可见性（t45）：预算耗尽后前端能直接看到"本场景背景永久不可用"
+        # 与已尝试次数，而不是只看到一直转圈。字段是**新增**的，旧前端忽略即可。
+        "bg_unavailable": bool(turn.get("bg_unavailable")),
+        "bg_retry_attempts": _bg_retry_count(session, turn.get("scene")),
         "cg_active": bool(turn.get("cg_id")),
         "cg_id": turn.get("cg_id", ""),
         "cg_title": (turn.get("cg") or {}).get("title", ""),

@@ -1,0 +1,228 @@
+{
+ "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+ "cards": [
+  {
+   "id": "C-201",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Apartments"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "你出门前明明锁了门。回来的时候，锁是从里面反锁的。",
+   "choices": [
+    {
+     "text": "贴着门听里面的动静",
+     "check": {
+      "stat": "KNW",
+      "threat": "SAFE",
+      "dc": 0
+     },
+     "success": {
+      "exp": 6
+     },
+     "failure": {
+      "rea": -2
+     }
+    },
+    {
+     "text": "找管理员要备用钥匙",
+     "success": {
+      "funds": -1,
+      "exp": 3
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "坐在楼梯上等",
+     "success": {
+      "exp": 2,
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-202",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Apartments"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "水槽下面的柜子里多了一双鞋。尺码不是你的，也不是家里任何一个人的。",
+   "choices": [
+    {
+     "text": "拿去扔掉",
+     "success": {
+      "exp": 4
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "留在原地不动它",
+     "success": {
+      "tags_grant": [
+       "Fearful"
+      ]
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-203",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Apartments"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "隔壁传来的声音像有人在来回踱步，但步子踩得太密，密到不可能是两条腿。",
+   "choices": [
+    {
+     "text": "敲门",
+     "failure": {
+      "combat": {
+       "enemy": "Roommate",
+       "is_boss": false
+      }
+     }
+    },
+    {
+     "text": "锁上自己的门，不出声",
+     "success": {
+      "doom": 2
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-204",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Apartments"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "衣柜后面露出一截墙纸，颜色比周围新。你试着推了一下，它动了。",
+   "choices": [
+    {
+     "text": "用力把它整块掀开",
+     "check": {
+      "stat": "STR",
+      "threat": "SAFE",
+      "dc": 0
+     },
+     "success": {
+      "item_grant": [
+       "OccultDiary"
+      ],
+      "exp": 8
+     },
+     "failure": {
+      "sta": -2
+     }
+    },
+    {
+     "text": "只用手指抠开一角",
+     "success": {
+      "exp": 3
+     },
+     "failure": {
+      "sta": -1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-205",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Apartments"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "冰箱里那盒牛奶是你上周买的。日期还好好的。你记得自己已经扔过它一次。",
+   "choices": [
+    {
+     "text": "倒掉",
+     "success": {
+      "exp": 2
+     }
+    },
+    {
+     "text": "打开闻一下",
+     "success": {
+      "exp": 3
+     },
+     "failure": {
+      "sta": -1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-206",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Apartments"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "天花板上有一小片水渍，形状和昨天不一样了。",
+   "choices": [
+    {
+     "text": "站到正下方仔细看",
+     "check": {
+      "stat": "PER",
+      "threat": "SAFE",
+      "dc": 0
+     },
+     "success": {
+      "exp": 6
+     },
+     "failure": {
+      "rea": -1
+     }
+    },
+    {
+     "text": "搬开床，不管它"
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  }
+ ]
+}

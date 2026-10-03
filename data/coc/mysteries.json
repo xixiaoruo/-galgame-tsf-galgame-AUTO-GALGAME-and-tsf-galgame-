@@ -1,0 +1,26 @@
+{
+  "_source": "MECHANICS.md §1.1 局的结构（谜团 → 调查 → 事件/战斗）；§4.1 谜团两类形态 Free-Roam / Location-Locked。MVP 只做 Free-Roam（COC-DESIGN §6.1 M-43 行）。",
+  "_note": "MVP 2 个谜团（COC-DESIGN §6.1 数据量表）。上游池为 20 或 21 条（§12 #2 未查实，故此处不写 total）。",
+  "mysteries": [
+    {
+      "id": "MY-01",
+      "name": "会自己合上的门",
+      "locations": ["Apartments", "School"],
+      "free_roam": true,
+      "lock_after": null,
+      "boss": "Thin Man",
+      "_unverified": true,
+      "_source": "本项目设计（骨架）：地名与语气对齐 MECHANICS.md §9.1 开发者自述“低尺度的、私人的、日常中的异常”，不照搬上游任何具体谜团文本"
+    },
+    {
+      "id": "MY-02",
+      "name": "药房后面的走廊",
+      "locations": ["Hospital", "Downtown"],
+      "free_roam": true,
+      "lock_after": null,
+      "boss": "Doll Nurse",
+      "_unverified": true,
+      "_source": "本项目设计（骨架）：MECHANICS.md §5.1 提到 Doll Nurse 为遭遇专属动作的敌人之一"
+    }
+  ]
+}

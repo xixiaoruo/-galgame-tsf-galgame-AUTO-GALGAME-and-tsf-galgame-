@@ -1,6 +1,7 @@
 """AI Galgame 服务入口。运行：python server.py → http://127.0.0.1:8765"""
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -137,6 +138,185 @@ def _req_file(root, *parts, what: str = "文件路径", max_parts: int | None = 
 @app.get("/api/version")
 def version():
     return {"version": GAME_VERSION}
+
+
+# ---------- 本地访问安全基线（B-10 / t39）----------
+# 审计缺陷：原先绑 0.0.0.0 + ::，仅 3 个端点查 127.0.0.1（**对浏览器 CSRF 无效**，
+# 因为请求就是本机浏览器发出的、源 IP 也是回环），wipe 的确认词是固定串 "WIPE"，
+# /api/open-folder 无鉴权 → 局域网内任意网页可抹数据 + 关机。
+#
+# 本基线四件事：
+#   ① 默认只绑回环（见文件末尾 __main__；局域网需显式 TSF_ALLOW_LAN=1）
+#   ② 写操作（非 GET/HEAD/OPTIONS 的 /api/*）必须携带**本轮随机 token**
+#   ③ Origin / Sec-Fetch-Site 校验（跨源写一律拒；Host 必须是回环，兼防 DNS rebinding）
+#   ④ wipe 改为服务端随机下发确认词（单次、5 分钟过期）
+#
+# token 的生成与存放：启动时 `secrets.token_urlsafe(32)` 随机生成一次（**不写死在源码里**），
+# 原子写入 `DATA_DIR/local_token.json`（进程生命周期内稳定、不轮换）。本机工具链
+# （launcher.py / 测试工具/acceptance_e2e.py / 未来的第二实例聚焦）读该文件并带
+# `X-Local-Token` 头即可；同源浏览器页面则靠 `SameSite=Strict` cookie 自动携带，
+# 前端**无需改一行代码**。
+_LOCAL_TOKEN = ""
+_TOKEN_HEADER = "X-Local-Token"
+_TOKEN_COOKIE = "tsf_token"
+_WIPE_TTL = 300.0
+_WIPE_CHALLENGE: dict = {}      # {"word": str, "exp": float}，单次使用
+_LAN_MODE = False               # 由 __main__ 的 opt-in 决定；影响 Host 白名单
+_LAN_HOSTS: set = set()         # opt-in 时的本机局域网 IP
+
+
+def _init_local_token() -> str:
+    """生成本轮 token 并原子落盘（DATA_DIR/local_token.json）。幂等。"""
+    global _LOCAL_TOKEN
+    import secrets as _secrets
+    if _LOCAL_TOKEN:
+        return _LOCAL_TOKEN
+    tok = _secrets.token_urlsafe(32)
+    _LOCAL_TOKEN = tok
+    try:
+        cfgmod.atomic_write_json(cfgmod.DATA_DIR / "local_token.json",
+                                 {"token": tok, "issued_at": time.time()})
+    except OSError as e:                # 落盘失败不致命：内存里的 token 依然有效
+        logging.warning("local_token.json 写入失败（工具链将无法读取 token）：%s", e)
+    return tok
+
+
+def _allowed_hosts() -> set:
+    """允许的 Host 主机名：回环三种写法，opt-in 时外加本机局域网 IP。"""
+    hosts = {"127.0.0.1", "localhost", "::1"}
+    if _LAN_MODE:
+        hosts |= _LAN_HOSTS
+    return hosts
+
+
+def _host_of(host_header: str) -> str:
+    """从 Host 头取出主机名（兼容 `127.0.0.1:8765`、`[::1]:8765`）。"""
+    h = (host_header or "").strip().lower()
+    if h.startswith("["):
+        return h.split("]")[0].lstrip("[")
+    return h.rsplit(":", 1)[0] if ":" in h else h
+
+
+def _host_allowed(host_header: str) -> bool:
+    return _host_of(host_header) in _allowed_hosts()
+
+
+def _origin_allowed(origin: str) -> bool:
+    """同源判定：仅接受 http://<允许主机>[:端口]。"""
+    if not origin:
+        return True                     # 无 Origin = 非浏览器调用方（凭据在 token 上）
+    if origin == "null":
+        return False                    # sandboxed iframe / file:// 等
+    try:
+        import urllib.parse as _up
+        p = _up.urlparse(origin.strip())
+    except ValueError:
+        return False
+    return p.scheme == "http" and _host_of(p.netloc) in _allowed_hosts()
+
+
+def _presented_token(request: Request) -> str:
+    """从 头 / cookie / 查询串 里取 token（三者等价）。"""
+    tok = request.headers.get(_TOKEN_HEADER, "")
+    if not tok:
+        tok = request.cookies.get(_TOKEN_COOKIE, "")
+    if not tok:
+        tok = request.query_params.get("token", "")
+    return tok.strip()
+
+
+def _deny(status_code: int, detail: str, reason: str):
+    """统一的拒绝响应（含 no-store + 反内嵌头，与其它响应口径一致）。"""
+    from fastapi.responses import JSONResponse
+    logging.warning("local-guard 拒绝请求：%s（%s）", detail, reason)
+    resp = JSONResponse(status_code=status_code, content={"detail": detail},
+                        headers={"Cache-Control": "no-store, max-age=0",
+                                 "X-Local-Guard": reason})
+    return _apply_security_headers(resp)
+
+
+def _looks_like_browser(request: Request) -> bool:
+    """判定"浏览器发来的请求"：任一 Fetch 元数据头或 Origin 出现即算。
+
+    浏览器对**同源 POST 也会带** `Origin` 与 `Sec-Fetch-Site`；而非浏览器
+    （curl / urllib / launcher / acceptance_e2e / 第二实例聚焦）两者都没有。
+    因此"两个头都缺失"是**非浏览器调用方**的可靠签名（队长裁决：回环 + 无 Origin
+    ⇒ 视为本机工具链）。注意：这只用于**区分调用方类别**，
+    「无 Origin」**不是**"已验证为安全"，真正的凭据是 token（浏览器侧）。
+    """
+    for h in ("origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"):
+        if request.headers.get(h):
+            return True
+    return False
+
+
+#: 反内嵌：`frame-ancestors` 只能通过**响应头**生效（放在 `<meta>` 里会被规范忽略——
+#: t38 曾把它放在 meta，浏览器控制台每次加载都报一条 security/error 且**毫无保护效果**；
+#: 真实浏览器实测：当时任意页面都能用 iframe 内嵌本服务）。
+#: 现由本中间件对**所有**响应下发；`X-Frame-Options` 作旧引擎兜底
+#: （现代 Chromium 以 CSP 为准并忽略 XFO；WebView2 也是 Chromium，但 IE 模式/老内嵌壳只认 XFO）。
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Frame-Options": "DENY",
+}
+
+
+def _apply_security_headers(resp):
+    """给任意响应补反内嵌头（已存在同名头则不覆盖）。"""
+    for k, v in _SECURITY_HEADERS.items():
+        if k not in resp.headers:
+            resp.headers[k] = v
+    return resp
+
+
+@app.middleware("http")
+async def local_access_guard(request: Request, call_next):
+    """B-10：Host 必须回环；写操作需同源 + 本地 token；所有响应带反内嵌头。
+
+    中间件注册顺序：后注册的在外层 → 本函数最先看到请求、最早拒绝；
+    响应头（no-store）仍由先注册的 no_cache_middleware 负责，两者互不干扰。
+    """
+    path = request.url.path
+    if path.startswith("/api/"):
+        if not _host_allowed(request.headers.get("host", "")):
+            return _deny(403, "仅允许本机访问：Host 校验失败（防 DNS rebinding）", "host")
+        if request.method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+                return _deny(403, "跨站写请求被拒绝", "fetch-site")
+            if not _origin_allowed(request.headers.get("origin", "")):
+                return _deny(403, "跨源写请求被拒绝（Origin 校验失败）", "origin")
+            if _looks_like_browser(request):
+                # 浏览器发来的写请求：必须有本轮 token（同源页面由 cookie 自动携带，
+                # 也可用 X-Local-Token 头 / ?token=）。缺 token 一律 403。
+                import secrets as _secrets
+                tok = _presented_token(request)
+                if not _LOCAL_TOKEN or not tok \
+                        or not _secrets.compare_digest(tok, _LOCAL_TOKEN):
+                    return _deny(403, "缺少或错误的本地 token：写操作需携带 X-Local-Token"
+                                      "（同源浏览器由 cookie 自动携带）", "token")
+    response = await call_next(request)
+    _apply_security_headers(response)          # 页面/静态/API 全响应都带反内嵌头
+    # 同源页面附带 SameSite=Strict 的 token cookie：前端零改动即可通过写操作校验。
+    # 跨站请求不会带上它（CSRF 在 cookie 层就断了）。
+    if path in ("/", "/index.html") and _LOCAL_TOKEN and request.method.upper() == "GET":
+        response.set_cookie(_TOKEN_COOKIE, _LOCAL_TOKEN, path="/", httponly=True,
+                            samesite="strict")
+    return response
+
+
+@app.get("/api/local-token")
+def local_token(request: Request):
+    """同源页面读取本轮 token（跨源读不到：Host 必须回环，且拒绝跨站读取）。
+
+    JSON 对象字面量不会被 `<script src>` 之类的手段读走；跨源真读还会被
+    `Sec-Fetch-Site` 与 Origin 两道挡下。
+    """
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site" \
+            or not _origin_allowed(request.headers.get("origin", "")):
+        raise HTTPException(403, "跨源不可读取本地 token")
+    if not _LOCAL_TOKEN:
+        _init_local_token()
+    return {"token": _LOCAL_TOKEN}
 
 
 @app.get("/api/update-state")
@@ -487,16 +667,44 @@ class DeleteByIdPayload(BaseModel):
     id: str = ""
 
 
+@app.post("/api/admin/wipe-challenge")
+def wipe_challenge(request: Request):
+    """B-10：下发**服务端随机**确认词（单次使用、5 分钟过期）。
+
+    固定串 "WIPE" 已失效——攻击者无法预知随机词；且写操作本身还需本地 token。
+    """
+    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(403, "仅限本机调试")
+    import secrets as _secrets
+    word = _secrets.token_hex(3).upper()          # 6 位十六进制，如 9F3A1C
+    _WIPE_CHALLENGE.clear()
+    _WIPE_CHALLENGE.update({"word": word, "exp": time.time() + _WIPE_TTL})
+    logging.info("wipe 确认词已下发（有效期 %.0fs）", _WIPE_TTL)
+    return {"word": word, "expires_in": int(_WIPE_TTL)}
+
+
 @app.post("/api/admin/wipe")
 async def wipe_data(request: Request):
     """清空全部游戏历史数据（立绘缓存/存档/全局存档/世界观档案/插件），
-    保留 API 配置（config.json）。需 body confirm=="WIPE" 且本机请求。"""
-    if request.client.host not in ("127.0.0.1", "::1"):
+    保留 API 配置（config.json）。
+
+    B-10 加固：确认词改为**服务端随机下发**（见 /api/admin/wipe-challenge），
+    单次使用 + 5 分钟过期；写操作另需本地 token（中间件）；本机来源再查一次。
+    """
+    if request.client and request.client.host not in ("127.0.0.1", "::1"):
         raise HTTPException(403, "仅限本机调试")
+    import secrets as _secrets
     import shutil as _sh
     payload = await request.json()
-    if payload.get("confirm") != "WIPE":
-        raise HTTPException(400, "确认词应为 WIPE")
+    word = str(payload.get("confirm", "")).strip().upper()
+    ch = _WIPE_CHALLENGE
+    if not ch or time.time() > float(ch.get("exp", 0)):
+        raise HTTPException(
+            400, "确认词已过期或未下发：请先 POST /api/admin/wipe-challenge 获取随机确认词"
+                 "（旧固定词 WIPE 已失效）")
+    if not word or not _secrets.compare_digest(word, str(ch.get("word", ""))):
+        raise HTTPException(400, "确认词不正确（旧固定词 WIPE 已失效）")
+    _WIPE_CHALLENGE.clear()                        # 单次使用
     import glob as _g
     cleared = {}
     for name, pattern in (
@@ -1248,11 +1456,18 @@ class OpenFolderPayload(BaseModel):
 @app.post("/api/open-folder")
 def open_folder(payload: OpenFolderPayload = OpenFolderPayload()):
     """在系统资源管理器中打开「当前对局的立绘目录」（portraits 等子目录），
-    未进入对局时打开立绘缓存根目录。"""
+    未进入对局时打开立绘缓存根目录。
+
+    B-10 加固：本端点会**在本机启动进程/打开窗口**，因此必须
+      ① 写操作鉴权（中间件：token + Origin + 回环 Host）；
+      ② 打开目标必须是 `CACHE_DIR` **内部已存在**的目录（resolve 后包含断言，
+         挡 junction/软链接逃逸），绝不允许请求方指定任意路径。
+    """
     import os
     import subprocess
     import sys
-    path = str(cfgmod.CACHE_DIR.resolve())
+    base = cfgmod.CACHE_DIR.resolve()
+    path = str(base)
     sid = (payload.sid or "").strip()
     if sid:
         try:
@@ -1263,6 +1478,12 @@ def open_folder(payload: OpenFolderPayload = OpenFolderPayload()):
                                  what="对局立绘目录"))
         except game.GameError:
             pass
+    target = Path(path).resolve()
+    if target != base and base not in target.parents:
+        raise HTTPException(403, "只能打开本机立绘缓存目录内的文件夹")
+    if not target.is_dir():
+        raise HTTPException(404, "目标目录不存在（还没有生成过立绘？）")
+    path = str(target)
     try:
         if sys.platform == "win32":
             os.startfile(path)  # noqa: S606
@@ -1408,7 +1629,10 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    PORT = 8765
+    # 端口可用 TSF_PORT 覆盖（默认 8765 不变）：窗口化宿主/隔离验收要在**不碰
+    # 用户正在跑的 8765 实例**的前提下起自己的服务。绑定语义、单实例探测分支、
+    # `server.run(sockets=socks)` 调用形态都不受影响（只是这个常量的取值来源变了）。
+    PORT = int(os.environ.get("TSF_PORT", "8765") or 8765)
     # ---- 更新检测：update/ 有新包时引导一键 bat 更新（数据固定，替换安全）----
     import os as _os
     if (_os.path.basename(_sys.executable).lower().endswith(".exe")
@@ -1429,6 +1653,15 @@ if __name__ == "__main__":
                 print("=" * 46)
         except OSError:
             pass
+    # B-10 / t39：**默认只绑回环**（原先 0.0.0.0 + :: 会让局域网内任意网页/设备
+    # 访问到本服务，配合无鉴权的写端点可被抹数据 + 关机）。
+    # 如需局域网访问（如手机），显式设 TSF_ALLOW_LAN=1 —— 此时写操作仍需本地 token，
+    # 且 Host/Origin 白名单会自动把本机局域网 IP 加进来。
+    lan_opt_in = str(os.environ.get("TSF_ALLOW_LAN", "")).strip().lower() in ("1", "true", "yes", "on")
+    bind_v4 = "0.0.0.0" if lan_opt_in else "127.0.0.1"
+    bind_v6 = "::" if lan_opt_in else "::1"
+    # 注意：`if __name__ == "__main__":` 里仍是模块作用域，直接赋值即可（不能写 global）
+    _LAN_MODE = lan_opt_in
     socks = []
     # Windows 上 SO_REUSEADDR 会允许多实例静默共存同一端口，导致请求被旧进程
     # 接走；仅在非 Windows 平台设置，让重复启动直接报"端口被占用"
@@ -1440,7 +1673,7 @@ if __name__ == "__main__":
         if reuse:
             s6.setsockopt(socket.SOL_SOCKET, reuse, 1)
         s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        s6.bind(("::", PORT))
+        s6.bind((bind_v6, PORT))
         s6.listen(128)
         socks.append(s6)
     except OSError as e:
@@ -1450,7 +1683,7 @@ if __name__ == "__main__":
     if reuse:
         s4.setsockopt(socket.SOL_SOCKET, reuse, 1)
     try:
-        s4.bind(("0.0.0.0", PORT))
+        s4.bind((bind_v4, PORT))
         s4.listen(128)
     except OSError:
         for s in socks:
@@ -1481,14 +1714,32 @@ if __name__ == "__main__":
             lan_ip = s.getsockname()[0]
     except OSError:
         pass
+    # B-10：opt-in 局域网时，把本机所有局域网地址加入 Host/Origin 白名单
+    if lan_opt_in:
+        try:
+            import socket as _s2
+            for _info in _s2.getaddrinfo(_s2.gethostname(), None, _s2.AF_INET):
+                _LAN_HOSTS.add(_info[4][0])
+        except OSError:
+            pass
+        if lan_ip:
+            _LAN_HOSTS.add(lan_ip)
+
+    # B-10：生成本轮随机 token（写操作鉴权；工具链可读 DATA_DIR/local_token.json）
+    _init_local_token()
 
     print()
     print("=" * 52)
     print("  自动化AI Galgame 已启动，请用浏览器打开：")
     print("  · http://127.0.0.1:8765")
     print("  · http://localhost:8765")
-    if lan_ip:
-        print(f"  · 局域网设备（如手机）: http://{lan_ip}:8765")
+    if lan_opt_in:
+        print("  ⚠ 已开启局域网监听（TSF_ALLOW_LAN=1）：")
+        if lan_ip:
+            print(f"    · 局域网设备（如手机）: http://{lan_ip}:8765")
+        print("    · 写操作仍需本地 token；只在你信任的网络里这么做")
+    else:
+        print("  （默认仅本机可访问；如需手机/局域网访问：设 TSF_ALLOW_LAN=1 再启动）")
     print("  （保持本窗口开启；关闭窗口即停止服务）")
     print("=" * 52)
     print()
@@ -1516,6 +1767,35 @@ if __name__ == "__main__":
     import threading as _threading
     _threading.Thread(target=_close_splash_online, daemon=True).start()
 
-    server = uvicorn.Server(uvicorn.Config(app, log_level="info"))
+    # ★ console=False（windowed）日志改道（t49 / 契约 §3.2 P8、U1）：
+    # uvicorn 默认 LOGGING_CONFIG 给 `uvicorn` / `uvicorn.error` / `uvicorn.access`
+    # 挂的是 **stderr** handler 且 `propagate=False` ⇒ 冻结成 windowed 后
+    # `sys.stderr is None`，访问日志会**静默丢失**。这里：
+    #   · `log_config=None` 不让 uvicorn 覆盖我们的 logging 配置；
+    #   · 给三个 uvicorn logger 显式挂**文件 handler**（data/uvicorn.log），
+    #     并保留 propagate 关闭（避免与 debug.log 重复），
+    #   · 只有在**确实存在** stderr 时才额外加控制台 handler。
+    _uv_handlers = []
+    try:
+        _uv_fh = logging.FileHandler(cfgmod.DATA_DIR / "uvicorn.log", encoding="utf-8")
+        _uv_fh.setLevel(logging.INFO)
+        _uv_fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"))
+        _uv_handlers.append(_uv_fh)
+    except OSError as e:            # 落盘失败不致命：退回根 logger 的 debug.log
+        logging.warning("uvicorn.log 创建失败，将只写 debug.log：%s", e)
+    if _sys.stderr is not None:     # 有控制台时保持可见（非 windowed 形态）
+        _uv_sh = logging.StreamHandler(_sys.stderr)
+        _uv_sh.setLevel(logging.INFO)
+        _uv_sh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"))
+        _uv_handlers.append(_uv_sh)
+    for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        _lg = logging.getLogger(_name)
+        _lg.setLevel(logging.INFO)
+        _lg.handlers = list(_uv_handlers)   # 顶掉 uvicorn 默认的 stderr handler
+        _lg.propagate = False if _uv_handlers else True
+
+    server = uvicorn.Server(uvicorn.Config(app, log_level="info", log_config=None))
     _UVICORN_SERVER = server   # B-04：/api/shutdown 靠它优雅停机（should_exit）
     server.run(sockets=socks)

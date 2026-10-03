@@ -1,0 +1,26 @@
+{
+  "_source": "MECHANICS.md §4.3 物品用途以装备为主；§2.1 DOOM 下降途径里的可携带物（Occult Diary -3%、Dusty Grimoire -4%、Gruesome Totem -10%）；§5.2 战斗动作消耗品（Bandage 治 Minor、Medical Kit 治 Major）。",
+  "_note": "本表**同时**是 sanitize.py 的物品白名单来源：LLM 提议的 item_grant/item_take 只认这里登记过的 id（COC-DESIGN §8.4）。",
+  "items": [
+    { "id": "Bandage", "name": "绷带", "kind": "consumable", "cures": "minor",
+      "_unverified": true, "_source": "MECHANICS.md §2.3 伤势治愈方式：Bandage 治 Minor" },
+    { "id": "MedicalKit", "name": "医疗包", "kind": "consumable", "cures": "major",
+      "_unverified": true, "_source": "MECHANICS.md §2.3 Medical Kit 治 Major" },
+    { "id": "OccultDiary", "name": "神秘日记", "kind": "usable", "doom_down_key": "Item:OccultDiary",
+      "_unverified": true, "_source": "MECHANICS.md §2.1 使用 Occult Diary -3% DOOM" },
+    { "id": "DustyGrimoire", "name": "积灰的魔典", "kind": "usable", "doom_down_key": "Item:DustyGrimoire",
+      "_unverified": true, "_source": "MECHANICS.md §2.1 使用 Dusty Grimoire -4% DOOM" },
+    { "id": "GruesomeTotem", "name": "狰狞图腾", "kind": "equipment", "slot": "C", "doom_down_key": "Item:GruesomeTotem",
+      "_unverified": true, "_source": "MECHANICS.md §2.1 装备 Gruesome Totem（C 槽）-10% DOOM" },
+    { "id": "BronzeCrucifix", "name": "青铜十字架", "kind": "equipment",
+      "_unverified": true, "_source": "MECHANICS.md §5.4 幽灵战斗中唯一的普通攻击例外：Yashiro 装备 Bronze Crucifix" },
+    { "id": "Camera", "name": "相机", "kind": "equipment",
+      "_unverified": true, "_source": "MECHANICS.md §5.2 Camera Flash 动作需装备 Camera" },
+    { "id": "SteakKnife", "name": "牛排刀", "kind": "weapon", "stat": "DEX",
+      "_unverified": true, "_source": "MECHANICS.md §4.3 Steak Knife 走 DEX 加成、§5.3 基础耗时 80/强攻 120" },
+    { "id": "FireAxe", "name": "消防斧", "kind": "weapon", "stat": "STR",
+      "_unverified": true, "_source": "MECHANICS.md §5.2 Strong Attack 示例 Fire Axe 6→9（双手武器走 STR，§4.3）" },
+    { "id": "Map", "name": "地图", "kind": "usable",
+      "_unverified": true, "_source": "MECHANICS.md §2.1 携带 Map 调查村庄/森林有几率抵消那 +1%（本模式简化为通用物品位）" }
+  ]
+}

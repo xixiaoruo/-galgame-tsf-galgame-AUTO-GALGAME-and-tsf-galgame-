@@ -578,6 +578,11 @@ def public_state(session: dict) -> dict:
         "scene_visits": turn.get("scene_visits", 1),
         "scene_roster": turn.get("scene_roster", []),
         "scene_revisit": bool(turn.get("scene_revisit")),
+        # 背景补生成可见性（t45，与 game.public_state 同口径，计数口径复用
+        # game._bg_retry_count 以免两处漂移）：普通模式必须一样能看到
+        # "本场景背景永久不可用"+已尝试次数，否则前端只能一直转圈。
+        "bg_unavailable": bool(turn.get("bg_unavailable")),
+        "bg_retry_attempts": game._bg_retry_count(session, turn.get("scene")),
         "cg_active": bool(turn.get("cg_id")),
         "cg_id": turn.get("cg_id", ""),
         "cg_title": (turn.get("cg") or {}).get("title", ""),

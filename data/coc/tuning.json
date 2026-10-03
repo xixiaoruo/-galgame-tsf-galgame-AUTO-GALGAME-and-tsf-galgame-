@@ -1,0 +1,224 @@
+{
+  "_meta": {
+    "schema": 1,
+    "generated_from": "D:\\dsh创造\\woth-research\\MECHANICS.md",
+    "design": "D:\\dsh创造\\coc-mode\\COC-DESIGN.md",
+    "rule": "本文件是 CoC 模式**全部数值的唯一来源**。代码不得硬编码本文件里的任何数值。凡来自 MECHANICS.md §12 不确定项的数值，必须带 \"_unverified\": true 与 \"_source\"。",
+    "enforced_by": "app/coc/tests/test_tuning_provenance.py"
+  },
+
+  "threat_mod": {
+    "value": { "SAFE": 0, "LOW": -1, "DANGEROUS": -1, "DOOMED": -2 },
+    "_unverified": true,
+    "_source": "MECHANICS.md §4.2 + §12 #8：Math_Guide 写 LOW=+1/DOOMED=+2 给掷骰方，Threat_Level 写 LOW=-1/DOOMED=-2 给玩家方，两页符号相反方向一致。本设计只实现方向、把符号归一化到玩家侧，两种表述数值等价。DANGEROUS 的 -1 系本设计推断（§2.4 只有方向描述，LOW/DOOMED 才有两页数字）。",
+    "_note": "符号归一化是设计决定，不是事实认定；改符号会同时改变两种来源的等价性。"
+  },
+
+  "difficulty": {
+    "Sceptic": {
+      "sta": 21, "rea": 21, "funds": 5, "enemy_dmg": -1, "mystery_count": 4,
+      "doom_relief_per_mystery": 5, "starting_threats": ["LOW"],
+      "_unverified": true, "_source": "MECHANICS.md §2.4（仅社区 wiki，可信度中；量级与 A9VG“初始只有 15 点上下体力与理智”一致）"
+    },
+    "Initiate": {
+      "sta": 21, "rea": 21, "funds": 5, "enemy_dmg": 0, "mystery_count": 5,
+      "doom_relief_per_mystery": 4, "starting_threats": [],
+      "_unverified": true, "_source": "MECHANICS.md §2.4"
+    },
+    "Cultist": {
+      "sta": 17, "rea": 17, "funds": 4, "enemy_dmg": 0, "mystery_count": 5,
+      "doom_relief_per_mystery": 3, "starting_threats": ["DANGEROUS", "LOW", "LOW"],
+      "_unverified": true, "_source": "MECHANICS.md §2.4"
+    },
+    "TrueBeliever": {
+      "sta": 13, "rea": 13, "funds": 0, "enemy_dmg": 0, "mystery_count": 5,
+      "doom_relief_per_mystery": 2, "starting_threats": ["DOOMED", "DANGEROUS", "LOW", "LOW"],
+      "_unverified": true, "_source": "MECHANICS.md §2.4"
+    },
+    "Harbinger": {
+      "sta": 13, "rea": 13, "funds": 0, "enemy_dmg": 1, "mystery_count": 5,
+      "doom_relief_per_mystery": 0, "starting_threats": ["DOOMED", "DOOMED"],
+      "_unverified": true, "_source": "MECHANICS.md §2.4（原文拼写 Harbringer；实现用 Harbinger 并两写并存做别名）"
+    },
+    "_aliases": { "Harbringer": "Harbinger", "Harbringer of Doom": "Harbinger", "Harbinger of Doom": "Harbinger" },
+    "_note": "MVP 只开放 Sceptic / Initiate / Cultist 三档（COC-DESIGN §6.1 数据量表）；其余两档数据先落地，便于 v2 直接放开。"
+  },
+
+  "doom_up": {
+    "investigate": { "value": 1, "_unverified": true, "_source": "MECHANICS.md §2.1 基础规则“每次调查任意地点 +1% DOOM”（机制高、逐条数值中）" },
+    "investigate_doomed": { "value": 1, "_unverified": true, "_source": "MECHANICS.md §2.4 DOOMED 地点“调查额外 +1% DOOM”" },
+    "rest_home": { "value": 3, "_unverified": true, "_source": "MECHANICS.md §2.1 家中休息 +2%~+4%（随难度）——取中值 3，难度表另行修正" },
+    "rest_lighthouse": { "value": 2, "_unverified": true, "_source": "MECHANICS.md §2.1 灯塔休息 +2%" },
+    "flee": { "value": 5, "_unverified": true, "_source": "MECHANICS.md §2.1、§5.2 逃跑 +5% DOOM" },
+    "shop_enter": { "value": 4, "_unverified": true, "_source": "MECHANICS.md §2.1、§4.3 逛商店 +4% DOOM" },
+    "shop_reroll": { "value": 3, "_unverified": true, "_source": "MECHANICS.md §2.1、§4.3 重掷商店存货 +3% DOOM" },
+    "levelup_reroll": { "value": 4, "_unverified": true, "_source": "MECHANICS.md §2.1、§6.3 升级重掷特权 +4% DOOM" },
+    "prepare_investigation_first": { "value": 5, "_unverified": true, "_source": "MECHANICS.md §2.1 准备调查首次 +5%" },
+    "prepare_investigation_later": { "value": 2, "_unverified": true, "_source": "MECHANICS.md §2.1 准备调查之后每次 +2%" }
+  },
+
+  "doom_down": {
+    "Item:OccultDiary": { "value": 3, "_unverified": true, "_source": "MECHANICS.md §2.1 使用 Occult Diary -3%" },
+    "Item:DustyGrimoire": { "value": 4, "_unverified": true, "_source": "MECHANICS.md §2.1 使用 Dusty Grimoire -4%" },
+    "Item:GruesomeTotem": { "value": 10, "_unverified": true, "_source": "MECHANICS.md §2.1 装备 Gruesome Totem（C 槽）-10%" },
+    "Ally:Hermit": { "value": 10, "_unverified": true, "_source": "MECHANICS.md §2.1、§6.4 招募并释放隐士 Hermit -10%" },
+    "Ally:Ryuichi": { "value": 3, "_unverified": true, "_source": "MECHANICS.md §2.1、§6.4 付钱给盟友 Ryuichi -0~3%——取上限 3" },
+    "Monument:sacrifice": { "value": 3, "_unverified": true, "_source": "MECHANICS.md §2.1 在纪念碑献祭 -3%" }
+  },
+
+  "rest": {
+    "Sceptic": { "sta": 3, "rea": 3, "doom": 2, "_unverified": true, "_source": "MECHANICS.md §2.2 休息精确表" },
+    "Initiate": { "sta": 3, "rea": 3, "doom": 2, "_unverified": true, "_source": "MECHANICS.md §2.2" },
+    "Cultist": { "sta": 2, "rea": 2, "doom": 3, "_unverified": true, "_source": "MECHANICS.md §2.2" },
+    "TrueBeliever": { "sta": 2, "rea": 2, "doom": 4, "_unverified": true, "_source": "MECHANICS.md §2.2" },
+    "Harbinger": { "sta": 2, "rea": 2, "doom": 3, "_unverified": true, "_source": "MECHANICS.md §2.2（Cultist / Harbinger of Doom 同档）" },
+    "_mods": {
+      "town:FETID_FUMES": { "sta": -1, "_unverified": true, "_source": "MECHANICS.md §2.2 FETID FUMES 城镇状态 -1" },
+      "injury:Broken Nose": { "sta": -1, "_unverified": true, "_source": "MECHANICS.md §2.2 Broken Nose 伤势 -1" },
+      "perk:Hot Bath": { "sta": 1, "_unverified": true, "_source": "MECHANICS.md §2.2 Hot Bath 特权 +1" }
+    }
+  },
+
+  "combat": {
+    "time_budget_turn": {
+      "value": 200, "_unverified": true,
+      "_source": "MECHANICS.md §5.1 / §12 #6：仅 Fandom wiki Combat 页，未在任何官方来源二次确认，该页也未标注适用版本"
+    },
+    "max_actions_per_turn": {
+      "value": 8, "_unverified": true,
+      "_source": "MECHANICS.md §5.1 / §12 #6（同上）"
+    },
+    "hit_level_bonus_per_level": {
+      "value": 10, "_unverified": true,
+      "_source": "MECHANICS.md §5.3 / §12 #7：Math_Guide 给出“命中率 = 武器属性 + 10%×等级 − 敌人强度”"
+    },
+    "hit_kick_fixed": {
+      "value": 80, "_unverified": true,
+      "_source": "MECHANICS.md §5.2 / §12 #7：Combat 页称 Kick 固定 80% 命中、不受敌人 PWR 影响、不随等级变化"
+    },
+    "hit_unarmed_no_scale": {
+      "value": true, "_unverified": true,
+      "_source": "MECHANICS.md §5.2 / §12 #7（踢击不随等级变化）"
+    },
+    "_hit_formula": {
+      "value": "clamp(0,100, base_hit + level_bonus_per_level*(level-1) + stat_coef*stat_value - enemy_power)",
+      "_unverified": true,
+      "_source": "COC-DESIGN §0.2 第 2 行：本设计不判定 Math_Guide 与 Combat 两页谁对，用统一公式使两说并存（Kick = base_hit 80、无属性修正、不随等级的特例）",
+      "_note": "这是**调和设计**，不是事实认定。"
+    },
+    "round_cap": {
+      "value": 30, "_unverified": true,
+      "_source": "COC-DESIGN §2.6 防死循环保护（本项目设计，非上游）；非 Boss 敌人必须 1~2 回合可解（MECHANICS.md §9.4 坑 2）"
+    },
+    "escape_doom": {
+      "value": 5, "_unverified": true, "_source": "MECHANICS.md §5.2 逃跑 +5% DOOM"
+    }
+  },
+
+  "checks": {
+    "roll_min": { "value": 1, "_source": "MECHANICS.md §4.2 随机数范围 1~12（可信度高，公式两页一致）", "_unverified": false },
+    "roll_max": { "value": 12, "_source": "MECHANICS.md §4.2", "_unverified": false },
+    "tie_goes_to_player": { "value": true, "_source": "MECHANICS.md §4.2“平手判玩家胜”（可信度高）", "_unverified": false },
+    "dc_min": { "value": -6, "_unverified": true, "_source": "COC-DESIGN §4.1 choice.check.dc 取值域（本项目设计）" },
+    "dc_max": { "value": 6, "_unverified": true, "_source": "COC-DESIGN §4.1（本项目设计）" },
+    "tie_sample_stat": {
+      "value": 5, "_unverified": true,
+      "_source": "本项目设计：V-08 A4 固定平手样本的属性值（仅用于验收构造）"
+    },
+    "tie_sample_roll": {
+      "value": 4, "_unverified": true,
+      "_source": "本项目设计：V-08 A4 固定平手样本的掷骰值。构造依据：平手条件 stat + threat_mod + dc == roll + 1；SAFE 时 threat_mod=0、dc=0，故 5 + 0 == roll + 1 → roll=4。test_dice.py 会反查这条自洽性（先证明它是平手，再证明判玩家胜）"
+    }
+  },
+
+  "mystery": {
+    "len_default": {
+      "value": 6, "_unverified": true,
+      "_source": "COC-DESIGN §6.1 第 7 项：MVP 固定 6 以压缩首批内容量；上游区间为 4~15、多数 8（MECHANICS.md §1.1）"
+    },
+    "len_min": { "value": 4, "_unverified": true, "_source": "MECHANICS.md §1.1 单个谜团通常 4~15 个地点" },
+    "len_max": { "value": 15, "_unverified": true, "_source": "MECHANICS.md §1.1" },
+    "lighthouse_event_count": { "value": 5, "_unverified": true, "_source": "MECHANICS.md §1.1 灯塔连打 5 场事件（8 选 5）" },
+    "lighthouse_event_count_heart_of_darkness": { "value": 6, "_unverified": true, "_source": "MECHANICS.md §1.1 有 Heart of Darkness 城镇状态时 6 场" }
+  },
+
+  "sanitize": {
+    "max_item_ops_per_turn": { "value": 2, "_unverified": true, "_source": "COC-DESIGN §8.4 coc_delta 白名单表（本项目设计）" },
+    "turn_budget_level1": { "value": 3, "_unverified": true, "_source": "COC-DESIGN §3.2 E3：doom/sta/rea 单轮 ±3（本项目设计）" },
+    "turn_budget_level2": { "value": 5, "_unverified": true, "_source": "COC-DESIGN §3.2 E3：exp/funds/stat 单轮 ±5（本项目设计）" },
+    "stat_value_min": { "value": 1, "_unverified": true, "_source": "COC-DESIGN §8.4 属性绝对值上限 1–12（本项目设计）" },
+    "stat_value_max": { "value": 12, "_unverified": true, "_source": "COC-DESIGN §8.4" },
+    "last_stand_floor": { "value": -5, "_unverified": true, "_source": "MECHANICS.md §1.3（官方补丁说明 0.9.12：LAST STAND 允许跌到 -5 STA/REA）" },
+    "sudden_death_floor": { "value": 1, "_unverified": true, "_source": "MECHANICS.md §1.3（SUDDEN DEATH：跌到 1 以下立即死）" }
+  },
+
+  "lv1_keys": { "value": ["doom", "sta", "rea"], "_unverified": true, "_source": "COC-DESIGN §8.4（本项目设计：LLM 提议白名单里没有这三个键，但它们仍是 level-1 钳制对象）" },
+  "lv2_keys": { "value": ["exp", "funds", "stat"], "_unverified": true, "_source": "COC-DESIGN §8.4（本项目设计：LLM 允许提议的三类）" },
+  "llm_delta_whitelist": {
+    "value": ["exp", "funds", "item_grant", "item_take", "stat"],
+    "_unverified": true,
+    "_source": "COC-DESIGN §8.4：doom/sta/rea/tags_grant/tags_remove/flag_set/ending **不在白名单**，LLM 连提议权都没有（E2 键白名单丢弃）"
+  },
+
+  "exp": {
+    "levelup_threshold": { "value": 100, "_unverified": true, "_source": "MECHANICS.md §6.3 EXP ≥100 升级（有中文来源印证，仍属社区来源）" },
+    "yashiro_threshold": { "value": 140, "_unverified": true, "_source": "MECHANICS.md §6.3 Yashiro 140" }
+  },
+
+  "probe": {
+    "investigations_required": {
+      "value": 6, "_unverified": true,
+      "_source": "COC-DESIGN §9.2 A1：能开局并完成 ≥6 次调查（含完成第一个谜团）"
+    },
+    "probe_attack_damage": {
+      "value": 2, "_unverified": true,
+      "_source": "MECHANICS.md §5.2 Kick 基础伤害 2（MVP 探针用；完整动作表在 v2）"
+    },
+    "_probe": {
+      "extra_doom_per_turn": {
+        "value": 0,
+        "_unverified": true,
+        "_source": "本项目设计：**默认 0 = 关闭**。仅 V-08 A5 场景 A（构造 DOOM=100 结局）由探针显式提高到 13。它**不改** doom_up.investigate（仍为 1），而是在结算后额外叠加，故 A2「每次调查 +1%」的断言不受影响。",
+        "_note": "曾经误写成默认 13，导致每次正常开局都被自己的探针刻度污染（冒烟测试里 3 回合全被强制进战斗、一张卡都没抽到）；已改回 0。"
+      },
+      "extra_enemy_dmg": {
+        "value": 0,
+        "_unverified": true,
+        "_source": "本项目设计：**默认 0 = 关闭**。仅 V-08 A5 场景 B（构造 STA=0 结局）由探针显式提高到 4（叠加在 difficulty.enemy_dmg 之上）。",
+        "_note": "曾经误写成默认 4，导致正常路径的敌人伤害被探针放大；已改回 0。"
+      },
+      "always_combat": {
+        "value": false,
+        "_unverified": true,
+        "_source": "本项目设计：**默认 false = 正常抽卡**。仅 V-08 A5 由探针显式打开，让指定场景必进战斗。",
+        "_note": "曾经误写成默认 true，导致正常路径永远抽不到事件卡；已改回 false。"
+      }
+    },
+    "probe_rng_seed_doom_scenario": {
+      "value": 42, "_unverified": true,
+      "_source": "本项目设计：探针固定种子（可复现）"
+    }
+  },
+
+  "art": {
+    "portrait_size": { "value": "832x1216", "_unverified": true, "_source": "COC-DESIGN §2.11 中性美术请求默认尺寸（本项目设计，与既有管线默认值由接线任务核对）" },
+    "background_size": { "value": "1920x1080", "_unverified": true, "_source": "COC-DESIGN §2.11" },
+    "cg_size": { "value": "1024x1024", "_unverified": true, "_source": "COC-DESIGN §2.11" }
+  },
+
+  "erotic": {
+    "erotic_tiers": { "value": ["subtle", "intense", "explicit"], "_unverified": true, "_source": "COC-DESIGN §5.2 轴 1（本项目设计）" },
+    "horror_tiers": { "value": ["dread", "visceral", "cosmic"], "_unverified": true, "_source": "COC-DESIGN §5.2 轴 2（本项目设计）" },
+    "gate_rating_required": { "value": "18", "_unverified": true, "_source": "COC-DESIGN §5.3 G2（对齐 app/game.py content_policy_text 的红线，本包不 import）" },
+    "conservative_intensity": { "value": "温和", "_unverified": true, "_source": "COC-DESIGN §5.3 G3：温和档强制钳到 subtle（本项目设计）" },
+    "horror_tier_thresholds": {
+      "value": { "visceral": { "doom_min": 40, "sta_max": 9 }, "cosmic": { "doom_min": 75, "rea_max": 9 } },
+      "_unverified": true,
+      "_source": "COC-DESIGN §5.2 恐怖档生效条件（本项目设计）"
+    }
+  },
+
+  "endings": {
+    "coverage": { "value": "partial", "_unverified": true, "_source": "MECHANICS.md §12 #12：Endings 页列出 20 余条但未验证是否穷尽；本模式只做 4 基础 + 特殊" }
+  }
+}

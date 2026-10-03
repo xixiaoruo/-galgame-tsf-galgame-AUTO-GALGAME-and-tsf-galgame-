@@ -1,0 +1,226 @@
+{
+ "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+ "cards": [
+  {
+   "id": "C-301",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "School"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "教室后面的课程表被撕掉了一角。缺的正好是星期三下午。",
+   "choices": [
+    {
+     "text": "去问值班老师",
+     "check": {
+      "stat": "KNW",
+      "threat": "LOW",
+      "dc": 0
+     },
+     "success": {
+      "exp": 6,
+      "flags": {
+       "asked_teacher": true
+      }
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "翻讲台抽屉找备份",
+     "success": {
+      "item_grant": [
+       "Bandage"
+      ],
+      "exp": 4
+     },
+     "failure": {
+      "sta": -1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-302",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "School"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "操场上没有人，但秋千在动，幅度稳定，像被人推着。",
+   "choices": [
+    {
+     "text": "走过去数荡了几次",
+     "success": {
+      "exp": 5,
+      "doom": 1
+     }
+    },
+    {
+     "text": "从教学楼另一侧离开",
+     "success": {
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-303",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "School"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "厕所最里面那间隔间的门虚掩着。里面的光比外面亮。",
+   "choices": [
+    {
+     "text": "推门",
+     "failure": {
+      "combat": {
+       "enemy": "Toilet Ghost",
+       "is_boss": false
+      }
+     }
+    },
+    {
+     "text": "洗手走人",
+     "success": {
+      "exp": 2
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-304",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "School"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "走廊尽头的窗户开着一道缝，风从那边吹过来，带着水汽。三楼不该有这种味道。",
+   "choices": [
+    {
+     "text": "伸手把窗推上",
+     "check": {
+      "stat": "DEX",
+      "threat": "LOW",
+      "dc": 0
+     },
+     "success": {
+      "exp": 5
+     },
+     "failure": {
+      "sta": -1,
+      "rea": -1
+     }
+    },
+    {
+     "text": "让它开着",
+     "success": {
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-305",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "School"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "图书室的借阅卡上，有一本书被借走过四次，每次都是同一天。",
+   "choices": [
+    {
+     "text": "去找那本书",
+     "success": {
+      "item_grant": [
+       "DustyGrimoire"
+      ],
+      "exp": 6
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "把卡片放回去",
+     "success": {
+      "exp": 2
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-306",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "School"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "天台上坐着个女生，背对着栏杆。她说她能告诉你该怎么拍手。",
+   "choices": [
+    {
+     "text": "听她说完",
+     "check": {
+      "stat": "CHA",
+      "threat": "LOW",
+      "dc": 0
+     },
+     "success": {
+      "flags": {
+       "ritual_hint": true
+      },
+      "exp": 8
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "说不用了",
+     "failure": {
+      "rea": -1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  }
+ ]
+}

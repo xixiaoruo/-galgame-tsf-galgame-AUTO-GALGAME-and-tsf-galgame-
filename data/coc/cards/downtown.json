@@ -1,0 +1,230 @@
+{
+ "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+ "cards": [
+  {
+   "id": "C-101",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Downtown"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "橱窗里那排模型换了位置。你确定昨天那个穿校服的还在最左边。",
+   "choices": [
+    {
+     "text": "凑近看玻璃后面的价签",
+     "check": {
+      "stat": "KNW",
+      "threat": "SAFE",
+      "dc": 0
+     },
+     "success": {
+      "exp": 5
+     },
+     "failure": {
+      "rea": -1
+     }
+    },
+    {
+     "text": "推门进去问店员",
+     "success": {
+      "funds": -1,
+      "exp": 3
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "记下来，转身走开",
+     "success": {
+      "exp": 2
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-102",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Downtown"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "收银台后面的老人一直在数同一叠零钱，数到第七张就开始重来。",
+   "choices": [
+    {
+     "text": "问他今天几号",
+     "success": {
+      "exp": 3
+     }
+    },
+    {
+     "text": "买一包烟",
+     "success": {
+      "funds": -1
+     },
+     "failure": {
+      "exp": 2
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-103",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Downtown"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "巷口有个人背对着你站着。他的肩膀动得不太对，像是有人在里面数拍子。",
+   "choices": [
+    {
+     "text": "先出声",
+     "success": {
+      "flags": {
+       "alerted": true
+      }
+     },
+     "failure": {
+      "combat": {
+       "enemy": "Thin Man",
+       "is_boss": true
+      }
+     }
+    },
+    {
+     "text": "绕路",
+     "success": {
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-104",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Downtown"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "电线杆上贴着一张寻人启事。照片被人用指甲抠过，只剩下一个模糊的轮廓。",
+   "choices": [
+    {
+     "text": "把启事揭下来",
+     "check": {
+      "stat": "PER",
+      "threat": "SAFE",
+      "dc": 0
+     },
+     "success": {
+      "item_grant": [
+       "Map"
+      ],
+      "exp": 5
+     },
+     "failure": {
+      "sta": -1
+     }
+    },
+    {
+     "text": "拍照存档",
+     "success": {
+      "exp": 3
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-105",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Downtown"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "自动售货机的灯牌闪了一下。你按了两次同样的键，掉出来的是同一个牌子的两罐。",
+   "choices": [
+    {
+     "text": "喝掉一罐",
+     "success": {
+      "funds": -1
+     },
+     "failure": {
+      "sta": 1
+     }
+    },
+    {
+     "text": "把它扔进垃圾桶"
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-106",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Downtown"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "街角蹲着一个女孩，正用粉笔在地上画一扇门。她画得很仔细，连门轴都画了。",
+   "choices": [
+    {
+     "text": "和她聊两句",
+     "check": {
+      "stat": "CHA",
+      "threat": "SAFE",
+      "dc": 0
+     },
+     "success": {
+      "exp": 8,
+      "flags": {
+       "met_girl": true
+      }
+     },
+     "failure": {
+      "rea": -2
+     }
+    },
+    {
+     "text": "从她旁边绕过去",
+     "failure": {
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  }
+ ]
+}

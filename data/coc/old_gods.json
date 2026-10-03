@@ -1,0 +1,26 @@
+{
+  "_source": "MECHANICS.md §1.4 古神 9 个（4 个默认 + 5 个成就解锁，每个提供一条全局规则 + 专属事件/敌人 + 专属末日结局）；§3.4 Ath-Yolazsth 的 Cosmic Gift（施法不再消耗 REA，改为等量上涨 DOOM —— 中文来源与英文 wiki 相互印证，该条可信度可升为高）；§2.2 Goizo 休息额外 +2% DOOM；§5.2 Cthac-Atorasu 时无法逃跑。",
+  "_note": "MVP 2 个古神（COC-DESIGN §6.1）。global_rule 是 §10.2 #7 的转化方案：一张表让每局核心规则不同。",
+  "old_gods": [
+    {
+      "id": "Ath-Yolazsth",
+      "name": "阿丝-约拉兹",
+      "global_rule": "spell_costs_doom_instead_of_rea",
+      "exclusive_events": [],
+      "exclusive_enemies": [],
+      "doom_ending_id": "END_DOOM_ATH_YOLAZSTH",
+      "_unverified": true,
+      "_source": "MECHANICS.md §3.4 / §1.4（Cosmic Gift：施法不再消耗 REA，改为等量上涨 DOOM —— 机核评测与英文 wiki 互证，可信度高；末日结局“地球被吞食”见 §1.2）"
+    },
+    {
+      "id": "Goizo",
+      "name": "哥伊佐",
+      "global_rule": "rest_extra_doom_2",
+      "exclusive_events": [],
+      "exclusive_enemies": [],
+      "doom_ending_id": "END_DOOM_GOIZO",
+      "_unverified": true,
+      "_source": "MECHANICS.md §2.2“古神选 Goizo 时额外 +2% DOOM”；§1.2 Goizo 的末日结局为“镜中”"
+    }
+  ]
+}

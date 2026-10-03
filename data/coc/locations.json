@@ -1,0 +1,14 @@
+{
+  "_source": "MECHANICS.md §4.1 抽象层级：地点 → 事件/战斗 → 选项。地点名与威胁等级依据 §2.4 威胁等级表（LOW 检定 -1、DOOMED 检定 -2 且调查额外 +1% DOOM）；威胁值是 L2 数值（仅社区 wiki），故每处带 _unverified。",
+  "_note": "MVP 只做 4 个地点（COC-DESIGN §6.1：“事件卡 24 张 = 4 地点 × 6”）。",
+  "locations": [
+    { "id": "Downtown", "name": "商店街", "threat": "SAFE", "home": false,
+      "_unverified": true, "_source": "MECHANICS.md §4.3 商店从 Downtown 的附加动作进入" },
+    { "id": "Apartments", "name": "公寓", "threat": "SAFE", "home": true,
+      "_unverified": true, "_source": "MECHANICS.md §2.2 家中休息、§1.3 公寓 Planning 阶段可 Save" },
+    { "id": "School", "name": "学校", "threat": "LOW", "home": false,
+      "_unverified": true, "_source": "MECHANICS.md §1.4 SCHOOL CURFEW / SCHOOL BURNED DOWN 城镇状态关联地点" },
+    { "id": "Hospital", "name": "医院", "threat": "LOW", "home": false,
+      "_unverified": true, "_source": "MECHANICS.md §2.1 医院：医生诊室 +2% / 药房 +3% DOOM" }
+  ]
+}

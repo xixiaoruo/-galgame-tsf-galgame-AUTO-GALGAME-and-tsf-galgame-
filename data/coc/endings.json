@@ -1,0 +1,26 @@
+{
+  "_source": "MECHANICS.md §1.2 结局类型全集（通关 / DOOM=100% 每个古神一段专属结局 / STA 归零“肉体死亡” / REA 归零“精神崩溃送进精神病院” / 特殊隐藏）。",
+  "_note": "§12 #12 明确 Endings 页列出 20 余条但**未验证是否穷尽**，故 coverage=partial，本模式只做 4 个基础 + 特殊。判定方式是**判定函数**不是分支树（§7.5 设计建议、§10.2 #11）。",
+  "coverage": "partial",
+  "endings": [
+    { "id": "END_DOOM_ATH_YOLAZSTH", "kind": "doom", "old_god": "Ath-Yolazsth", "priority": 10,
+      "title": "地球被吞食",
+      "_unverified": true, "_source": "MECHANICS.md §1.2 古神专属末日结局：Ath-Yolazsth“地球被吞食”" },
+    { "id": "END_DOOM_GOIZO", "kind": "doom", "old_god": "Goizo", "priority": 10,
+      "title": "镜中",
+      "_unverified": true, "_source": "MECHANICS.md §1.2 古神专属末日结局：Goizo“镜中”" },
+    { "id": "END_STA_ZERO", "kind": "sta_zero", "old_god": null, "priority": 20,
+      "title": "肉体死亡",
+      "_unverified": true, "_source": "MECHANICS.md §1.2 STA 归零“you finally succumb to your injuries, alone…”，有专属结局图（§3.2）" },
+    { "id": "END_REA_ZERO", "kind": "rea_zero", "old_god": null, "priority": 20,
+      "title": "精神崩溃",
+      "_unverified": true, "_source": "MECHANICS.md §1.2 REA 归零“Your mind has snapped and you've been locked up in an asylum…”，有专属结局图（§3.2）" },
+    { "id": "END_CLEARED", "kind": "cleared", "old_god": null, "priority": 30,
+      "title": "暂时安全",
+      "_unverified": true, "_source": "MECHANICS.md §1.2 通关 + §9.2“无力的胜利定义”：文案必须承认“它会在沉眠中一次又一次地躁动，直到群星再次正确”" },
+    { "id": "END_LIGHTHOUSE_FAILED", "kind": "special", "old_god": null, "priority": 40,
+      "flag_rule": { "flag": "lighthouse_failed", "equals": true },
+      "title": "刻印认错了人",
+      "_unverified": true, "_source": "本项目设计的特殊结局骨架（骨架本身取自 MECHANICS.md §1.2“特殊/隐藏结局由特定遭遇或物品触发”，但不照搬上游任何具体条目）" }
+  ]
+}

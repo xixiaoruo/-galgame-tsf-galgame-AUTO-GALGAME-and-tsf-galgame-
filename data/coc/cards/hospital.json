@@ -1,0 +1,222 @@
+{
+ "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+ "cards": [
+  {
+   "id": "C-401",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Hospital"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "挂号处的号机自己吐了一张票，号码是 000。",
+   "choices": [
+    {
+     "text": "拿着票去诊室",
+     "check": {
+      "stat": "KNW",
+      "threat": "LOW",
+      "dc": 0
+     },
+     "success": {
+      "exp": 5
+     },
+     "failure": {
+      "sta": -1
+     }
+    },
+    {
+     "text": "把票撕了",
+     "success": {
+      "exp": 2
+     },
+     "failure": {
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-402",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Hospital"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "走廊尽头的长椅上放着一件叠好的外套。它的袖口是湿的。",
+   "choices": [
+    {
+     "text": "翻一下口袋",
+     "success": {
+      "item_grant": [
+       "MedicalKit"
+      ],
+      "exp": 4
+     },
+     "failure": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "原样放好"
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-403",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Hospital"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "药房门上的玻璃从里面蒙了一层白雾。里面有人影在数药瓶，数得很慢。",
+   "choices": [
+    {
+     "text": "推门进去",
+     "failure": {
+      "combat": {
+       "enemy": "Doll Nurse",
+       "is_boss": true
+      }
+     }
+    },
+    {
+     "text": "回头叫护士",
+     "success": {
+      "funds": -1
+     },
+     "failure": {
+      "sta": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-404",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Hospital"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "观察窗后面那间屋子亮着灯，但登记本上写着这一层今天停用。",
+   "choices": [
+    {
+     "text": "贴着窗往里看",
+     "check": {
+      "stat": "PER",
+      "threat": "LOW",
+      "dc": 0
+     },
+     "success": {
+      "exp": 6
+     },
+     "failure": {
+      "rea": -2
+     }
+    },
+    {
+     "text": "记下房间号就走",
+     "success": {
+      "exp": 3
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-405",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Hospital"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "自动贩卖机里的咖啡是热的。你投币之前它就是热的。",
+   "choices": [
+    {
+     "text": "投币买一杯",
+     "success": {
+      "funds": -1,
+      "sta": 1
+     }
+    },
+    {
+     "text": "摸一下出货口的温度",
+     "success": {
+      "exp": 3
+     },
+     "failure": {
+      "rea": -1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  },
+  {
+   "id": "C-406",
+   "title": "",
+   "pack": "base",
+   "locations": [
+    "Hospital"
+   ],
+   "mystery_only": null,
+   "weight": 10,
+   "requirements": {},
+   "body": "消防通道的门被从里面顶住了。门缝里有头发。",
+   "choices": [
+    {
+     "text": "用力顶开",
+     "check": {
+      "stat": "STR",
+      "threat": "LOW",
+      "dc": 0
+     },
+     "success": {
+      "exp": 8,
+      "item_grant": [
+       "BronzeCrucifix"
+      ]
+     },
+     "failure": {
+      "sta": -2
+     }
+    },
+    {
+     "text": "放弃，走楼梯",
+     "success": {
+      "doom": 1
+     }
+    }
+   ],
+   "erotic_hook": null,
+   "_source": "MECHANICS.md §4.1 事件结构（一小段描述 + 1~4 个选项 + 脚本化结果）、§4.3 建议 schema {id, locations, requirements, body, choices[{text, check, success, failure}]}；§7.2 Steam 官方把游戏定义为“一套事件卡组”（一手证据，可信度高）。卡面文本为本项目新写（不照搬上游任何卡片原文）。",
+   "_unverified": true
+  }
+ ]
+}

@@ -36,6 +36,7 @@ import base64
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -217,15 +218,51 @@ class FakeSD:
 # HTTP 小工具
 # --------------------------------------------------------------------------- #
 class Client:
-    def __init__(self, base: str, timeout: float = 90.0):
+    def __init__(self, base: str, timeout: float = 90.0, sample: Path | None = None):
         self.base = base
         self.timeout = timeout
+        self.token = ""
+        self.token_source = ""      # 只记来源，不落全量 token
+        self.sample = sample        # 回退路径：读 <sample>/data/local_token.json
+
+    def ensure_token(self) -> str:
+        """取本轮本地 token（t39 / B-10 之后，写操作需要它）。
+
+        t39 的 server.py 已把通道写明：token 启动时生成一次、原子写入
+        `DATA_DIR/local_token.json`，**本机工具链读该文件或调
+        `GET /api/local-token`，再带 `X-Local-Token` 头**即可。
+        两条路都试：先 HTTP 端点（跨源 403、本机可读），失败再读样本文件
+        （本脚本跑的是隔离样本，该文件一定是我们自己的）。
+        """
+        if self.token:
+            return self.token
+        st, raw = self._req("GET", "/api/local-token", None)   # GET 不需要 token，无递归
+        if st == 200:
+            tok = (jload(raw) or {}).get("token") or ""
+            if tok:
+                self.token, self.token_source = tok, "GET /api/local-token"
+                return tok
+        if self.sample:
+            p = Path(self.sample) / "data" / "local_token.json"
+            if p.is_file():
+                try:
+                    tok = (jload(p.read_text(encoding="utf-8")) or {}).get("token") or ""
+                except Exception:
+                    tok = ""
+                if tok:
+                    self.token, self.token_source = tok, f"file:{p.name}"
+                    return tok
+        return ""
 
     def _req(self, method: str, path: str, body=None, timeout=None):
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
+        if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            tok = self.ensure_token()
+            if tok:
+                req.add_header("X-Local-Token", tok)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 raw = r.read().decode("utf-8", "replace")
@@ -285,20 +322,147 @@ class Stage:
 
 
 def wait_assets_idle(cli: Client, sid: str, timeout=90.0, poll=0.5) -> dict:
-    """等 pending 归零；返回最后的 tasks 视图（含 assets 计数与 queue）。"""
+    """等 pending 归零；返回最后的 tasks 视图（含 assets 计数与 queue）。
+
+    兼容旧修订：`/api/game/{sid}/tasks` 是 t18 才加的端点；在更早的源码树上它会
+    404，此时退化为读 `/api/game/{sid}/assets`（一直都在）并自行统计
+    pending/ready/error —— 这样「拿当前脚本跑历史修订做对照」才跑得通，
+    否则 ④⑤⑥ 会因端点缺失而假红（t43 的对照实验就踩到过）。
+    """
     t0 = time.time()
     last = {}
     while time.time() - t0 < timeout:
         st, raw = cli.get(f"/api/game/{sid}/tasks")
         obj = jload(raw) or {}
+        if st == 404:
+            st2, raw2 = cli.get(f"/api/game/{sid}/assets")
+            a2 = (jload(raw2) or {}).get("assets") or {}
+            counts = {"pending": 0, "ready": 0, "error": 0}
+            for grp in a2.values():
+                for it in (grp or {}).values():
+                    s_ = (it or {}).get("status")
+                    if s_ in counts:
+                        counts[s_] += 1
+            obj = {"assets": counts, "queue": [], "sd": {},
+                   "_legacy_assets_endpoint": True}
         last = obj
-        if st == 200 and (obj.get("assets") or {}).get("pending", 1) == 0:
+        if (obj.get("assets") or {}).get("pending", 1) == 0 and obj.get("assets"):
             last["_waited_s"] = round(time.time() - t0, 2)
             return last
         time.sleep(poll)
     last["_waited_s"] = round(time.time() - t0, 2)
     last["_timeout"] = True
     return last
+
+
+def sanitize_proxy_env(env: dict) -> tuple[dict, str]:
+    """去掉 `NO_PROXY` 里**带方括号的 IPv6 字面量**（如 `[::1]`），返回 (env, 说明)。
+
+    为什么必须做：httpx 0.28.1 解析 `NO_PROXY` 时遇到 `[::1]` 会抛
+    `InvalidURL: Invalid port: ':1]'`，**任何出站请求都会在连接之前失败**。
+    本机环境恰好带着这个值，于是 app 侧所有资产（立绘/背景/CG）生成全挂，
+    看起来像"业务回归"，实际是环境 × 依赖库的解析缺陷。
+
+    实测（system python + httpx 0.28.1，请求 127.0.0.1 任意端口）：
+      NO_PROXY 含 `[::1]` → InvalidURL: Invalid port: ':1]'
+      去掉 `[::1]`        → ConnectTimeout（正常的连接失败）
+      清空 NO_PROXY       → ReadTimeout（正常）
+    同一现象在**改动前修订 263447b** 的源码树上逐字复现 ⇒ 与业务代码无关。
+
+    本函数只动被方括号包起来的条目（`[::1]`、`[::1]:80` 等），保留其它条目与
+    `127.0.0.1`/`localhost` 的绕过规则不变；受测实例跑在回环 + 隔离样本上。
+    """
+    note = ""
+    for key in ("NO_PROXY", "no_proxy"):
+        raw = env.get(key)
+        if not raw:
+            continue
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        kept = [p for p in parts if not (p.startswith("[") and "]" in p)]
+        if len(kept) != len(parts):
+            env[key] = ",".join(kept)
+            note = (f"{key} 去掉方括号 IPv6 条目 "
+                    f"{[p for p in parts if p not in kept]}（httpx 会因此抛 "
+                    f"Invalid port: ':1]'）")
+    return env, note
+
+
+def judge_stage9(k_before: dict, k_after: dict, *, evidence: dict | None = None,
+                 explained_fields=("background_id",)) -> dict:
+    """⑨ 的三态判定（**纯函数**，可被单元测试直接驱动）。
+
+    ① 字段未变                        → `pass-unchanged`
+    ② 变了且能证明是**合法背景补生成** → `pass-explained`（并把证据原样带出，不静默放行）
+    ③ 变了但无法解释                  → `fail`
+
+    为什么必须有 ②：`t10` 修好 B-02 之后，**旧档读档时背景会被真的补生成**
+    （`ensure_scene_bg` → `_queue_asset("backgrounds", …)` → `_spawn_task`），
+    `background_id` 因此会从旧值变成新分配的一版 —— 这是**正确行为**，不是读档损坏。
+
+    但 ② 不是"不一致就放过"：它要求**四道证据齐全**（缺一即判 ③）：
+      · 只有允许变化的字段变了（多一个字段变 → 无法解释）
+      · 新 background_id 非空、且能在 `bg_map` 里定位到资产 key
+      · 该资产 `status == "ready"` 且文件真实存在（指向不存在的资产 = 损坏）
+      · 存档之后的日志里有该背景的生成记录（`ensure_scene_bg regenerated` / `asset task …bgN`）
+
+    「读档损坏」与「合法补生成」的判定依据就在这四条：**值变了但资产不可用/无生成记录/伴随其它字段变化** ⇒ 损坏。
+    """
+    fields = sorted(set(k_before) | set(k_after))
+    mismatches = [f for f in fields if k_before.get(f) != k_after.get(f)]
+    out = {"verdict": "pass-unchanged", "mismatches": mismatches,
+           "explained": [], "unexplained": [], "reason": ""}
+    if not mismatches:
+        return out
+
+    ev = dict(evidence or {})
+    only_allowed = all(f in explained_fields for f in mismatches)
+    missing = []
+    if not only_allowed:
+        missing.append("变化的字段超出了允许解释的范围："
+                       + ",".join(f for f in mismatches if f not in explained_fields))
+    new_bg = k_after.get("background_id")
+    old_bg = k_before.get("background_id")
+    if not new_bg:
+        missing.append("新 background_id 为空")
+    if ev.get("asset_key") is None:
+        missing.append("新背景在 bg_map 里查不到对应资产（指向不存在的资产）")
+    if ev.get("asset_status") != "ready":
+        missing.append(f"新背景资产状态不是 ready（实际={ev.get('asset_status')!r}）")
+    if not ev.get("file_exists"):
+        missing.append("新背景资产文件不存在或为空")
+    if not ev.get("log_lines"):
+        missing.append("存档之后的日志里没有该背景的生成记录")
+
+    if missing:
+        out.update(verdict="fail", unexplained=mismatches,
+                   reason="；".join(missing))
+        return out
+
+    out.update(verdict="pass-explained", explained=[{
+        "field": "background_id", "before": old_bg, "after": new_bg,
+        "asset_key": ev.get("asset_key"), "asset_status": ev.get("asset_status"),
+        "asset_file": ev.get("asset_file"), "file_exists": True,
+        "log_lines": ev.get("log_lines")[:3],
+        "why": "读档后 ensure_scene_bg 检测到旧档场景背景缺失并补生成（t10/B-02 修复后的正确行为）"}])
+    out["reason"] = f"background_id {old_bg} → {new_bg}：已证实为合法补生成"
+    return out
+
+
+def stage9_background_evidence(aobj: dict, new_bg, cache_root: Path,
+                               log_lines_after_save: list) -> dict:
+    """为 `judge_stage9` 收集「合法补生成」所需的四道证据（纯读）。"""
+    bg_map = (aobj or {}).get("bg_map") or {}
+    groups = (aobj or {}).get("assets") or {}
+    key = bg_map.get(str(new_bg)) if new_bg else None
+    item = ((groups.get("backgrounds") or {}).get(key) or {}) if key else {}
+    f = item.get("file") or ""
+    p = (cache_root / f) if f else None
+    logs = [ln for ln in (log_lines_after_save or [])
+            if new_bg and (str(new_bg) in ln)
+            and ("ensure_scene_bg regenerated" in ln or "asset task" in ln)]
+    return {"asset_key": key, "asset_status": item.get("status"),
+            "asset_file": f, "file_exists": bool(p and p.is_file() and p.stat().st_size > 0),
+            "log_lines": logs}
 
 
 def port_free(port: int) -> bool:
@@ -357,9 +521,15 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--json", default="")
     ap.add_argument("--sd-delay", type=float, default=0.4)
+    ap.add_argument("--repo", default="", metavar="DIR",
+                    help="被测源码根（默认=本脚本所在目录的上一级）；用于跑历史修订做对照")
     ap.add_argument("--serve", default="", metavar="SAMPLE",
                     help="内部使用：以隔离样本启动真实 server.py")
     args = ap.parse_args()
+
+    if args.repo:
+        global REPO
+        REPO = Path(args.repo).resolve()
 
     if args.serve:
         run_serve(Path(args.serve).resolve(), args.port)
@@ -396,7 +566,12 @@ def main() -> int:
     meta["port"] = port
     meta["port_note"] = ("使用请求端口" if port == args.port
                          else f"{args.port} 被占用 → 自动顺延到 {port}（不杀他人进程）")
-    cli = Client(f"http://127.0.0.1:{port}")
+    cli = Client(f"http://127.0.0.1:{port}", sample=sample)
+    # 环境消毒：NO_PROXY 里的 `[::1]` 会让 httpx 抛 InvalidURL（见 sanitize_proxy_env）
+    _child_env, _proxy_note = sanitize_proxy_env(os.environ.copy())
+    if _proxy_note:
+        meta["env_sanitized"] = _proxy_note
+        os.environ.update(_child_env)       # 本进程（urllib）也一并统一口径
     serve_log = (sample / "logs" / "e2e-serve-stderr.out").open("a", encoding="utf-8", buffering=1)
     env_failed = False
 
@@ -406,9 +581,9 @@ def main() -> int:
         t0 = time.time()
         proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "--serve", str(sample),
-             "--port", str(port)],
+             "--port", str(port), "--repo", str(REPO)],
             cwd=str(REPO), stdin=subprocess.DEVNULL,
-            stdout=serve_log, stderr=serve_log,
+            stdout=serve_log, stderr=serve_log, env=_child_env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         ready = False
         ver = None
@@ -596,6 +771,10 @@ def main() -> int:
                     removed.append({"slot_id": sid_del, "delete_status": dc})
         state_before_code, state_before_raw = cli.get(f"/api/game/{tsf_sid}")
         state_before = jload(state_before_raw) or {}
+        # 记下存档时刻的 debug.log 行数：⑨ 用它判定"变化是否发生在存档之后"（补生成证据）
+        _dbg8 = sample / "data" / "debug.log"
+        log_len_at_save = len(_dbg8.read_text(encoding="utf-8", errors="replace").splitlines()) \
+            if _dbg8.is_file() else 0
         code, raw = cli.post(f"/api/game/{tsf_sid}/slots", {"name": slot_name})
         saved = jload(raw) or {}
         slot_id = saved.get("slot_id", "")
@@ -647,7 +826,6 @@ def main() -> int:
         fields = [f for f in ("protagonist", "content_rating", "title", "scene",
                               "background_id", "dialogue_len")
                   if (k_before or {}).get(f) is not None]
-        mismatches = [f for f in fields if k_before.get(f) != k_after.get(f)]
         # 资源可解析：用 /assets 端点（public_state 不含 assets）
         ac, ar = cli.get(f"/api/game/{sid_after}/assets")
         aobj = jload(ar) or {}
@@ -660,16 +838,38 @@ def main() -> int:
                     p = sample / "data" / "cache" / f
                     if p.is_file() and p.stat().st_size > 0:
                         files_ok += 1
-        ok = code == 200 and not mismatches
+        # 三态判定：未变 / 合法补生成 / 无法解释（见 judge_stage9 的 docstring）
+        dbg9 = sample / "data" / "debug.log"
+        all_lines = dbg9.read_text(encoding="utf-8", errors="replace").splitlines() \
+            if dbg9.is_file() else []
+        logs_after_save = all_lines[log_len_at_save:]
+        ev9 = stage9_background_evidence(aobj, k_after.get("background_id"),
+                                         sample / "data" / "cache", logs_after_save)
+        verdict9 = judge_stage9(
+            {f: k_before.get(f) for f in fields}, {f: k_after.get(f) for f in fields},
+            evidence=ev9)
+        ok = code == 200 and verdict9["verdict"] != "fail"
+        if verdict9["verdict"] == "pass-explained":
+            st.note("background_id 变化已证实为**合法补生成**（不是静默放行）："
+                    + json.dumps(verdict9["explained"], ensure_ascii=False))
         stages.append(st.finish(
-            ok, expect="POST /slots/{id}/load → 200；mode/protagonist/log_len/content_rating 与存档一致",
+            ok, expect=("POST /slots/{id}/load → 200；关键字段要么不变，要么变化能被"
+                        "『新背景资产 ready + 文件存在 + 日志有生成记录』证成为合法补生成"),
             actual=json.dumps({"load_status": code, "sid_after": sid_after,
-                               "compare_fields": fields, "mismatches": mismatches,
+                               "compare_fields": fields, "mismatches": verdict9["mismatches"],
+                               "stage9_verdict": verdict9["verdict"],
+                               "explained": verdict9["explained"],
+                               "unexplained": verdict9["unexplained"],
                                "resources": f"{files_ok}/{files_checked} 个 ready 资源文件存在"},
                               ensure_ascii=False),
-            reason="" if ok else f"读档失败：status={code} 字段不一致={mismatches}",
+            reason="" if ok else f"读档失败：status={code} {verdict9['reason']}",
             details={"load_status": code, "key_before": k_before, "key_after": k_after,
-                     "mismatches": mismatches, "files_checked": files_checked,
+                     "mismatches": verdict9["mismatches"],
+                     "stage9_verdict": verdict9["verdict"],
+                     "explained": verdict9["explained"],
+                     "unexplained": verdict9["unexplained"],
+                     "background_evidence": ev9,
+                     "files_checked": files_checked,
                      "files_ok": files_ok, "load_body_head": raw[:200]}))
 
         # ---------------- ⑩ 优雅关闭 ----------------
@@ -713,6 +913,42 @@ def main() -> int:
             details={"shutdown_status": code, "exit_ms": down_ms, "exited": exited,
                      "port_released": port_released, "returncode": proc.returncode,
                      "persist_log": persist_line[:200]}))
+
+        # ---------------- ⑪ 日志指纹回归（t49 契约 §6：读日志文本，不另立一套）--------
+        # 说明：这一环节**只读 `<DATA_DIR>/data/debug.log` 的文本**做断言，
+        # 数据来自真实跑过 ①→⑩ 的同一份日志；不新增核对机制、不新增报告格式。
+        st = Stage("⑪", "日志指纹回归（B-02 类指纹 / pending / 持久化）")
+        dbg_all = dbg.read_text(encoding="utf-8", errors="replace") if dbg.is_file() else ""
+        n_loop = dbg_all.count("no running event loop")
+        n_await = dbg_all.count("was never awaited")
+        persist_hits = re.findall(r"shutdown: persisted (\d+) session", dbg_all)
+        s4 = next((s for s in stages if s.get("id") == "④"), None)
+        pend_last = (((s4 or {}).get("details") or {}).get("tasks") or {}).get("assets", {}).get("pending")
+        ok11 = (n_loop == 0 and n_await == 0 and bool(persist_hits) and pend_last == 0)
+        why = []
+        if n_loop:
+            why.append(f"出现 {n_loop} 次 `no running event loop`")
+        if n_await:
+            why.append(f"出现 {n_await} 次 `was never awaited`")
+        if not persist_hits:
+            why.append("没有 `shutdown: persisted N session(s)` 行")
+        if pend_last != 0:
+            why.append(f"④ 结束时 pending={pend_last}（应为 0）")
+        stages.append(st.finish(
+            ok11,
+            expect=("debug.log 文本：`no running event loop` 命中 0 · `was never awaited` 命中 0 · "
+                    "`shutdown: persisted N session(s)` 出现 · ④ 结束时 pending == 0"),
+            actual=json.dumps({"no_running_event_loop": n_loop, "never_awaited": n_await,
+                               "persisted_sessions": persist_hits,
+                               "pending_at_stage4_end": pend_last,
+                               "debug_log_bytes": len(dbg_all)}, ensure_ascii=False),
+            reason="" if ok11 else "日志指纹未达标：" + "；".join(why),
+            details={"no_running_event_loop": n_loop, "never_awaited": n_await,
+                     "persisted_sessions": persist_hits,
+                     "pending_at_stage4_end": pend_last,
+                     "log_lines": len(dbg_all.splitlines())}))
+        stages[-1]["notes"].append(
+            "只读日志文本断言；B-02 指纹由 t10 修复、此环节防止回归")
 
     except EnvFailure as e:
         fatal = f"[ENV] {e}"

@@ -55,3 +55,7 @@ desktop.ini
 # e2e-results：每轮结果 JSON（本机留证，不入库）
 测试工具/e2e-sample/
 测试工具/e2e-results/
+
+# CoC 引擎的运行时产物（探针每跑一轮落一份存档；不进版本控制）
+data/coc/saves/
+data/coc/__pycache__/

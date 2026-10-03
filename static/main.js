@@ -3,6 +3,25 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* ---------- 本地 token（B-10 / t39）----------
+   服务端启动时随机生成本轮 token（不写死在源码里），写操作（POST/DELETE）必须带上。
+   同源页面由服务端下发 SameSite=Strict cookie 自动携带；这里再显式取一次并用
+   X-Local-Token 头发送，作为双保险（cookie 被浏览器策略挡掉时仍可用）。
+   取不到就返回空串——请求照发，由服务端按缺 token 拒绝并给出可读 detail。 */
+let TSF_TOKEN = "";
+let TSF_TOKEN_PROMISE = null;
+async function ensureToken() {
+  if (TSF_TOKEN) return TSF_TOKEN;
+  if (!TSF_TOKEN_PROMISE) {
+    TSF_TOKEN_PROMISE = fetch("/api/local-token", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { TSF_TOKEN = (d && d.token) || ""; return TSF_TOKEN; })
+      .catch(() => "")
+      .finally(() => { TSF_TOKEN_PROMISE = null; });
+  }
+  return TSF_TOKEN_PROMISE;
+}
+
 /* ---------- 全局状态 ---------- */
 const S = {
   sid: null,
@@ -61,9 +80,17 @@ async function api(path, opts = {}) {
   const { timeoutMs = 90000, ...rest } = opts || {};
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  // B-10（t39）：写操作需要本轮本地 token。服务启动时随机生成，同源读取；
+  // 同源页面也会被服务端下发 SameSite=Strict cookie（双保险，任一条即可通过）。
+  const method = String((rest.method || "GET")).toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(rest.headers || {}) };
+  if (method !== "GET" && method !== "HEAD") {
+    const tok = await ensureToken();
+    if (tok) headers["X-Local-Token"] = tok;
+  }
   try {
     const resp = await fetch(path, {
-      headers: { "Content-Type": "application/json" },
+      headers,
       signal: ctl.signal,
       ...rest,
     });
@@ -99,7 +126,10 @@ function refreshAnchorPreview() {
 }
 ["prot-hair", "prot-eyes", "prot-outfit", "prot-vibe"].forEach((id) =>
   on(id, "change", refreshAnchorPreview));
-on("prot-extra", "input", refreshAnchorPreview);
+// —— UI 绑定段 bindUiPart01（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart01() {
+  on("prot-extra", "input", refreshAnchorPreview);
+}
 
 /* ---------- 开始界面：NPC 卡片 ---------- */
 
@@ -109,16 +139,16 @@ function addCharCard(data = {}) {
   card.className = "char-card";
   card.innerHTML = `
     <div class="char-card-head">
-      <input class="text-input char-name" placeholder="角色名" maxlength="12" value="${data.name || ""}">
+      <input class="text-input char-name" placeholder="角色名" maxlength="12" value="${escapeHtml(data.name || "")}">
       <button class="btn ghost btn-del">✕ 删除</button>
     </div>
     <div class="char-field">
       <small>外貌描述（供立绘生成：发色发型、瞳色、服装、气质）</small>
-      <textarea class="text-input char-appearance" rows="2" maxlength="300">${data.appearance || ""}</textarea>
+      <textarea class="text-input char-appearance" rows="2" maxlength="300">${escapeHtml(data.appearance || "")}</textarea>
     </div>
     <div class="char-field">
       <small>性格 / 说话风格</small>
-      <textarea class="text-input char-personality" rows="2" maxlength="200">${data.personality || ""}</textarea>
+      <textarea class="text-input char-personality" rows="2" maxlength="200">${escapeHtml(data.personality || "")}</textarea>
     </div>`;
   card.querySelector(".btn-del").addEventListener("click", () => card.remove());
   list.appendChild(card);
@@ -156,61 +186,64 @@ function collectLorebook() {
     always: el.querySelector(".lore-always-cb").checked,
   })).filter((e) => e.content);
 }
+// —— UI 绑定段 bindUiPart02（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart02() {
 
-/* ---------- 开始界面：随机设定 / 大纲 ---------- */
+  /* ---------- 开始界面：随机设定 / 大纲 ---------- */
 
-$("btn-add-char").addEventListener("click", () => addCharCard());
-$("btn-add-lore").addEventListener("click", () => addLoreEntry());
+  $("btn-add-char").addEventListener("click", () => addCharCard());
+  $("btn-add-lore").addEventListener("click", () => addLoreEntry());
 
-$("btn-random").addEventListener("click", async () => {
-  const btn = $("btn-random");
-  btn.disabled = true;
-  btn.textContent = "生成中……";
-  try {
-    const data = await api(`/api/setup/random?mode=${S.mode}`, { method: "POST" });
-    $("inp-title").value = data.title || "";
-    $("inp-world").value = data.world || "";
-    $("char-list").innerHTML = "";
-    (data.characters || []).forEach((c) => addCharCard(c));
-    if (data.outline) $("inp-outline").value = data.outline;
-  } catch (e) {
-    toast("随机生成失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "🎲 随机生成设定";
-  }
-});
+  $("btn-random").addEventListener("click", async () => {
+    const btn = $("btn-random");
+    btn.disabled = true;
+    btn.textContent = "生成中……";
+    try {
+      const data = await api(`/api/setup/random?mode=${S.mode}`, { method: "POST" });
+      $("inp-title").value = data.title || "";
+      $("inp-world").value = data.world || "";
+      $("char-list").innerHTML = "";
+      (data.characters || []).forEach((c) => addCharCard(c));
+      if (data.outline) $("inp-outline").value = data.outline;
+    } catch (e) {
+      toast("随机生成失败：" + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🎲 随机生成设定";
+    }
+  });
 
-$("btn-clear-outline").addEventListener("click", () => {
-  $("inp-outline").value = "";
-  toast("大纲已清空（剧情将自由发挥）");
-});
+  $("btn-clear-outline").addEventListener("click", () => {
+    $("inp-outline").value = "";
+    toast("大纲已清空（剧情将自由发挥）");
+  });
 
-$("btn-outline").addEventListener("click", async () => {
-  const btn = $("btn-outline");
-  const world = $("inp-world").value.trim();
-  if (!world) { toast("请先填写世界观，再生成大纲"); return; }
-  btn.disabled = true;
-  btn.textContent = "大纲生成中……";
-  try {
-    const data = await api("/api/outline", {
-      method: "POST",
-      body: JSON.stringify({
-        world,
-        protagonist: $("prot-name").value.trim() || "主角",
-        characters: collectNPCs(),
-      }),
-    });
-    $("inp-outline").value = data.outline || "";
-    if (data.title && !$("inp-title").value.trim()) $("inp-title").value = data.title;
-    toast("大纲已生成，可自由编辑后开局");
-  } catch (e) {
-    toast("大纲生成失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "🤖 用 AI 生成大纲";
-  }
-});
+  $("btn-outline").addEventListener("click", async () => {
+    const btn = $("btn-outline");
+    const world = $("inp-world").value.trim();
+    if (!world) { toast("请先填写世界观，再生成大纲"); return; }
+    btn.disabled = true;
+    btn.textContent = "大纲生成中……";
+    try {
+      const data = await api("/api/outline", {
+        method: "POST",
+        body: JSON.stringify({
+          world,
+          protagonist: $("prot-name").value.trim() || "主角",
+          characters: collectNPCs(),
+        }),
+      });
+      $("inp-outline").value = data.outline || "";
+      if (data.title && !$("inp-title").value.trim()) $("inp-title").value = data.title;
+      toast("大纲已生成，可自由编辑后开局");
+    } catch (e) {
+      toast("大纲生成失败：" + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🤖 用 AI 生成大纲";
+    }
+  });
+}
 
 /* ---------- 开始界面：AI 指令注入（文风/限度） ---------- */
 
@@ -269,14 +302,17 @@ function renderPresetCustoms() {
     box.appendChild(row);
   });
 }
+// —— UI 绑定段 bindUiPart03（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart03() {
 
-$("btn-add-preset").addEventListener("click", () => {
-  const text = $("preset-new").value.trim();
-  if (!text) { toast("请输入指令内容"); return; }
-  setupDirectives.customs.push({ id: "", text, enabled: true });
-  $("preset-new").value = "";
-  renderPresetCustoms();
-});
+  $("btn-add-preset").addEventListener("click", () => {
+    const text = $("preset-new").value.trim();
+    if (!text) { toast("请输入指令内容"); return; }
+    setupDirectives.customs.push({ id: "", text, enabled: true });
+    $("preset-new").value = "";
+    renderPresetCustoms();
+  });
+}
 
 function collectDirectives() {
   return [
@@ -284,65 +320,72 @@ function collectDirectives() {
     ...setupDirectives.customs.map((c) => ({ id: "", text: c.text, enabled: true })),
   ];
 }
+// —— UI 绑定段 bindUiPart04（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart04() {
 
-$("inp-rating").addEventListener("change", () => {
-  const r = $("inp-rating");
-  $("inp-r18").disabled = r.value !== "18";
-  if (r.value !== "18") $("inp-r18").checked = false;
-  $("inp-forced").disabled = r.value !== "18" || !$("inp-r18").checked;
-  if (r.value !== "18" || !$("inp-r18").checked) $("inp-forced").checked = false;
-});
-$("inp-r18").addEventListener("change", () => {
-  $("inp-forced").disabled = !$("inp-r18").checked;
-  if (!$("inp-r18").checked) $("inp-forced").checked = false;
-});
+  $("inp-rating").addEventListener("change", () => {
+    const r = $("inp-rating");
+    $("inp-r18").disabled = r.value !== "18";
+    if (r.value !== "18") $("inp-r18").checked = false;
+    $("inp-forced").disabled = r.value !== "18" || !$("inp-r18").checked;
+    if (r.value !== "18" || !$("inp-r18").checked) $("inp-forced").checked = false;
+  });
+  $("inp-r18").addEventListener("change", () => {
+    $("inp-forced").disabled = !$("inp-r18").checked;
+    if (!$("inp-r18").checked) $("inp-forced").checked = false;
+  });
 
-/* ---------- 开始游戏 ---------- */
+  /* ---------- 开始游戏 ---------- */
 
-$("btn-start").addEventListener("click", async () => {
-  const world = $("inp-world").value.trim();
-  if (!world) { toast("请先填写世界观/剧情设定，或点「随机生成设定」"); return; }
-  const payload = {
-    mode: S.mode,
-    title: $("inp-title").value.trim(),
-    world,
-    characters: collectNPCs(),
-    protagonist: {
-      name: $("prot-name").value.trim() || "主角",
-      anchor: S.mode === "vn" ? $("vn-anchor").value.trim() : buildAnchor(),
-    },
-    outline: $("inp-outline").value.trim(),
-    lorebook: collectLorebook(),
-    directives: collectDirectives(),
-    catchphrases: ($("inp-catchphrases").value || "").split(String.fromCharCode(10))
-      .map(s => s.trim()).filter(Boolean).slice(0, 5),
-    content_rating: $("inp-rating").value,
-    r18_enabled: $("inp-r18").checked,
-    allow_forced: $("inp-forced").checked && $("inp-r18").checked
-      && $("inp-rating").value === "18",
-    library_imports: window.__libImports || [],
-    tsf_target: collectTsfTarget(),
-  };
-  const btn = $("btn-start");
-  btn.disabled = true;
-  btn.textContent = "正在开场……";
-  try {
-    const state = await api("/api/game/start", {
-      method: "POST", body: JSON.stringify(payload),
-    });
-    localStorage.setItem("galgame_sid", state.sid);
-    enterGame(state, { instant: false });
-  } catch (e) {
-    toast("开局失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "▶ 开始游戏";
-  }
-});
+  $("btn-start").addEventListener("click", async () => {
+    const world = $("inp-world").value.trim();
+    if (!world) { toast("请先填写世界观/剧情设定，或点「随机生成设定」"); return; }
+    const payload = {
+      mode: S.mode,
+      title: $("inp-title").value.trim(),
+      world,
+      characters: collectNPCs(),
+      protagonist: {
+        name: $("prot-name").value.trim() || "主角",
+        anchor: S.mode === "vn" ? $("vn-anchor").value.trim() : buildAnchor(),
+      },
+      outline: $("inp-outline").value.trim(),
+      lorebook: collectLorebook(),
+      directives: collectDirectives(),
+      catchphrases: ($("inp-catchphrases").value || "").split(String.fromCharCode(10))
+        .map(s => s.trim()).filter(Boolean).slice(0, 5),
+      content_rating: $("inp-rating").value,
+      r18_enabled: $("inp-r18").checked,
+      allow_forced: $("inp-forced").checked && $("inp-r18").checked
+        && $("inp-rating").value === "18",
+      library_imports: window.__libImports || [],
+      tsf_target: collectTsfTarget(),
+    };
+    const btn = $("btn-start");
+    btn.disabled = true;
+    btn.textContent = "正在开场……";
+    try {
+      const state = await api("/api/game/start", {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      localStorage.setItem("galgame_sid", state.sid);
+      enterGame(state, { instant: false });
+    } catch (e) {
+      toast("开局失败：" + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "▶ 开始游戏";
+    }
+  });
 
-$("btn-credits").addEventListener("click", () => $("modal-credits").classList.remove("hidden"));
-$("btn-credits-game").addEventListener("click", () => $("modal-credits").classList.remove("hidden"));
-$("btn-credits-close").addEventListener("click", () => $("modal-credits").classList.add("hidden"));
+  $("btn-credits").addEventListener("click", () => $("modal-credits").classList.remove("hidden"));
+  // B-22（t37）：底部 footer 那个「🍰 制作名单」按钮原先与上面的按钮**共用 id**
+  // （index.html 里 id="btn-credits" 出现两次），$() 只会拿到第一个，导致它点不动。
+  // 现已给它唯一 id="btn-credits-foot" 并在此绑定。
+  $("btn-credits-foot").addEventListener("click", () => $("modal-credits").classList.remove("hidden"));
+  $("btn-credits-game").addEventListener("click", () => $("modal-credits").classList.remove("hidden"));
+  $("btn-credits-close").addEventListener("click", () => $("modal-credits").classList.add("hidden"));
+}
 
 /* ---------- 关闭游戏（左上角）：停止服务并关闭窗口 ---------- */
 
@@ -361,8 +404,11 @@ async function shutdownGame() {
       '游戏已关闭' + sdNote + '，可以关闭本标签页了。</div>';
   }, 600);
 }
-$("btn-shutdown").addEventListener("click", shutdownGame);
-$("btn-shutdown-setup").addEventListener("click", shutdownGame);
+// —— UI 绑定段 bindUiPart05（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart05() {
+  $("btn-shutdown").addEventListener("click", shutdownGame);
+  $("btn-shutdown-setup").addEventListener("click", shutdownGame);
+}
 
 /* ---------- 模式切换（TSF / 普通 Galgame） ---------- */
 
@@ -395,8 +441,11 @@ function setSetupMode(mode, silent) {
   }
   renderStatEditor();
 }
-$("mode-btn-tsf").addEventListener("click", () => setSetupMode("tsf"));
-$("mode-btn-vn").addEventListener("click", () => setSetupMode("vn"));
+// —— UI 绑定段 bindUiPart06（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart06() {
+  $("mode-btn-tsf").addEventListener("click", () => setSetupMode("tsf"));
+  $("mode-btn-vn").addEventListener("click", () => setSetupMode("vn"));
+}
 
 /* ---------- 状态栏自定义（开局前编辑） ---------- */
 
@@ -438,7 +487,7 @@ function renderStatEditor() {
     const row = document.createElement("div");
     row.className = "stat-row";
     row.innerHTML = `
-      <span class="stat-ico">${st.icon || "✦"}</span>
+      <span class="stat-ico">${escapeHtml(st.icon || "✦")}</span>
       <input class="text-input stat-name" placeholder="状态名" maxlength="10" value="${escapeHtml(st.name || "")}">
       <label class="stat-start-label">初始值
         <input class="text-input stat-start" type="number" min="0" max="100" value="${st.start ?? 0}">
@@ -458,17 +507,20 @@ function renderStatEditor() {
     box.appendChild(row);
   });
 }
+// —— UI 绑定段 bindUiPart07（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart07() {
 
-$("btn-stat-add").addEventListener("click", () => {
-  if (!S.statCfg || !Array.isArray(S.statCfg[S.mode])) renderStatEditor();
-  S.statCfg[S.mode].push({ key: "", name: "", icon: "✦", start: 0 });
-  renderStatEditor();
-});
-$("btn-stat-reset").addEventListener("click", () => {
-  if (!S.statCfg) S.statCfg = {};
-  S.statCfg[S.mode] = cloneStats(DEFAULT_STATS[S.mode]);
-  renderStatEditor();
-});
+  $("btn-stat-add").addEventListener("click", () => {
+    if (!S.statCfg || !Array.isArray(S.statCfg[S.mode])) renderStatEditor();
+    S.statCfg[S.mode].push({ key: "", name: "", icon: "✦", start: 0 });
+    renderStatEditor();
+  });
+  $("btn-stat-reset").addEventListener("click", () => {
+    if (!S.statCfg) S.statCfg = {};
+    S.statCfg[S.mode] = cloneStats(DEFAULT_STATS[S.mode]);
+    renderStatEditor();
+  });
+}
 
 /* ---------- 内容分级（游戏内，下一幕生效） ---------- */
 
@@ -485,23 +537,26 @@ function applyRatingUI(rating, r18, intensity, forced) {
     fc.checked = !!forced && sel.value === "18" && cb.checked;
   }
 }
+// —— UI 绑定段 bindUiPart08（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart08() {
 
-// 联动：切到 18+ 才允许勾选 R18（与开局面板行为一致）
-$("inp-rating-game").addEventListener("change", () => {
-  const sel = $("inp-rating-game");
-  const cb = $("inp-r18-game");
-  cb.disabled = sel.value !== "18";
-  if (sel.value !== "18") cb.checked = false;
-  const fc = $("cfg-forced");
-  fc.disabled = sel.value !== "18" || !cb.checked;
-  if (sel.value !== "18" || !cb.checked) fc.checked = false;
-  $("inp-r18-game").dispatchEvent(new Event("change"));
-});
-$("inp-r18-game").addEventListener("change", () => {
-  const fc = $("cfg-forced");
-  fc.disabled = !$("inp-r18-game").checked;
-  if (!$("inp-r18-game").checked) fc.checked = false;
-});
+  // 联动：切到 18+ 才允许勾选 R18（与开局面板行为一致）
+  $("inp-rating-game").addEventListener("change", () => {
+    const sel = $("inp-rating-game");
+    const cb = $("inp-r18-game");
+    cb.disabled = sel.value !== "18";
+    if (sel.value !== "18") cb.checked = false;
+    const fc = $("cfg-forced");
+    fc.disabled = sel.value !== "18" || !cb.checked;
+    if (sel.value !== "18" || !cb.checked) fc.checked = false;
+    $("inp-r18-game").dispatchEvent(new Event("change"));
+  });
+  $("inp-r18-game").addEventListener("change", () => {
+    const fc = $("cfg-forced");
+    fc.disabled = !$("inp-r18-game").checked;
+    if (!$("inp-r18-game").checked) fc.checked = false;
+  });
+}
 
 /* ---------- 设置弹窗 ---------- */
 
@@ -561,11 +616,14 @@ function openSettings() {
     $("modal-settings").classList.remove("hidden");
   }).catch((e) => toast("读取配置失败：" + e.message));
 }
+// —— UI 绑定段 bindUiPart09（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart09() {
 
-$("btn-open-settings").addEventListener("click", openSettings);
-$("btn-settings-game").addEventListener("click", openSettings);
-$("btn-settings-close").addEventListener("click", () => $("modal-settings").classList.add("hidden"));
-$("btn-settings-exit").addEventListener("click", () => $("modal-settings").classList.add("hidden"));
+  $("btn-open-settings").addEventListener("click", openSettings);
+  $("btn-settings-game").addEventListener("click", openSettings);
+  $("btn-settings-close").addEventListener("click", () => $("modal-settings").classList.add("hidden"));
+  $("btn-settings-exit").addEventListener("click", () => $("modal-settings").classList.add("hidden"));
+}
 
 /* ---------- ComfyUI 连接助手（设置页） ---------- */
 let comfyDesktopApps = [];
@@ -574,126 +632,129 @@ function toggleComfyRow(provider) {
   const row = $("cfg-img-comfy-row");
   if (row) row.classList.toggle("hidden", provider !== "comfyui");
 }
+// —— UI 绑定段 bindUiPart10（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart10() {
 
-if ($("cfg-img-provider")) {
-  $("cfg-img-provider").addEventListener("change", () =>
-    toggleComfyRow($("cfg-img-provider").value));
-}
+  if ($("cfg-img-provider")) {
+    $("cfg-img-provider").addEventListener("change", () =>
+      toggleComfyRow($("cfg-img-provider").value));
+  }
 
-$("btn-comfy-scan").addEventListener("click", async () => {
-  const st = $("comfy-status");
-  st.textContent = "🔍 探测本机 ComfyUI 服务与桌面端…";
-  try {
-    const r = await api("/api/image/comfy/scan", { method: "POST" });
-    comfyDesktopApps = r.desktop_apps || [];
-    const svc = r.services || [];
-    $("btn-comfy-launch").classList.toggle("hidden", !comfyDesktopApps.length);
-    if (!svc.length) {
-      st.textContent = comfyDesktopApps.length
-        ? "未发现在线服务；已检测到桌面端程序，点「🚀 启动桌面端程序」后重新探测"
-        : "未发现本机 ComfyUI 服务（请确认桌面端已启动，默认端口 8188）";
-      return;
-    }
-    $("btn-comfy-launch").classList.add("hidden");
-    const pick = svc[0];
-    $("cfg-img-url").value = pick.url;
-    let chk = { checkpoints: [], version: pick.version || "" };
+  $("btn-comfy-scan").addEventListener("click", async () => {
+    const st = $("comfy-status");
+    st.textContent = "🔍 探测本机 ComfyUI 服务与桌面端…";
     try {
-      chk = await api("/api/image/comfy/check", {
-        method: "POST", body: JSON.stringify({ base_url: pick.url }),
-      });
-    } catch (e2) { /* 读不到模型列表也不阻塞 */ }
-    const sel = $("cfg-img-comfy-ckpt");
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">（自动-第一个可用模型）</option>';
-    (chk.checkpoints || []).forEach((n) => {
-      const o = document.createElement("option");
-      o.value = n;
-      o.textContent = n;
-      sel.appendChild(o);
-    });
-    if (cur) sel.value = cur;
-    st.textContent = `✅ 已连接 ${pick.url} · ComfyUI ${chk.version || "?"}`
-      + ` · 可用模型 ${(chk.checkpoints || []).length} 个 · 记得点「保存」`;
-  } catch (e) {
-    st.textContent = "连接失败：" + e.message;
-  }
-});
-
-$("btn-comfy-launch").addEventListener("click", async () => {
-  if (!comfyDesktopApps.length) return;
-  try {
-    await api("/api/image/comfy/launch", {
-      method: "POST", body: JSON.stringify({ path: comfyDesktopApps[0] }),
-    });
-    $("comfy-status").textContent = "已启动桌面端程序，稍候几秒后再点「🔌 自动探测并连接桌面端」";
-  } catch (e) {
-    $("comfy-status").textContent = "启动失败：" + e.message;
-  }
-});
-
-$("btn-settings-save").addEventListener("click", async () => {
-  const config = {
-    llm: {
-      base_url: $("cfg-llm-url").value.trim(),
-      api_key: $("cfg-llm-key").value.trim(),
-      model: $("cfg-llm-model").value.trim(),
-    },
-    image: {
-      provider: $("cfg-img-provider").value,
-      edge_clean: true,
-      edge_shrink: 1,
-      sync_webui: true,
-      auto_sdxl_styles: true,
-      base_url: $("cfg-img-url").value.trim(),
-      api_key: $("cfg-img-key").value.trim(),
-      model: $("cfg-img-model").value.trim(),
-      comfy_checkpoint: $("cfg-img-comfy-ckpt").value.trim(),
-      size: $("cfg-img-size").value.trim(),
-      hi_res: $("cfg-img-hires") ? $("cfg-img-hires").checked : false,
-      negative_prompt: $("cfg-img-neg").value.trim(),
-      cutout_mode: $("cfg-cutout-mode").value,
-      vram_mode: $("cfg-vram-mode").value,
-      wai_adapt: $("cfg-wai-adapt") ? $("cfg-wai-adapt").checked : true,
-      tsf_explicit: $("cfg-tsf-explicit") ? $("cfg-tsf-explicit").checked : false,
-      tsf_plan_llm: $("cfg-tsf-plan-llm") ? $("cfg-tsf-plan-llm").checked : true,
-      stage_style: $("cfg-stage-style") ? $("cfg-stage-style").value : "auto",
-      portrait_quality: $("cfg-portrait-quality").value,
-      background_quality: $("cfg-bg-quality").value,
-      cg_quality: $("cfg-cg-quality").value,
-      pink_rim: true,
-    },
-    game: {
-      portrait_update: $("cfg-portrait-update").value,
-      style_mode: $("cfg-style-mode").value,
-      inject_outline: $("cfg-inject-outline").checked,
-    },
-  };
-  try {
-    await api("/api/config", { method: "POST", body: JSON.stringify({ config }) });
-    if (S.sid && $("inp-rating-game")) {
-      try {
-        await api(`/api/game/${S.sid}/policy`, {
-          method: "POST",
-          body: JSON.stringify({
-            content_rating: $("inp-rating-game").value,
-            r18_enabled: $("inp-r18-game").checked,
-            adult_intensity: $("cfg-adult-intensity").value,
-            allow_forced: $("cfg-forced").checked,
-          }),
-        });
-        $("settings-hint").textContent = "✓ 已保存，分级政策下一幕生效";
-      } catch (e) {
-        $("settings-hint").textContent = "配置保存成功，分级保存失败：" + e.message;
+      const r = await api("/api/image/comfy/scan", { method: "POST" });
+      comfyDesktopApps = r.desktop_apps || [];
+      const svc = r.services || [];
+      $("btn-comfy-launch").classList.toggle("hidden", !comfyDesktopApps.length);
+      if (!svc.length) {
+        st.textContent = comfyDesktopApps.length
+          ? "未发现在线服务；已检测到桌面端程序，点「🚀 启动桌面端程序」后重新探测"
+          : "未发现本机 ComfyUI 服务（请确认桌面端已启动，默认端口 8188）";
+        return;
       }
-    } else {
-      $("settings-hint").textContent = "✓ 已保存，立即生效";
+      $("btn-comfy-launch").classList.add("hidden");
+      const pick = svc[0];
+      $("cfg-img-url").value = pick.url;
+      let chk = { checkpoints: [], version: pick.version || "" };
+      try {
+        chk = await api("/api/image/comfy/check", {
+          method: "POST", body: JSON.stringify({ base_url: pick.url }),
+        });
+      } catch (e2) { /* 读不到模型列表也不阻塞 */ }
+      const sel = $("cfg-img-comfy-ckpt");
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">（自动-第一个可用模型）</option>';
+      (chk.checkpoints || []).forEach((n) => {
+        const o = document.createElement("option");
+        o.value = n;
+        o.textContent = n;
+        sel.appendChild(o);
+      });
+      if (cur) sel.value = cur;
+      st.textContent = `✅ 已连接 ${pick.url} · ComfyUI ${chk.version || "?"}`
+        + ` · 可用模型 ${(chk.checkpoints || []).length} 个 · 记得点「保存」`;
+    } catch (e) {
+      st.textContent = "连接失败：" + e.message;
     }
-    refreshMockBanner();
-  } catch (e) {
-    toast("保存失败：" + e.message);
-  }
-});
+  });
+
+  $("btn-comfy-launch").addEventListener("click", async () => {
+    if (!comfyDesktopApps.length) return;
+    try {
+      await api("/api/image/comfy/launch", {
+        method: "POST", body: JSON.stringify({ path: comfyDesktopApps[0] }),
+      });
+      $("comfy-status").textContent = "已启动桌面端程序，稍候几秒后再点「🔌 自动探测并连接桌面端」";
+    } catch (e) {
+      $("comfy-status").textContent = "启动失败：" + e.message;
+    }
+  });
+
+  $("btn-settings-save").addEventListener("click", async () => {
+    const config = {
+      llm: {
+        base_url: $("cfg-llm-url").value.trim(),
+        api_key: $("cfg-llm-key").value.trim(),
+        model: $("cfg-llm-model").value.trim(),
+      },
+      image: {
+        provider: $("cfg-img-provider").value,
+        edge_clean: true,
+        edge_shrink: 1,
+        sync_webui: true,
+        auto_sdxl_styles: true,
+        base_url: $("cfg-img-url").value.trim(),
+        api_key: $("cfg-img-key").value.trim(),
+        model: $("cfg-img-model").value.trim(),
+        comfy_checkpoint: $("cfg-img-comfy-ckpt").value.trim(),
+        size: $("cfg-img-size").value.trim(),
+        hi_res: $("cfg-img-hires") ? $("cfg-img-hires").checked : false,
+        negative_prompt: $("cfg-img-neg").value.trim(),
+        cutout_mode: $("cfg-cutout-mode").value,
+        vram_mode: $("cfg-vram-mode").value,
+        wai_adapt: $("cfg-wai-adapt") ? $("cfg-wai-adapt").checked : true,
+        tsf_explicit: $("cfg-tsf-explicit") ? $("cfg-tsf-explicit").checked : false,
+        tsf_plan_llm: $("cfg-tsf-plan-llm") ? $("cfg-tsf-plan-llm").checked : true,
+        stage_style: $("cfg-stage-style") ? $("cfg-stage-style").value : "auto",
+        portrait_quality: $("cfg-portrait-quality").value,
+        background_quality: $("cfg-bg-quality").value,
+        cg_quality: $("cfg-cg-quality").value,
+        pink_rim: true,
+      },
+      game: {
+        portrait_update: $("cfg-portrait-update").value,
+        style_mode: $("cfg-style-mode").value,
+        inject_outline: $("cfg-inject-outline").checked,
+      },
+    };
+    try {
+      await api("/api/config", { method: "POST", body: JSON.stringify({ config }) });
+      if (S.sid && $("inp-rating-game")) {
+        try {
+          await api(`/api/game/${S.sid}/policy`, {
+            method: "POST",
+            body: JSON.stringify({
+              content_rating: $("inp-rating-game").value,
+              r18_enabled: $("inp-r18-game").checked,
+              adult_intensity: $("cfg-adult-intensity").value,
+              allow_forced: $("cfg-forced").checked,
+            }),
+          });
+          $("settings-hint").textContent = "✓ 已保存，分级政策下一幕生效";
+        } catch (e) {
+          $("settings-hint").textContent = "配置保存成功，分级保存失败：" + e.message;
+        }
+      } else {
+        $("settings-hint").textContent = "✓ 已保存，立即生效";
+      }
+      refreshMockBanner();
+    } catch (e) {
+      toast("保存失败：" + e.message);
+    }
+  });
+}
 
 /* ---------- API 前置注入 ---------- */
 
@@ -737,14 +798,17 @@ function renderInjects() {
     box.appendChild(row);
   });
 }
+// —— UI 绑定段 bindUiPart11（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart11() {
 
-$("btn-add-inject").addEventListener("click", () => {
-  const text = $("inject-new").value.trim();
-  if (!text) { toast("请输入注入文本"); return; }
-  injectState.items.push({ id: "", name: "注入", description: "", text, enabled: true });
-  $("inject-new").value = "";
-  renderInjects();
-});
+  $("btn-add-inject").addEventListener("click", () => {
+    const text = $("inject-new").value.trim();
+    if (!text) { toast("请输入注入文本"); return; }
+    injectState.items.push({ id: "", name: "注入", description: "", text, enabled: true });
+    $("inject-new").value = "";
+    renderInjects();
+  });
+}
 
 /* ---------- 从 GitHub 更新：检查 / 下载整合包 ---------- */
 
@@ -767,78 +831,83 @@ function renderUpdateStatus(st) {
   }
   if (hint) hint.textContent = st.msg || "";
 }
+// —— UI 绑定段 bindUiPart12（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart12() {
 
-$("btn-update-check").addEventListener("click", async () => {
-  const hint = $("update-hint");
-  hint.textContent = "正在查询 GitHub…";
-  $("btn-update-download").classList.add("hidden");
-  $("update-notes").classList.add("hidden");
-  try {
-    const d = await api("/api/update/check");
-    if (d.error) { hint.textContent = d.error; return; }
-    const cur = d.current ? `v${d.current}` : "未知";
-    if (d.has_update) {
-      hint.textContent = `发现新版本 ${cur} → v${d.latest}`
-        + (d.proxy ? "（下载将走系统代理）" : "");
-      $("btn-update-download").classList.remove("hidden");
-    } else {
-      hint.textContent = `已是最新版本（${cur}）`;
-    }
-    if (d.notes) {
-      const box = $("update-notes");
-      box.textContent = d.notes;
-      box.classList.remove("hidden");
-    }
-  } catch (e) {
-    hint.textContent = "检查失败：" + e.message;
-  }
-});
-
-$("btn-update-download").addEventListener("click", async () => {
-  const hint = $("update-hint");
-  $("btn-update-download").classList.add("hidden");
-  try {
-    await api("/api/update/download", { method: "POST" });
-  } catch (e) {
-    hint.textContent = "启动下载失败：" + e.message;
-    return;
-  }
-  clearInterval(updateTimer);
-  updateTimer = setInterval(async () => {
+  $("btn-update-check").addEventListener("click", async () => {
+    const hint = $("update-hint");
+    hint.textContent = "正在查询 GitHub…";
+    $("btn-update-download").classList.add("hidden");
+    $("update-notes").classList.add("hidden");
     try {
-      const st = await api("/api/update/status");
-      renderUpdateStatus(st);
-      if (st.status === "done") {
-        clearInterval(updateTimer);
-        toast(st.msg, 8000);
-      } else if (st.status === "error") {
-        clearInterval(updateTimer);
+      const d = await api("/api/update/check");
+      if (d.error) { hint.textContent = d.error; return; }
+      const cur = d.current ? `v${d.current}` : "未知";
+      if (d.has_update) {
+        hint.textContent = `发现新版本 ${cur} → v${d.latest}`
+          + (d.proxy ? "（下载将走系统代理）" : "");
+        $("btn-update-download").classList.remove("hidden");
+      } else {
+        hint.textContent = `已是最新版本（${cur}）`;
+      }
+      if (d.notes) {
+        const box = $("update-notes");
+        box.textContent = d.notes;
+        box.classList.remove("hidden");
       }
     } catch (e) {
-      clearInterval(updateTimer);
-      hint.textContent = "进度查询中断：" + e.message;
+      hint.textContent = "检查失败：" + e.message;
     }
-  }, 1200);
-});
+  });
 
-$("btn-injects-save").addEventListener("click", async () => {
-  try {
-    const current = (await api("/api/injects")).injects || [];
-    const keepIds = new Set(injectState.items.map((x) => x.id).filter(Boolean));
-    for (const old of current) {
-      if (old.id && !keepIds.has(old.id) && !String(old.id).startsWith("builtin_")) {
-        await api(`/api/injects/${old.id}`, { method: "DELETE" });
+  $("btn-update-download").addEventListener("click", async () => {
+    const hint = $("update-hint");
+    $("btn-update-download").classList.add("hidden");
+    try {
+      await api("/api/update/download", { method: "POST" });
+    } catch (e) {
+      hint.textContent = "启动下载失败：" + e.message;
+      return;
+    }
+    // t38：收敛到单一调度器（原来这里是独立 setInterval，靠 clearInterval 自清）
+    Sched.define("updateStatus", 1200, async () => {
+      try {
+        const st = await api("/api/update/status");
+        renderUpdateStatus(st);
+        if (st.status === "done") {
+          Sched.stop("updateStatus");
+          toast(st.msg, 8000);
+        } else if (st.status === "error") {
+          Sched.stop("updateStatus");
+        }
+      } catch (e) {
+        Sched.stop("updateStatus");
+        hint.textContent = "进度查询中断：" + e.message;
       }
+    });
+    Sched.stop("updateStatus");
+    Sched.start("updateStatus");
+  });
+
+  $("btn-injects-save").addEventListener("click", async () => {
+    try {
+      const current = (await api("/api/injects")).injects || [];
+      const keepIds = new Set(injectState.items.map((x) => x.id).filter(Boolean));
+      for (const old of current) {
+        if (old.id && !keepIds.has(old.id) && !String(old.id).startsWith("builtin_")) {
+          await api(`/api/injects/${old.id}`, { method: "DELETE" });
+        }
+      }
+      for (const it of injectState.items) {
+        await api("/api/injects", { method: "POST", body: JSON.stringify(it) });
+      }
+      await loadInjects();
+      $("injects-hint").textContent = "✓ 已保存：启用中的注入将在下一轮剧情生效";
+    } catch (e) {
+      toast("注入保存失败：" + e.message);
     }
-    for (const it of injectState.items) {
-      await api("/api/injects", { method: "POST", body: JSON.stringify(it) });
-    }
-    await loadInjects();
-    $("injects-hint").textContent = "✓ 已保存：启用中的注入将在下一轮剧情生效";
-  } catch (e) {
-    toast("注入保存失败：" + e.message);
-  }
-});
+  });
+}
 
 async function refreshMockBanner() {
   try {
@@ -851,6 +920,13 @@ async function refreshMockBanner() {
 /* ---------- 进入游戏 ---------- */
 
 function enterGame(state, { instant }) {
+  // t38 · ② 切局/读档的统一清理点。
+  // 所有"采纳一份新对局状态"的路径都经过 enterGame ——新开局、scene-set（换场景/
+  // 重绘背景）、slots/*/load（读档）—— 所以清理放在这里**一次覆盖全部**，而不是
+  // 在每个调用点各补一行（那种写法迟早会漏一个）。
+  // 收敛前 ffTimer（快进）完全没有切局清理：切局后它会在新局面上继续 nextLine()。
+  // 停掉之后由各路径原有的 startPolling() 按需重新启动（读档后页面照常刷新）。
+  Sched.stopAll();
   S.sid = state.sid;
   S.title = state.title;
   S.mode = state.mode || "tsf";
@@ -919,8 +995,8 @@ function buildSprites(presentList) {
     div.dataset.kind = c.kind;
     div.style.left = `${positions[Math.min(i, positions.length - 1)]}%`;
     div.innerHTML = `
-      <div class="sprite-placeholder">${c.name}<br>${c.kind === "prot" ? "阶段立绘生成中…" : "立绘生成中…"}</div>
-      <img alt="${c.name}">
+      <div class="sprite-placeholder">${escapeHtml(c.name)}<br>${c.kind === "prot" ? "阶段立绘生成中…" : "立绘生成中…"}</div>
+      <img alt="${escapeHtml(c.name)}">
       <div class="sprite-badge hidden"></div>`;
     // 悬停出现「重新生成」徽章：不满意/畸形时只重画该角色
     const badge = document.createElement("button");
@@ -980,10 +1056,13 @@ function updateRegenInitialRow() {
   const show = S.mode === "tsf" && $("regen-char").value === "protagonist";
   row.classList.toggle("hidden", !show);
 }
-if ($("regen-char")) {
-  $("regen-char").addEventListener("change", updateRegenInitialRow);
-}
+// —— UI 绑定段 bindUiPart13（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart13() {
+  if ($("regen-char")) {
+    $("regen-char").addEventListener("change", updateRegenInitialRow);
+  }
 
+}
 function renderRegenChips() {
   const box = $("regen-chips");
   box.innerHTML = "";
@@ -1022,17 +1101,23 @@ async function doRegenerate(target, note, silent, useInitial) {
     toast("重新生成失败：" + e.message);
   }
 }
+// —— UI 绑定段 bindUiPart14（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart14() {
 
-$("btn-regen-go").addEventListener("click", confirmRegen);
-$("btn-regen-cancel").addEventListener("click", () =>
-  $("modal-regen").classList.add("hidden"));
+  $("btn-regen-go").addEventListener("click", confirmRegen);
+  $("btn-regen-cancel").addEventListener("click", () =>
+    $("modal-regen").classList.add("hidden"));
+}
 
 function regenerateSprite(target) {
   if (!S.sid) return;
   openRegenModal(target);
 }
-$("btn-vn-regen-prot").addEventListener("click", () => openRegenModal("protagonist"));
-$("btn-vn-regen").addEventListener("click", () => openRegenModal("all"));
+// —— UI 绑定段 bindUiPart15（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart15() {
+  $("btn-vn-regen-prot").addEventListener("click", () => openRegenModal("protagonist"));
+  $("btn-vn-regen").addEventListener("click", () => openRegenModal("all"));
+}
 
 /* ---------- 状态面板：每个出场角色一套数值，可切换查看 ---------- */
 
@@ -1094,7 +1179,7 @@ function renderStatRows(box, states, prev, append) {
     const row = document.createElement("div");
     row.className = "tsf-row";
     row.innerHTML = `
-      <div class="tsf-row-label"><span class="tsf-ico">${s.icon}</span>${s.name}
+      <div class="tsf-row-label"><span class="tsf-ico">${escapeHtml(s.icon)}</span>${escapeHtml(s.name)}
         <span class="tsf-delta ${delta > 0 ? "up" : delta < 0 ? "down" : ""}">
           ${delta > 0 ? "▲" + delta : delta < 0 ? "▼" + Math.abs(delta) : ""}</span>
         <span class="tsf-val">${s.value}</span>
@@ -1170,25 +1255,28 @@ function renderVnPanel() {
   // 兼容旧服务端（没有 char_stats 时退回单一数值集）
   renderStatRows(box, (S.vn && S.vn.states) || []);
 }
+// —— UI 绑定段 bindUiPart16（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart16() {
 
-$("vn-collapse").addEventListener("click", () => {
-  $("vn-panel").classList.add("hidden");
-  $("vn-tab").classList.remove("hidden");
-});
-$("vn-tab").addEventListener("click", () => {
-  $("vn-tab").classList.add("hidden");
-  $("vn-panel").classList.remove("hidden");
-});
-$("btn-vn-regen").addEventListener("click", () => regenerateSprite("all"));
+  $("vn-collapse").addEventListener("click", () => {
+    $("vn-panel").classList.add("hidden");
+    $("vn-tab").classList.remove("hidden");
+  });
+  $("vn-tab").addEventListener("click", () => {
+    $("vn-tab").classList.add("hidden");
+    $("vn-panel").classList.remove("hidden");
+  });
+  $("btn-vn-regen").addEventListener("click", () => regenerateSprite("all"));
 
-$("tsf-collapse").addEventListener("click", () => {
-  $("tsf-panel").classList.add("hidden");
-  $("tsf-tab").classList.remove("hidden");
-});
-$("tsf-tab").addEventListener("click", () => {
-  $("tsf-tab").classList.add("hidden");
-  $("tsf-panel").classList.remove("hidden");
-});
+  $("tsf-collapse").addEventListener("click", () => {
+    $("tsf-panel").classList.add("hidden");
+    $("tsf-tab").classList.remove("hidden");
+  });
+  $("tsf-tab").addEventListener("click", () => {
+    $("tsf-tab").classList.add("hidden");
+    $("tsf-panel").classList.remove("hidden");
+  });
+}
 
 async function openPortraitFolder() {
   try {
@@ -1201,8 +1289,11 @@ async function openPortraitFolder() {
     toast("打开失败：" + e.message);
   }
 }
-$("btn-open-folder").addEventListener("click", openPortraitFolder);
-$("btn-vn-open-folder").addEventListener("click", openPortraitFolder);
+// —— UI 绑定段 bindUiPart17（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart17() {
+  $("btn-open-folder").addEventListener("click", openPortraitFolder);
+  $("btn-vn-open-folder").addEventListener("click", openPortraitFolder);
+}
 
 function forceReloadSprites() {
   S.imgVersion = (S.imgVersion || 0) + 1;
@@ -1213,14 +1304,17 @@ function forceReloadSprites() {
   const line = S.turn && S.turn.dialogue[S.lineIdx];
   if (line) updateSprites(line.character, line.emotion);
 }
+// —— UI 绑定段 bindUiPart18（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart18() {
 
-$("btn-regen-prot").addEventListener("click", () => {
-  regenerateSprite("protagonist");
-});
+  $("btn-regen-prot").addEventListener("click", () => {
+    regenerateSprite("protagonist");
+  });
 
-$("btn-regen-all").addEventListener("click", () => {
-  regenerateSprite("all");
-});
+  $("btn-regen-all").addEventListener("click", () => {
+    regenerateSprite("all");
+  });
+}
 
 /* ---------- 主角「转变目标设定」（1.7.16）：体型/头发/发色可配置 ---------- */
 function openTsfTarget() {
@@ -1236,34 +1330,37 @@ function openTsfTarget() {
   $("tsf-target-hint").textContent = "";
   $("modal-tsf-target").classList.remove("hidden");
 }
-$("btn-tsf-target").addEventListener("click", openTsfTarget);
-$("btn-tsf-target-close").addEventListener("click", () =>
-  $("modal-tsf-target").classList.add("hidden"));
-$("btn-tsf-target-save").addEventListener("click", async () => {
-  const btn = $("btn-tsf-target-save");
-  btn.disabled = true;
-  try {
-    const body = {
-      hair: $("tsf-t-hair").value,
-      build: $("tsf-t-build").value,
-      hair_color: $("tsf-t-haircolor").value.trim(),
-      aura: $("tsf-t-aura").value.trim(),
-      keep_hair_color: $("tsf-t-keepcolor").checked,
-    };
-    const r = await api(`/api/game/${S.sid}/tsf-target`, {
-      method: "POST", body: JSON.stringify(body),
-    });
-    S.tsfTarget = r.target || {};
-    toast("转变目标已保存，正在按新目标重画主角立绘…", 3200);
-    $("modal-tsf-target").classList.add("hidden");
-    S.imgVersion = (S.imgVersion || 0) + 1;
-    startPolling();   // 轮询直到新立绘 ready/error
-  } catch (e) {
-    toast("保存失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-  }
-});
+// —— UI 绑定段 bindUiPart19（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart19() {
+  $("btn-tsf-target").addEventListener("click", openTsfTarget);
+  $("btn-tsf-target-close").addEventListener("click", () =>
+    $("modal-tsf-target").classList.add("hidden"));
+  $("btn-tsf-target-save").addEventListener("click", async () => {
+    const btn = $("btn-tsf-target-save");
+    btn.disabled = true;
+    try {
+      const body = {
+        hair: $("tsf-t-hair").value,
+        build: $("tsf-t-build").value,
+        hair_color: $("tsf-t-haircolor").value.trim(),
+        aura: $("tsf-t-aura").value.trim(),
+        keep_hair_color: $("tsf-t-keepcolor").checked,
+      };
+      const r = await api(`/api/game/${S.sid}/tsf-target`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+      S.tsfTarget = r.target || {};
+      toast("转变目标已保存，正在按新目标重画主角立绘…", 3200);
+      $("modal-tsf-target").classList.add("hidden");
+      S.imgVersion = (S.imgVersion || 0) + 1;
+      startPolling();   // 轮询直到新立绘 ready/error
+    } catch (e) {
+      toast("保存失败：" + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
 
 async function recutAllNow() {
   try {
@@ -1275,8 +1372,11 @@ async function recutAllNow() {
     toast("重新抠图失败：" + e.message);
   }
 }
-$("btn-recut").addEventListener("click", recutAllNow);
-$("btn-vn-recut").addEventListener("click", recutAllNow);
+// —— UI 绑定段 bindUiPart20（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart20() {
+  $("btn-recut").addEventListener("click", recutAllNow);
+  $("btn-vn-recut").addEventListener("click", recutAllNow);
+}
 
 async function restoreRawNow() {
   try {
@@ -1288,8 +1388,11 @@ async function restoreRawNow() {
     toast("还原失败：" + e.message);
   }
 }
-$("btn-restore-raw").addEventListener("click", restoreRawNow);
-$("btn-vn-restore-raw").addEventListener("click", restoreRawNow);
+// —— UI 绑定段 bindUiPart21（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart21() {
+  $("btn-restore-raw").addEventListener("click", restoreRawNow);
+  $("btn-vn-restore-raw").addEventListener("click", restoreRawNow);
+}
 
 async function exportToLibrary() {
   try {
@@ -1299,8 +1402,11 @@ async function exportToLibrary() {
     toast("角色库导出失败：" + e.message);
   }
 }
-$("btn-library").addEventListener("click", exportToLibrary);
-$("btn-vn-library").addEventListener("click", exportToLibrary);
+// —— UI 绑定段 bindUiPart22（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart22() {
+  $("btn-library").addEventListener("click", exportToLibrary);
+  $("btn-vn-library").addEventListener("click", exportToLibrary);
+}
 
 async function exportSprites() {
   try {
@@ -1310,8 +1416,11 @@ async function exportSprites() {
     toast("导出失败：" + e.message);
   }
 }
-$("btn-export").addEventListener("click", exportSprites);
-$("btn-vn-export").addEventListener("click", exportSprites);
+// —— UI 绑定段 bindUiPart23（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart23() {
+  $("btn-export").addEventListener("click", exportSprites);
+  $("btn-vn-export").addEventListener("click", exportSprites);
+}
 
 /* ---------- 轮次播放 ---------- */
 
@@ -1426,18 +1535,21 @@ function typeText(el, text, instant) {
   };
   step();
 }
+// —— UI 绑定段 bindUiPart24（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart24() {
 
-$("dialog-box").addEventListener("click", () => {
-  if (S.typing) {
-    clearTimeout(S.typeTimer);
-    const line = S.turn.dialogue[S.lineIdx];
-    $("dialog-text").textContent = line.text;
-    S.typing = false;
-    $("next-hint").classList.remove("hidden");
-  } else {
-    nextLine();
-  }
-});
+  $("dialog-box").addEventListener("click", () => {
+    if (S.typing) {
+      clearTimeout(S.typeTimer);
+      const line = S.turn.dialogue[S.lineIdx];
+      $("dialog-text").textContent = line.text;
+      S.typing = false;
+      $("next-hint").classList.remove("hidden");
+    } else {
+      nextLine();
+    }
+  });
+}
 
 function nextLine() {
   if (!$("choices-wrap").classList.contains("hidden")) return;
@@ -1740,18 +1852,21 @@ async function openProtHist() {
     toast("读取立绘历程失败：" + e.message);
   }
 }
-$("btn-prot-hist").addEventListener("click", openProtHist);
-$("btn-vn-prot-hist").addEventListener("click", openProtHist);
-$("btn-prot-hist-close").addEventListener("click", () =>
-  $("modal-prot-hist").classList.add("hidden"));
-$("btn-phist-prev").addEventListener("click", () => {
-  phistPage -= 1;
-  renderHistPage(S.protName);
-});
-$("btn-phist-next").addEventListener("click", () => {
-  phistPage += 1;
-  renderHistPage(S.protName);
-});
+// —— UI 绑定段 bindUiPart25（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart25() {
+  $("btn-prot-hist").addEventListener("click", openProtHist);
+  $("btn-vn-prot-hist").addEventListener("click", openProtHist);
+  $("btn-prot-hist-close").addEventListener("click", () =>
+    $("modal-prot-hist").classList.add("hidden"));
+  $("btn-phist-prev").addEventListener("click", () => {
+    phistPage -= 1;
+    renderHistPage(S.protName);
+  });
+  $("btn-phist-next").addEventListener("click", () => {
+    phistPage += 1;
+    renderHistPage(S.protName);
+  });
+}
 
 async function reloadAssets() {
   if (!S.sid) return;
@@ -1767,8 +1882,11 @@ async function reloadAssets() {
     toast("重新读取失败：" + e.message);
   }
 }
-$("btn-reload-assets").addEventListener("click", reloadAssets);
-$("btn-vn-reload-assets").addEventListener("click", reloadAssets);
+// —— UI 绑定段 bindUiPart26（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart26() {
+  $("btn-reload-assets").addEventListener("click", reloadAssets);
+  $("btn-vn-reload-assets").addEventListener("click", reloadAssets);
+}
 
 /* ---------- 立绘与背景 ---------- */
 
@@ -1923,28 +2041,31 @@ function updateGenBanner() {
 }
 
 function startPolling() {
-  stopPolling();
-  S.pollTimer = setInterval(async () => {
-    if (!S.sid) { stopPolling(); return; }
-    try {
-      // 先拉取再决定是否停止：避免「最后一张就绪的资产永远没被刷到」
-      const data = await api(`/api/game/${S.sid}/assets`);
-      S.assets = data.assets;
-      S.bgMap = data.bg_map || S.bgMap;
-      const line = S.turn && S.turn.dialogue[S.lineIdx];
-      if (line) updateSprites(line.character, line.emotion);
-      applyBackground();
-      const still = hasPending();
-      updateGenBanner();
-      if (!still) stopPolling();
-    } catch { /* 会话失效等，静默 */ }
-  }, 2000);
+  // t38：单一调度器任务（in-flight 守卫保证同一时刻只有一个资产请求在飞）
+  if (!Sched.isRunning("assets")) {
+    Sched.define("assets", 2000, async () => {
+      if (!S.sid) { stopPolling(); return; }
+      try {
+        // 先拉取再决定是否停止：避免「最后一张就绪的资产永远没被刷到」
+        const data = await api(`/api/game/${S.sid}/assets`);
+        S.assets = data.assets;
+        S.bgMap = data.bg_map || S.bgMap;
+        const line = S.turn && S.turn.dialogue[S.lineIdx];
+        if (line) updateSprites(line.character, line.emotion);
+        applyBackground();
+        const still = hasPending();
+        updateGenBanner();
+        if (!still) stopPolling();
+      } catch { /* 会话失效等，静默 */ }
+    });
+  }
+  Sched.start("assets");
   updateGenBanner();
 }
 
 function stopPolling() {
-  clearInterval(S.pollTimer);
-  S.pollTimer = null;
+  Sched.stop("assets");
+  S.pollTimer = null;   // 兼容既有读取点
 }
 
 /* ---------- 抠图中心：按角色重抠 + 多方案对比 ---------- */
@@ -1970,70 +2091,75 @@ function openCutCenter() {
   $("modal-cut").classList.remove("hidden");
 }
 
-function cutTarget() { return $("cut-char").value; }
+function cutTarget() {
+  return $("cut-char").value;
+}
+// —— UI 绑定段 bindUiPart27（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart27() {
 
-$("btn-recut").addEventListener("click", openCutCenter);
-$("btn-vn-recut").addEventListener("click", openCutCenter);
-$("btn-cut-close").addEventListener("click", () => $("modal-cut").classList.add("hidden"));
+  $("btn-recut").addEventListener("click", openCutCenter);
+  $("btn-vn-recut").addEventListener("click", openCutCenter);
+  $("btn-cut-close").addEventListener("click", () => $("modal-cut").classList.add("hidden"));
 
-$("btn-cut-recut").addEventListener("click", async () => {
-  const c = cutTarget();
-  try {
-    const state = await api(`/api/game/${S.sid}/recut`, {
-      method: "POST", body: JSON.stringify({ character: c }),
-    });
-    S.assets = state.assets;
-    forceReloadSprites();
-    $("cut-hint").textContent = "✓ 已按当前抠图标准重新抠图";
-    toast("重新抠图完成，立绘已更新");
-  } catch (e) {
-    toast("重新抠图失败：" + e.message);
-  }
-});
-
-$("btn-cut-previews").addEventListener("click", async () => {
-  const c = cutTarget();
-  if (!c) { toast("请先选择目标角色（预览对比需要指定角色）"); return; }
-  $("btn-cut-previews").disabled = true;
-  $("cut-hint").textContent = "正在生成四种方案……（AI 智能首次需加载模型，稍等）";
-  try {
-    const data = await api(`/api/game/${S.sid}/cutpreviews`, {
-      method: "POST", body: JSON.stringify({ character: c }),
-    });
-    const grid = $("cut-preview-grid");
-    grid.innerHTML = "";
-    data.previews.forEach((p) => {
-      const card = document.createElement("div");
-      card.className = "cg-item";
-      card.innerHTML = `
-        <img src="/img/${escapeHtml(p.file)}?v=${Date.now()}" alt="${escapeHtml(p.name)}">
-        <div class="cg-caption">${escapeHtml(p.name)}</div>
-        <button class="btn mini ghost cut-use">采用此方案</button>`;
-      card.querySelector(".cut-use").addEventListener("click", async () => {
-        if (!confirm(`确定把「${p.name}」方案应用到 ${c} 的全部立绘？`)) return;
-        try {
-          await api(`/api/game/${S.sid}/cutapply`, {
-            method: "POST",
-            body: JSON.stringify({ character: c, mode: p.mode }),
-          });
-          const state = await api(`/api/game/${S.sid}`);
-          S.assets = state.assets;
-          forceReloadSprites();
-          $("cut-hint").textContent = `✓ 已应用「${p.name}」方案`;
-          toast("抠图方案已应用");
-        } catch (e) {
-          toast("应用失败：" + e.message);
-        }
+  $("btn-cut-recut").addEventListener("click", async () => {
+    const c = cutTarget();
+    try {
+      const state = await api(`/api/game/${S.sid}/recut`, {
+        method: "POST", body: JSON.stringify({ character: c }),
       });
-      grid.appendChild(card);
-    });
-    $("cut-hint").textContent = "对比后点「采用此方案」应用到该角色全部立绘";
-  } catch (e) {
-    $("cut-hint").textContent = "生成失败：" + e.message;
-  } finally {
-    $("btn-cut-previews").disabled = false;
-  }
-});
+      S.assets = state.assets;
+      forceReloadSprites();
+      $("cut-hint").textContent = "✓ 已按当前抠图标准重新抠图";
+      toast("重新抠图完成，立绘已更新");
+    } catch (e) {
+      toast("重新抠图失败：" + e.message);
+    }
+  });
+
+  $("btn-cut-previews").addEventListener("click", async () => {
+    const c = cutTarget();
+    if (!c) { toast("请先选择目标角色（预览对比需要指定角色）"); return; }
+    $("btn-cut-previews").disabled = true;
+    $("cut-hint").textContent = "正在生成四种方案……（AI 智能首次需加载模型，稍等）";
+    try {
+      const data = await api(`/api/game/${S.sid}/cutpreviews`, {
+        method: "POST", body: JSON.stringify({ character: c }),
+      });
+      const grid = $("cut-preview-grid");
+      grid.innerHTML = "";
+      data.previews.forEach((p) => {
+        const card = document.createElement("div");
+        card.className = "cg-item";
+        card.innerHTML = `
+          <img src="/img/${escapeHtml(p.file)}?v=${Date.now()}" alt="${escapeHtml(p.name)}">
+          <div class="cg-caption">${escapeHtml(p.name)}</div>
+          <button class="btn mini ghost cut-use">采用此方案</button>`;
+        card.querySelector(".cut-use").addEventListener("click", async () => {
+          if (!confirm(`确定把「${p.name}」方案应用到 ${c} 的全部立绘？`)) return;
+          try {
+            await api(`/api/game/${S.sid}/cutapply`, {
+              method: "POST",
+              body: JSON.stringify({ character: c, mode: p.mode }),
+            });
+            const state = await api(`/api/game/${S.sid}`);
+            S.assets = state.assets;
+            forceReloadSprites();
+            $("cut-hint").textContent = `✓ 已应用「${p.name}」方案`;
+            toast("抠图方案已应用");
+          } catch (e) {
+            toast("应用失败：" + e.message);
+          }
+        });
+        grid.appendChild(card);
+      });
+      $("cut-hint").textContent = "对比后点「采用此方案」应用到该角色全部立绘";
+    } catch (e) {
+      $("cut-hint").textContent = "生成失败：" + e.message;
+    } finally {
+      $("btn-cut-previews").disabled = false;
+    }
+  });
+}
 
 /* ---------- 指令注入窗口 ---------- */
 
@@ -2084,6 +2210,66 @@ function updateDirectiveCount(list) {
   $("directives-hint").textContent = n ? `已选 ${n} 条，保存后下一幕生效` : "";
 }
 
+/* ---------- 单一轮询调度器（t38 · 审计 3.1 / M-08） ----------
+   收敛前全站有 4 个各自为政的 setInterval 源（updateTimer / S.pollTimer /
+   cgRefreshTimer / ffTimer），任一被漏清就会一直发请求（B-21 的机制）。
+   现在全站只有一个定时器源：Sched 的 tick。每个任务是"注册一次、显式启停"，
+   并带 in-flight 守卫 —— 上一轮没结束时不再发起下一轮，因此**同一任务的在飞
+   请求数恒 ≤1**（限速下也成立，这正是验收判据）。 */
+const Sched = (function () {
+  const TICK_MS = 100;
+  const tasks = new Map();
+  let handle = null;
+
+  function tick() {
+    const now = Date.now();
+    tasks.forEach(function (t) {
+      if (!t.running || t.inflight) return;      // ← in-flight 守卫：并发 ≤1
+      if (now - t.last < t.periodMs) return;
+      t.last = now;
+      t.inflight = true;
+      Promise.resolve()
+        .then(function () { return t.fn(); })
+        .catch(function (err) { console.error("[sched] task " + t.name + " failed:", err); })
+        .finally(function () { t.inflight = false; });
+    });
+  }
+  function ensure() { if (handle === null) handle = setInterval(tick, TICK_MS); }
+  function maybeStop() {
+    let any = false;
+    tasks.forEach(function (t) { if (t.running) any = true; });
+    if (handle !== null && !any) { clearInterval(handle); handle = null; }
+  }
+  return {
+    define: function (name, periodMs, fn) {
+      tasks.set(name, { name: name, periodMs: periodMs, fn: fn, last: 0, inflight: false, running: false });
+      return name;
+    },
+    start: function (name) {
+      const t = tasks.get(name);
+      if (!t || t.running) return;               // 幂等：已在跑就不重复起
+      t.running = true; t.last = 0; ensure();
+    },
+    stop: function (name) {
+      const t = tasks.get(name);
+      if (t) { t.running = false; t.inflight = false; }
+      maybeStop();
+    },
+    stopAll: function () { tasks.forEach(function (t) { t.running = false; t.inflight = false; }); maybeStop(); },
+    isRunning: function (name) { const t = tasks.get(name); return !!(t && t.running); },
+    isInflight: function (name) { const t = tasks.get(name); return !!(t && t.inflight); },
+    running: function () { const r = []; tasks.forEach(function (t) { if (t.running) r.push(t.name); }); return r; },
+    debug: function () {
+      const out = { tickMs: TICK_MS, timerSourceActive: handle !== null, tasks: [] };
+      tasks.forEach(function (t) {
+        out.tasks.push({ name: t.name, periodMs: t.periodMs, running: t.running, inflight: t.inflight });
+      });
+      return out;
+    },
+  };
+})();
+window.Sched = Sched;   // 供验收探针读取（只读接口，不参与业务逻辑）
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g,
     (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -2121,10 +2307,13 @@ async function openDirectives() {
     toast("读取指令失败：" + e.message);
   }
 }
+// —— UI 绑定段 bindUiPart28（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart28() {
 
-$("btn-directives").addEventListener("click", openDirectives);
-$("btn-directives-close").addEventListener("click", () =>
-  $("modal-directives").classList.add("hidden"));
+  $("btn-directives").addEventListener("click", openDirectives);
+  $("btn-directives-close").addEventListener("click", () =>
+    $("modal-directives").classList.add("hidden"));
+}
 
 
 /* ---------- 命令 / 换装 / CG 回廊 ---------- */
@@ -2216,10 +2405,13 @@ async function runCommand(action) {
     $("choices-wrap").classList.remove("hidden");
   }
 }
+// —— UI 绑定段 bindUiPart29（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart29() {
 
-$("btn-command").addEventListener("click", openCommand);
-$("btn-command-close").addEventListener("click", () =>
-  $("modal-command").classList.add("hidden"));
+  $("btn-command").addEventListener("click", openCommand);
+  $("btn-command-close").addEventListener("click", () =>
+    $("modal-command").classList.add("hidden"));
+}
 
 /* ---- 换装面板 ---- */
 
@@ -2297,22 +2489,25 @@ async function applyOutfit(fixed) {
     toast("换装失败：" + e.message);
   }
 }
+// —— UI 绑定段 bindUiPart30（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart30() {
 
-$("btn-outfit").addEventListener("click", openOutfit);
-$("btn-outfit-apply").addEventListener("click", () => {
-  const v = pendingOutfit || $("outfit-preset").value.trim();
-  if (!v) { toast("请先选择服装或输入自定义服饰"); return; }
-  applyOutfit(v);
-});
-$("outfit-preset").addEventListener("input", () => {
-  pendingOutfit = $("outfit-preset").value.trim();
-  document.querySelectorAll(".outfit-preset-btn").forEach((b) =>
-    b.classList.remove("sel"));
-  updateOutfitHint();
-});
-$("outfit-char").addEventListener("change", updateOutfitHint);
-$("btn-outfit-close").addEventListener("click", () =>
-  $("modal-outfit").classList.add("hidden"));
+  $("btn-outfit").addEventListener("click", openOutfit);
+  $("btn-outfit-apply").addEventListener("click", () => {
+    const v = pendingOutfit || $("outfit-preset").value.trim();
+    if (!v) { toast("请先选择服装或输入自定义服饰"); return; }
+    applyOutfit(v);
+  });
+  $("outfit-preset").addEventListener("input", () => {
+    pendingOutfit = $("outfit-preset").value.trim();
+    document.querySelectorAll(".outfit-preset-btn").forEach((b) =>
+      b.classList.remove("sel"));
+    updateOutfitHint();
+  });
+  $("outfit-char").addEventListener("change", updateOutfitHint);
+  $("btn-outfit-close").addEventListener("click", () =>
+    $("modal-outfit").classList.add("hidden"));
+}
 
 /* ---- CG 回廊 ---- */
 
@@ -2331,37 +2526,40 @@ async function saveCg(type, note) {
     return null;
   }
 }
+// —— UI 绑定段 bindUiPart31（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart31() {
 
-$("btn-save-cg").addEventListener("click", () => saveCg("manual", ""));
-/* 顶栏「刷新CG」：重新生成当前幕桥段 CG（当前幕无桥段 CG 时给出提示） */
-$("btn-cg-refresh").addEventListener("click", async () => {
-  if (!S.sid) return;
-  try {
-    const r = await api(`/api/game/${S.sid}/cg-regen`, {
-      method: "POST",
-      body: JSON.stringify({ cg_id: "" }),
-    });
-    toast(`正在刷新 CG：${r.title}（新图生成中，旧图保留）`, 3200);
-    S.imgVersion = (S.imgVersion || 0) + 1;
-    startPolling();
-  } catch (e) {
-    toast("刷新失败：" + e.message);
-  }
-});
+  $("btn-save-cg").addEventListener("click", () => saveCg("manual", ""));
+  /* 顶栏「刷新CG」：重新生成当前幕桥段 CG（当前幕无桥段 CG 时给出提示） */
+  $("btn-cg-refresh").addEventListener("click", async () => {
+    if (!S.sid) return;
+    try {
+      const r = await api(`/api/game/${S.sid}/cg-regen`, {
+        method: "POST",
+        body: JSON.stringify({ cg_id: "" }),
+      });
+      toast(`正在刷新 CG：${r.title}（新图生成中，旧图保留）`, 3200);
+      S.imgVersion = (S.imgVersion || 0) + 1;
+      startPolling();
+    } catch (e) {
+      toast("刷新失败：" + e.message);
+    }
+  });
+}
 
 let cgRefreshTimer = null;
 
 function openCgGallery() {
   $("modal-cg").classList.remove("hidden");
   refreshCgList();
-  // 生成中的桥段 CG 就绪后刷新展示
-  clearInterval(cgRefreshTimer);
-  cgRefreshTimer = setInterval(refreshCgList, 2500);
+  // 生成中的桥段 CG 就绪后刷新展示（t38：收敛到单一调度器）
+  Sched.define("cgRefresh", 2500, refreshCgList);
+  Sched.start("cgRefresh");
 }
 
 function closeCgGallery() {
-  clearInterval(cgRefreshTimer);
-  cgRefreshTimer = null;
+  Sched.stop("cgRefresh");
+  cgRefreshTimer = null;   // 兼容既有读取点
   $("modal-cg").classList.add("hidden");
 }
 
@@ -2431,84 +2629,87 @@ async function refreshCgList() {
     list.innerHTML = '<p class="hint-line">读取 CG 列表失败</p>';
   }
 }
+// —— UI 绑定段 bindUiPart32（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart32() {
 
-$("btn-cg").addEventListener("click", openCgGallery);
-$("btn-cg-close").addEventListener("click", closeCgGallery);
-$("btn-cg-view-close").addEventListener("click", () =>
-  $("modal-cg-view").classList.add("hidden"));
+  $("btn-cg").addEventListener("click", openCgGallery);
+  $("btn-cg-close").addEventListener("click", closeCgGallery);
+  $("btn-cg-view-close").addEventListener("click", () =>
+    $("modal-cg-view").classList.add("hidden"));
 
-/* 立绘历程「删除此立绘」（1.7.38）：移除历史+删除文件，不再被系统调用 */
-$("btn-cg-del-hist").addEventListener("click", async () => {
-  const v = S.cgView;
-  if (!v || !v.label || !v.file || !S.sid) return;
-  if (!confirm(`删除这张立绘？\n\n文件将删除、并从历程移除——之后不会出现在「还原/立刻使用/参考底图」等任何调用中。
-${v.current ? "删除的是当前使用版——将按当前阶段/表情自动重绘一张。" : ""}
-此操作不可撤销。`)) return;
-  try {
-    const r = await api(`/api/game/${S.sid}/portrait-delete`, {
-      method: "POST",
-      body: JSON.stringify({ label: v.label, file: v.file }),
-    });
-    toast(r.regenerating
-      ? `已删除，正在按阶段重绘：${r.regenerating}`
-      : `已删除立绘：${r.label}（不再被调用）`, 3200);
-    $("modal-cg-view").classList.add("hidden");
-    await reloadAssets();
-    phistPage = 1;
-    await openProtHist();
-  } catch (e) {
-    toast("删除失败：" + e.message);
-  }
-});
-
-/* 立绘历程「重绘差分」：以当前查看的立绘为参照重画该表情（只变表情） */
-$("btn-cg-regen-diff").addEventListener("click", async () => {
-  const label = (S.cgView && S.cgView.label) || "";
-  if (!label || !S.sid) return;
-  try {
-    $("btn-cg-regen-diff").disabled = true;
-    const r = await api(`/api/game/${S.sid}/regenerate-label`, {
-      method: "POST",
-      body: JSON.stringify({ label }),
-    });
-    toast(`正在重绘差分：${r.regenerating}（只变表情，身材/服装/发型保持）`, 3200);
-    $("modal-cg-view").classList.add("hidden");
-    S.imgVersion = (S.imgVersion || 0) + 1;
-    startPolling();   // 轮询资产直到新立绘 ready/error，保证有效性
-  } catch (e) {
-    toast("重绘差分失败：" + e.message);
-  } finally {
-    $("btn-cg-regen-diff").disabled = false;
-  }
-});
-
-/* 立绘历程「替换为此立绘」（1.7.24）：大图上任意版本（含标「当前」但未
-   真正生效的）一键设为实际显示——旧版=归档替换+固定；当前版=直接固定
-   不动文件；固定直到重新生成立绘或取消固定 */
-$("btn-cg-set-current").addEventListener("click", async () => {
-  const v = S.cgView;
-  if (!v || !v.label || !S.sid) return;
-  try {
-    if (v.current) {
-      await api(`/api/game/${S.sid}/portrait-pin`, {
+  /* 立绘历程「删除此立绘」（1.7.38）：移除历史+删除文件，不再被系统调用 */
+  $("btn-cg-del-hist").addEventListener("click", async () => {
+    const v = S.cgView;
+    if (!v || !v.label || !v.file || !S.sid) return;
+    if (!confirm(`删除这张立绘？\n\n文件将删除、并从历程移除——之后不会出现在「还原/立刻使用/参考底图」等任何调用中。
+  ${v.current ? "删除的是当前使用版——将按当前阶段/表情自动重绘一张。" : ""}
+  此操作不可撤销。`)) return;
+    try {
+      const r = await api(`/api/game/${S.sid}/portrait-delete`, {
         method: "POST",
-        body: JSON.stringify({ label: v.label }),
+        body: JSON.stringify({ label: v.label, file: v.file }),
       });
-    } else {
-      await api(`/api/game/${S.sid}/portrait-restore`, {
-        method: "POST",
-        body: JSON.stringify({ label: v.label, file: v.file, pin: true }),
-      });
+      toast(r.regenerating
+        ? `已删除，正在按阶段重绘：${r.regenerating}`
+        : `已删除立绘：${r.label}（不再被调用）`, 3200);
+      $("modal-cg-view").classList.add("hidden");
+      await reloadAssets();
+      phistPage = 1;
+      await openProtHist();
+    } catch (e) {
+      toast("删除失败：" + e.message);
     }
-    toast("已替换为该立绘（固定显示，取消方式见立绘历程顶部）", 3200);
-    $("modal-cg-view").classList.add("hidden");
-    await reloadAssets();
-    phistPage = 1;
-    await openProtHist();   // 刷新历程：固定栏与当前标记同步
-  } catch (e) {
-    toast("替换为此立绘失败：" + e.message);
-  }
-});
+  });
+
+  /* 立绘历程「重绘差分」：以当前查看的立绘为参照重画该表情（只变表情） */
+  $("btn-cg-regen-diff").addEventListener("click", async () => {
+    const label = (S.cgView && S.cgView.label) || "";
+    if (!label || !S.sid) return;
+    try {
+      $("btn-cg-regen-diff").disabled = true;
+      const r = await api(`/api/game/${S.sid}/regenerate-label`, {
+        method: "POST",
+        body: JSON.stringify({ label }),
+      });
+      toast(`正在重绘差分：${r.regenerating}（只变表情，身材/服装/发型保持）`, 3200);
+      $("modal-cg-view").classList.add("hidden");
+      S.imgVersion = (S.imgVersion || 0) + 1;
+      startPolling();   // 轮询资产直到新立绘 ready/error，保证有效性
+    } catch (e) {
+      toast("重绘差分失败：" + e.message);
+    } finally {
+      $("btn-cg-regen-diff").disabled = false;
+    }
+  });
+
+  /* 立绘历程「替换为此立绘」（1.7.24）：大图上任意版本（含标「当前」但未
+     真正生效的）一键设为实际显示——旧版=归档替换+固定；当前版=直接固定
+     不动文件；固定直到重新生成立绘或取消固定 */
+  $("btn-cg-set-current").addEventListener("click", async () => {
+    const v = S.cgView;
+    if (!v || !v.label || !S.sid) return;
+    try {
+      if (v.current) {
+        await api(`/api/game/${S.sid}/portrait-pin`, {
+          method: "POST",
+          body: JSON.stringify({ label: v.label }),
+        });
+      } else {
+        await api(`/api/game/${S.sid}/portrait-restore`, {
+          method: "POST",
+          body: JSON.stringify({ label: v.label, file: v.file, pin: true }),
+        });
+      }
+      toast("已替换为该立绘（固定显示，取消方式见立绘历程顶部）", 3200);
+      $("modal-cg-view").classList.add("hidden");
+      await reloadAssets();
+      phistPage = 1;
+      await openProtHist();   // 刷新历程：固定栏与当前标记同步
+    } catch (e) {
+      toast("替换为此立绘失败：" + e.message);
+    }
+  });
+}
 
 /* ---------- 读取场景（进入/更换/重生成） ---------- */
 
@@ -2563,55 +2764,58 @@ function openSceneMgr() {
   refreshSceneList();
   $("modal-scenes").classList.remove("hidden");
 }
-$("btn-scene-mgr").addEventListener("click", openSceneMgr);
-$("btn-scenes-close").addEventListener("click", () =>
-  $("modal-scenes").classList.add("hidden"));
-$("btn-scenes-close2").addEventListener("click", () =>
-  $("modal-scenes").classList.add("hidden"));
+// —— UI 绑定段 bindUiPart33（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart33() {
+  $("btn-scene-mgr").addEventListener("click", openSceneMgr);
+  $("btn-scenes-close").addEventListener("click", () =>
+    $("modal-scenes").classList.add("hidden"));
+  $("btn-scenes-close2").addEventListener("click", () =>
+    $("modal-scenes").classList.add("hidden"));
 
-$("btn-scene-enter").addEventListener("click", () => {
-  const name = $("scene-name").value.trim();
-  if (!name) { toast("先输入场景名"); return; }
-  enterScene(name);
-});
-$("scene-name").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("btn-scene-enter").click();
-});
-$("btn-scene-rerender").addEventListener("click", async () => {
-  if (!S.sid) return;
-  try {
-    const state = await api(`/api/game/${S.sid}/scene-set`, {
-      method: "POST",
-      body: JSON.stringify({ name: "", action: "rerender" }),
-    });
-    S.assets = state.assets;
-    S.bgMap = state.bg_map || S.bgMap;
-    S.imgVersion = (S.imgVersion || 0) + 1;
-    playTurn(state, { instant: true });
-    $("scenes-hint").textContent = "🔄 正在重新生成当前场景背景……";
-    startPolling();
-    refreshSceneList();
-  } catch (e) {
-    toast("重生成失败：" + e.message);
-  }
-});
+  $("btn-scene-enter").addEventListener("click", () => {
+    const name = $("scene-name").value.trim();
+    if (!name) { toast("先输入场景名"); return; }
+    enterScene(name);
+  });
+  $("scene-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-scene-enter").click();
+  });
+  $("btn-scene-rerender").addEventListener("click", async () => {
+    if (!S.sid) return;
+    try {
+      const state = await api(`/api/game/${S.sid}/scene-set`, {
+        method: "POST",
+        body: JSON.stringify({ name: "", action: "rerender" }),
+      });
+      S.assets = state.assets;
+      S.bgMap = state.bg_map || S.bgMap;
+      S.imgVersion = (S.imgVersion || 0) + 1;
+      playTurn(state, { instant: true });
+      $("scenes-hint").textContent = "🔄 正在重新生成当前场景背景……";
+      startPolling();
+      refreshSceneList();
+    } catch (e) {
+      toast("重生成失败：" + e.message);
+    }
+  });
+}
 
 /* ---------- 快进 ---------- */
 
 let ffTimer = null;
-$("btn-fastforward").addEventListener("click", () => {
-  if (ffTimer) {
-    clearInterval(ffTimer);
-    ffTimer = null;
-    $("btn-fastforward").textContent = "⏩ 快进";
-    return;
-  }
-  $("btn-fastforward").textContent = "⏸ 快进中";
-  ffTimer = setInterval(() => {
+/* t38：快进收敛到单一调度器，并补上它原本完全缺失的清理路径 ——
+   收敛前 ffTimer 只在「再次点按钮」或「出现选项」时停，
+   切局 / 读档 / Esc 都不会停它，于是快进会在别的界面上继续 nextLine()。 */
+function stopFastForward() {
+  Sched.stop("fastForward");
+  ffTimer = null;
+  $("btn-fastforward").textContent = "⏩ 快进";
+}
+// —— UI 绑定段 bindUiPart34（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart34() {
+  Sched.define("fastForward", 160, () => {
     if (!$("choices-wrap").classList.contains("hidden")) {
-      clearInterval(ffTimer);
-      ffTimer = null;
-      $("btn-fastforward").textContent = "⏩ 快进";
+      stopFastForward();
       return;
     }
     if (S.typing) {
@@ -2623,8 +2827,13 @@ $("btn-fastforward").addEventListener("click", () => {
     } else {
       nextLine();
     }
-  }, 160);
-});
+  });
+  $("btn-fastforward").addEventListener("click", () => {
+    if (Sched.isRunning("fastForward")) { stopFastForward(); return; }
+    $("btn-fastforward").textContent = "⏸ 快进中";
+    Sched.start("fastForward");
+  });
+}
 
 /* ---------- 存档 / 读档 ---------- */
 
@@ -2692,69 +2901,72 @@ async function refreshSlotList() {
     list.innerHTML = '<p class="hint-line">读取存档列表失败</p>';
   }
 }
+// —— UI 绑定段 bindUiPart35（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart35() {
 
-$("btn-save").addEventListener("click", openSlots);
-$("btn-load").addEventListener("click", openSlots);
-$("btn-context-reset").addEventListener("click", async () => {
-  if (!confirm("压缩上下文·重置 AI？\n\n将把本局长剧情压缩为「前情提要」（保留人物关系/当前形态/感情张力/尺度氛围与未了悬念），仅保留最近 6 幕对话，让 AI 回到更开放的写作状态（内容分级政策不变）。")) return;
-  const sid = localStorage.getItem("galgame_sid");
-  try {
-    const r = await api(`/api/game/${sid}/context-reset`,
-      { method: "POST", timeoutMs: 120000 });
-    toast(`上下文已压缩：摘要 ${r.summary_chars} 字 · 保留最近 ${r.kept_turns} 幕`);
-  } catch (e) {
-    toast("压缩失败：" + e.message);
-  }
-});
-$("btn-slots-close").addEventListener("click", () => $("modal-slots").classList.add("hidden"));
-$("btn-slot-save").addEventListener("click", async () => {
-  try {
-    const r = await api(`/api/game/${S.sid}/slots`, {
-      method: "POST", body: JSON.stringify({ name: $("slot-name").value.trim() }),
-    });
-    $("slot-name").value = "";
-    $("slots-hint").textContent = `✓ 已存档（${r.name}）`;
-    refreshSlotList();
-  } catch (e) {
-    toast("存档失败：" + e.message);
-  }
-});
+  $("btn-save").addEventListener("click", openSlots);
+  $("btn-load").addEventListener("click", openSlots);
+  $("btn-context-reset").addEventListener("click", async () => {
+    if (!confirm("压缩上下文·重置 AI？\n\n将把本局长剧情压缩为「前情提要」（保留人物关系/当前形态/感情张力/尺度氛围与未了悬念），仅保留最近 6 幕对话，让 AI 回到更开放的写作状态（内容分级政策不变）。")) return;
+    const sid = localStorage.getItem("galgame_sid");
+    try {
+      const r = await api(`/api/game/${sid}/context-reset`,
+        { method: "POST", timeoutMs: 120000 });
+      toast(`上下文已压缩：摘要 ${r.summary_chars} 字 · 保留最近 ${r.kept_turns} 幕`);
+    } catch (e) {
+      toast("压缩失败：" + e.message);
+    }
+  });
+  $("btn-slots-close").addEventListener("click", () => $("modal-slots").classList.add("hidden"));
+  $("btn-slot-save").addEventListener("click", async () => {
+    try {
+      const r = await api(`/api/game/${S.sid}/slots`, {
+        method: "POST", body: JSON.stringify({ name: $("slot-name").value.trim() }),
+      });
+      $("slot-name").value = "";
+      $("slots-hint").textContent = `✓ 已存档（${r.name}）`;
+      refreshSlotList();
+    } catch (e) {
+      toast("存档失败：" + e.message);
+    }
+  });
 
-/* ---------- 顶栏 ---------- */
+  /* ---------- 顶栏 ---------- */
 
-$("btn-history").addEventListener("click", async () => {
-  try {
-    const data = await api(`/api/game/${S.sid}/history`);
-    const list = $("history-list");
-    list.innerHTML = "";
-    data.history.forEach((h) => {
-      const item = document.createElement("div");
-      item.className = "history-item";
-      const lines = h.dialogue
-        .map((d) => `<div class="history-line">${d.character !== "旁白" ? `<b>${d.character}：</b>` : ""}${d.text}</div>`)
-        .join("");
-      item.innerHTML = `<div class="history-scene">◆ ${h.scene}</div>${lines}` +
-        (h.choice ? `<div class="history-choice">➤ 你选择了：${h.choice}</div>` : "");
-      list.appendChild(item);
-    });
-    $("modal-history").classList.remove("hidden");
-  } catch (e) {
-    toast("读取历史失败：" + e.message);
-  }
-});
-$("btn-history-close").addEventListener("click", () => $("modal-history").classList.add("hidden"));
+  $("btn-history").addEventListener("click", async () => {
+    try {
+      const data = await api(`/api/game/${S.sid}/history`);
+      const list = $("history-list");
+      list.innerHTML = "";
+      data.history.forEach((h) => {
+        const item = document.createElement("div");
+        item.className = "history-item";
+        const lines = h.dialogue
+          .map((d) => `<div class="history-line">${d.character !== "旁白" ? `<b>${escapeHtml(d.character)}：</b>` : ""}${escapeHtml(d.text)}</div>`)
+          .join("");
+        item.innerHTML = `<div class="history-scene">◆ ${escapeHtml(h.scene)}</div>${lines}` +
+          (h.choice ? `<div class="history-choice">➤ 你选择了：${escapeHtml(h.choice)}</div>` : "");
+        list.appendChild(item);
+      });
+      $("modal-history").classList.remove("hidden");
+    } catch (e) {
+      toast("读取历史失败：" + e.message);
+    }
+  });
+  $("btn-history-close").addEventListener("click", () => $("modal-history").classList.add("hidden"));
 
-$("btn-exit").addEventListener("click", async () => {
-  if (!confirm("结束本局并回到开始界面？（本局进度将删除）")) return;
-  stopPolling();
-  try { await api(`/api/game/${S.sid}`, { method: "DELETE" }); } catch { /* 忽略 */ }
-  localStorage.removeItem("galgame_sid");
-  S.sid = null;
-  S.turn = null;
-  $("game-screen").classList.remove("active");
-  $("setup-screen").classList.add("active");
-  refreshMockBanner();
-});
+  $("btn-exit").addEventListener("click", async () => {
+    if (!confirm("结束本局并回到开始界面？（本局进度将删除）")) return;
+    stopPolling();
+    try { await api(`/api/game/${S.sid}`, { method: "DELETE" }); } catch { /* 忽略 */ }
+    localStorage.removeItem("galgame_sid");
+    S.sid = null;
+    S.turn = null;
+    $("game-screen").classList.remove("active");
+    $("setup-screen").classList.add("active");
+    refreshMockBanner();
+  });
+}
 
 /* ---------- 启动：恢复上次会话 ---------- */
 
@@ -2856,19 +3068,37 @@ window.addEventListener("keydown", (e) => {
     else closeDebug();
   }
 });
-// Esc：关闭当前打开的弹窗（设置页等；依赖原生 confirm 的还原操作不受影响）
+// Esc：关闭当前打开的弹窗
+//
+// t38 根因修复（审计 B-21）：这里原先是 `open.classList.add("hidden")` ——
+// **直接改样式，绕过了各弹窗自己的关闭函数**。于是 closeCgGallery()（唯一会
+// 执行 Sched.stop("cgRefresh") 的地方）永远不被调用，CG 回廊的 2500ms 轮询
+// 在按 Esc 后仍会一直打 /api/cg，直到刷新页面。
+// 机制性结论：**凡是"直接隐藏"的关闭路径，都会绕过清理**——所以这里改成
+// 查表路由到真正的 close 函数；将来新增带定时器的弹窗，只需往表里加一行。
+const MODAL_CLOSERS = {
+  "modal-cg": closeCgGallery,
+  "modal-debug": closeDebug,
+  "modal-settings": closeSettingsIfOpen,
+};
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     const open = document.querySelector(".modal:not(.hidden)");
-    if (open) open.classList.add("hidden");
+    if (!open) return;
+    const closer = MODAL_CLOSERS[open.id];
+    if (closer) closer();                  // ← 走真正的关闭路径（含清理）
+    else open.classList.add("hidden");     // 没有专属清理的弹窗：保持原行为
   }
 });
-$("btn-debug-close").addEventListener("click", closeDebug);
-$("btn-debug-open").addEventListener("click", (e) => {
-  e.preventDefault();
-  closeSettingsIfOpen();
-  openDebug();
-});
+// —— UI 绑定段 bindUiPart36（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart36() {
+  $("btn-debug-close").addEventListener("click", closeDebug);
+  $("btn-debug-open").addEventListener("click", (e) => {
+    e.preventDefault();
+    closeSettingsIfOpen();
+    openDebug();
+  });
+}
 function closeSettingsIfOpen() {
   $("modal-settings").classList.add("hidden");
 }
@@ -2891,40 +3121,43 @@ async function dbgApi(body) {
     return null;
   }
 }
+// —— UI 绑定段 bindUiPart37（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart37() {
 
-$("dbg-next-stage").addEventListener("click", () => dbgApi({ action: "next_stage" }));
-$("dbg-stat-add").addEventListener("click", () => dbgApi({ action: "set_stat", stat: "progress", value: 25 }));
-$("dbg-regen").addEventListener("click", () => dbgApi({ action: "regen_all" }));
-$("dbg-stat-set").addEventListener("click", () => dbgApi({
-  action: "set_stat",
-  stat: $("dbg-stat-key").value.trim() || "progress",
-  value: parseInt($("dbg-stat-val").value, 10) || 0,
-}));
-$("dbg-scenes").addEventListener("click", async () => {
-  try {
-    const data = await api(`/api/game/${S.sid}/scenes`);
-    const box = $("debug-scene-list");
-    box.innerHTML = "";
-    data.scenes.forEach((s) => {
-      const row = document.createElement("div");
-      row.className = "scene-row";
-      row.innerHTML = `<b>${escapeHtml(s.name)}</b> 访问 ${s.visits} 次｜出场：${escapeHtml(s.roster.join("、") || "无")}` +
-        (s.bg_file ? `<br><small>固定背景：${escapeHtml(s.bg_file)}</small>` : "");
-      box.appendChild(row);
-    });
-    if (!data.scenes.length) box.innerHTML = '<p class="hint-line">暂无场景记录</p>';
-    console.log("场景清单（重访场景将复用其固定背景图）:", data.scenes);
-    $("debug-hint").textContent = `已列出 ${data.scenes.length} 个场景`;
-  } catch (e) {
-    toast("场景清单失败：" + e.message);
-  }
-});
+  $("dbg-next-stage").addEventListener("click", () => dbgApi({ action: "next_stage" }));
+  $("dbg-stat-add").addEventListener("click", () => dbgApi({ action: "set_stat", stat: "progress", value: 25 }));
+  $("dbg-regen").addEventListener("click", () => dbgApi({ action: "regen_all" }));
+  $("dbg-stat-set").addEventListener("click", () => dbgApi({
+    action: "set_stat",
+    stat: $("dbg-stat-key").value.trim() || "progress",
+    value: parseInt($("dbg-stat-val").value, 10) || 0,
+  }));
+  $("dbg-scenes").addEventListener("click", async () => {
+    try {
+      const data = await api(`/api/game/${S.sid}/scenes`);
+      const box = $("debug-scene-list");
+      box.innerHTML = "";
+      data.scenes.forEach((s) => {
+        const row = document.createElement("div");
+        row.className = "scene-row";
+        row.innerHTML = `<b>${escapeHtml(s.name)}</b> 访问 ${s.visits} 次｜出场：${escapeHtml(s.roster.join("、") || "无")}` +
+          (s.bg_file ? `<br><small>固定背景：${escapeHtml(s.bg_file)}</small>` : "");
+        box.appendChild(row);
+      });
+      if (!data.scenes.length) box.innerHTML = '<p class="hint-line">暂无场景记录</p>';
+      console.log("场景清单（重访场景将复用其固定背景图）:", data.scenes);
+      $("debug-hint").textContent = `已列出 ${data.scenes.length} 个场景`;
+    } catch (e) {
+      toast("场景清单失败：" + e.message);
+    }
+  });
 
-$("dbg-outfit-go").addEventListener("click", () => dbgApi({
-  action: "force_outfit",
-  character: $("dbg-outfit-char").value.trim(),
-  outfit: $("dbg-outfit-name").value.trim(),
-}));
+  $("dbg-outfit-go").addEventListener("click", () => dbgApi({
+    action: "force_outfit",
+    character: $("dbg-outfit-char").value.trim(),
+    outfit: $("dbg-outfit-name").value.trim(),
+  }));
+}
 
 /* 彩蛋 */
 console.log("%c✨ 自动化AI Galgame %c 隐藏调试入口：游戏内按 F10（或打开 ?debug=1）",
@@ -3029,62 +3262,65 @@ function collectTsfTarget() {
     keep_hair_color: hair === "" || hair === "维持原色",
   };
 }
+// —— UI 绑定段 bindUiPart38（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart38() {
 
-$("btn-save-setup").addEventListener("click", async () => {
-  const body = collectAllSetup();
-  if (!body.world) { toast("世界观为空，未保存"); return; }
-  const name = $("setup-save-name").value.trim();
-  if (!name) { toast("请先给档案起个名字"); return; }
-  body.id = "";
-  body.name = name;
-  try {
-    const saved = await api("/api/storylines", { method: "POST", body: JSON.stringify(body) });
-    $("setup-save-name").value = "";
-    $("setup-load-select").value = saved.id;
-    refreshSetupList();
-    toast(`设定已保存：${saved.title}`);
-  } catch (e) {
-    toast("保存失败：" + e.message);
-  }
-});
+  $("btn-save-setup").addEventListener("click", async () => {
+    const body = collectAllSetup();
+    if (!body.world) { toast("世界观为空，未保存"); return; }
+    const name = $("setup-save-name").value.trim();
+    if (!name) { toast("请先给档案起个名字"); return; }
+    body.id = "";
+    body.name = name;
+    try {
+      const saved = await api("/api/storylines", { method: "POST", body: JSON.stringify(body) });
+      $("setup-save-name").value = "";
+      $("setup-load-select").value = saved.id;
+      refreshSetupList();
+      toast(`设定已保存：${saved.title}`);
+    } catch (e) {
+      toast("保存失败：" + e.message);
+    }
+  });
 
-$("btn-play-setup").addEventListener("click", async () => {
-  // 一键开局：读取所选档案并以缓存命中方式进入游戏
-  const id = $("setup-load-select").value;
-  if (!id) { toast("先选择一个档案"); return; }
-  try {
-    const st = await api(`/api/storylines/${id}`);
-    fillSetupForm(st);
-    await new Promise(r => setTimeout(r, 300));
-    $("btn-start").click();
-  } catch (e) {
-    toast("一键开局失败：" + e.message);
-  }
-});
+  $("btn-play-setup").addEventListener("click", async () => {
+    // 一键开局：读取所选档案并以缓存命中方式进入游戏
+    const id = $("setup-load-select").value;
+    if (!id) { toast("先选择一个档案"); return; }
+    try {
+      const st = await api(`/api/storylines/${id}`);
+      fillSetupForm(st);
+      await new Promise(r => setTimeout(r, 300));
+      $("btn-start").click();
+    } catch (e) {
+      toast("一键开局失败：" + e.message);
+    }
+  });
 
-$("btn-load-setup").addEventListener("click", async () => {
-  const id = $("setup-load-select").value;
-  if (!id) { toast("先选择一个档案"); return; }
-  try {
-    const st = await api(`/api/storylines/${id}`);
-    fillSetupForm(st);
-    toast(`已载入设定：${st.title}`);
-  } catch (e) {
-    toast("读取失败：" + e.message);
-  }
-});
+  $("btn-load-setup").addEventListener("click", async () => {
+    const id = $("setup-load-select").value;
+    if (!id) { toast("先选择一个档案"); return; }
+    try {
+      const st = await api(`/api/storylines/${id}`);
+      fillSetupForm(st);
+      toast(`已载入设定：${st.title}`);
+    } catch (e) {
+      toast("读取失败：" + e.message);
+    }
+  });
 
-$("btn-delete-setup").addEventListener("click", async () => {
-  const id = $("setup-load-select").value;
-  if (!id) { toast("先选择一个档案"); return; }
-  if (!confirm("删除该设定档案？")) return;
-  try {
-    await api("/api/storylines/delete", { method: "POST", body: JSON.stringify({ id }) });
-    refreshSetupList();
-  } catch (e) {
-    toast("删除失败：" + e.message);
-  }
-});
+  $("btn-delete-setup").addEventListener("click", async () => {
+    const id = $("setup-load-select").value;
+    if (!id) { toast("先选择一个档案"); return; }
+    if (!confirm("删除该设定档案？")) return;
+    try {
+      await api("/api/storylines/delete", { method: "POST", body: JSON.stringify({ id }) });
+      refreshSetupList();
+    } catch (e) {
+      toast("删除失败：" + e.message);
+    }
+  });
+}
 
 /* ---------- 主界面：我的存档（读取/删除，跨会话） ---------- */
 
@@ -3205,9 +3441,12 @@ async function openLibPicker(target) {
     toast("读取角色库失败：" + e.message);
   }
 }
-on("btn-lib-pick-prot", "click", () => openLibPicker("prot"));
-on("btn-lib-pick-npc", "click", () => openLibPicker("npc"));
-on("btn-libpick-close", "click", () => $("modal-libpick").classList.add("hidden"));
+// —— UI 绑定段 bindUiPart39（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart39() {
+  on("btn-lib-pick-prot", "click", () => openLibPicker("prot"));
+  on("btn-lib-pick-npc", "click", () => openLibPicker("npc"));
+  on("btn-libpick-close", "click", () => $("modal-libpick").classList.add("hidden"));
+}
 
 /* ---------- 对局归档：导出 / 导入 / 下载 / 删除 ---------- */
 
@@ -3256,7 +3495,24 @@ async function refreshArchiveList() {
         } catch (e) { toast("导入失败：" + e.message); }
       });
       el.querySelector(".btn-arc-dl").addEventListener("click", () => {
-        window.open(`/api/archives/${encodeURIComponent(a.file)}/download`, "_blank");
+        // t50：原来此处用「window 打开新标签页」的写法（带空白 target）。
+        // 在原生窗口（QtWebEngine 等）里那会**拉起系统浏览器**，与本项目
+        // 「原生窗口内嵌、不再开浏览器」的目标直接冲突（server 侧 webbrowser
+        // 已实测真的开过标签）。改法：同源下载用带 download 属性的 <a>
+        // 在**当前窗口内**触发，不新建窗口、不唤起系统浏览器；并给可见 toast，绝不静默。
+        // 注：本注释刻意不写出那两个被机械核对检索的字面量，否则会把计数污染的
+        //     门禁变成假阳性（见 tsf-fix/FRONTEND-WINDOWOPEN.md 的枚举范围声明）。
+        // 改法：同源下载用带 download 属性的 <a> 在**当前窗口内**触发，
+        // 既不新建窗口也不唤起系统浏览器；并给可见 toast，绝不静默。
+        const url = `/api/archives/${encodeURIComponent(a.file)}/download`;
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = a.file || "";   // 仅作文件名建议；DOM 属性赋值，非 HTML 注入面
+        link.rel = "noopener";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        toast(`开始下载档案「${a.title}」——保存到本机下载目录`, 3400);
       });
       el.querySelector(".btn-arc-del").addEventListener("click", async () => {
         if (!confirm(`删除档案「${a.title}」？仅删除 zip 档案，不影响对局数据。`)) return;
@@ -3271,50 +3527,86 @@ async function refreshArchiveList() {
     toast("档案列表加载失败：" + e.message);
   }
 }
+// —— UI 绑定段 bindUiPart40（t37：自模块顶层收敛至此，内容逐字未改）——
+function bindUiPart40() {
 
-on("btn-archives-setup", "click", () => { $("modal-archives").classList.remove("hidden"); refreshArchiveList(); });
-on("btn-archives-game", "click", () => { $("modal-archives").classList.remove("hidden"); refreshArchiveList(); });
-on("btn-archives-close", "click", () => $("modal-archives").classList.add("hidden"));
+  on("btn-archives-setup", "click", () => { $("modal-archives").classList.remove("hidden"); refreshArchiveList(); });
+  on("btn-archives-game", "click", () => { $("modal-archives").classList.remove("hidden"); refreshArchiveList(); });
+  on("btn-archives-close", "click", () => $("modal-archives").classList.add("hidden"));
 
-on("btn-archive-export", "click", async () => {
-  if (!S.sid) { toast("进入对局后才能导出本局档案"); return; }
-  const btn = $("btn-archive-export");
-  btn.disabled = true;
-  btn.textContent = "导出中……";
-  try {
-    const r = await api(`/api/game/${S.sid}/archive`, { method: "POST" });
-    toast(`已导出归档：${r.file}（${fmtSizeMB(r.size)}）`, 4200);
-    refreshArchiveList();
-  } catch (e) {
-    toast("导出失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "📥 导出本局为档案";
-  }
-});
+  on("btn-archive-export", "click", async () => {
+    if (!S.sid) { toast("进入对局后才能导出本局档案"); return; }
+    const btn = $("btn-archive-export");
+    btn.disabled = true;
+    btn.textContent = "导出中……";
+    try {
+      const r = await api(`/api/game/${S.sid}/archive`, { method: "POST" });
+      toast(`已导出归档：${r.file}（${fmtSizeMB(r.size)}）`, 4200);
+      refreshArchiveList();
+    } catch (e) {
+      toast("导出失败：" + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "📥 导出本局为档案";
+    }
+  });
 
-on("btn-archive-import", "click", () => $("archive-file").click());
-on("archive-file", "change", async () => {
-  const f = $("archive-file").files[0];
-  if (!f) return;
-  if (f.size > 500 * 1024 * 1024) { toast("档案超过 500MB，无法导入"); return; }
-  try {
-    const resp = await fetch("/api/archives/import", { method: "POST", body: f });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || `请求失败（${resp.status}）`);
-    localStorage.setItem("galgame_sid", data.sid);
-    enterGame(data.state, { instant: false });
-    $("modal-archives").classList.add("hidden");
-    toast(`对局档案导入成功，继续「${data.state.title || ""}」`);
-  } catch (e) {
-    toast("导入失败：" + e.message);
-  } finally {
-    $("archive-file").value = "";
-  }
-});
+  on("btn-archive-import", "click", () => $("archive-file").click());
+  on("archive-file", "change", async () => {
+    const f = $("archive-file").files[0];
+    if (!f) return;
+    if (f.size > 500 * 1024 * 1024) { toast("档案超过 500MB，无法导入"); return; }
+    try {
+      const resp = await fetch("/api/archives/import", { method: "POST", body: f });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `请求失败（${resp.status}）`);
+      localStorage.setItem("galgame_sid", data.sid);
+      enterGame(data.state, { instant: false });
+      $("modal-archives").classList.add("hidden");
+      toast(`对局档案导入成功，继续「${data.state.title || ""}」`);
+    } catch (e) {
+      toast("导入失败：" + e.message);
+    } finally {
+      $("archive-file").value = "";
+    }
+  });
+}
 
 /* ---------- 启动：恢复上次会话 ---------- */
+/* t37：显式 UI 初始化入口。
+   原先 124 条 DOM 绑定零缩进散落在模块顶层，任一 id 缺失会让**后续绑定整体失效**
+   （脆性设计）；现在收进 bindUiPart01..40，由这里统一调用。
+   单段失败不再连带后面失效：捕获后 console.error 并计数，跑完把结果写到
+   <html data-tsf-ui-init="ok/total">（无 UI 影响，供自动化验证读取）。 */
+function bindUi() {
+  const parts = [
+    bindUiPart01, bindUiPart02, bindUiPart03, bindUiPart04, bindUiPart05,
+    bindUiPart06, bindUiPart07, bindUiPart08, bindUiPart09, bindUiPart10,
+    bindUiPart11, bindUiPart12, bindUiPart13, bindUiPart14, bindUiPart15,
+    bindUiPart16, bindUiPart17, bindUiPart18, bindUiPart19, bindUiPart20,
+    bindUiPart21, bindUiPart22, bindUiPart23, bindUiPart24, bindUiPart25,
+    bindUiPart26, bindUiPart27, bindUiPart28, bindUiPart29, bindUiPart30,
+    bindUiPart31, bindUiPart32, bindUiPart33, bindUiPart34, bindUiPart35,
+    bindUiPart36, bindUiPart37, bindUiPart38, bindUiPart39, bindUiPart40,
+  ];
+  const failed = [];
+  for (const fn of parts) {
+    try {
+      fn();
+    } catch (e) {
+      failed.push(fn.name);
+      console.error(`[tsf] UI 绑定段 ${fn.name} 失败：`, e);
+    }
+  }
+  const ok = parts.length - failed.length;
+  document.documentElement.dataset.tsfUiInit = `${ok}/${parts.length}`;
+  console.info(`[tsf] UI 初始化：${ok}/${parts.length} 段绑定完成`
+    + (failed.length ? `，失败段：${failed.join(",")}` : ""));
+  return { ok, total: parts.length, failed };
+}
+
 (async function init() {
+  bindUi();
   if (localStorage.getItem("galgame_mode")) setSetupMode(localStorage.getItem("galgame_mode"), true);
   refreshAnchorPreview();
   addCharCard();

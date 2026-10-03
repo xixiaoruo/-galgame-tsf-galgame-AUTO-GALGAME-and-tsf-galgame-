@@ -23,6 +23,15 @@ EXAMPLE_PATH = (BUNDLE if BUNDLE else ROOT) / "config.example.json"
 # 档案/存档/缓存永远不会因为移动、替换、打包 exe 而丢失；
 # D 盘不存在时自动回退到用户数据目录，旧位置的数据启动时自动迁移。
 def _default_data_root() -> Path:
+    # `TSF_DATA_DIR` 覆盖（可选）：窗口化宿主 / 隔离验收要在**不碰玩家真实数据**
+    # 的前提下起一份自己的数据根（沙箱化的子进程也只能写工作区内的路径）。
+    # 未设置时行为与从前逐字一致。
+    _override = os.environ.get("TSF_DATA_DIR", "").strip()
+    if _override:
+        try:
+            return Path(_override)
+        except (OSError, ValueError):
+            pass
     try:
         if os.path.isdir("D:/") or Path("D:/TSF_Galgame_Data").is_dir():
             return Path("D:/TSF_Galgame_Data")

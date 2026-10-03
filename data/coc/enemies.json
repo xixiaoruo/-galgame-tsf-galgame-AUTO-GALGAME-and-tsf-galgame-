@@ -1,0 +1,21 @@
+{
+  "_source": "MECHANICS.md §5.2 战斗动作全表（Kick 基础伤害 2、基础命中 80%）；§5.6 设计建议“不要把每个杂兵都设计 8 步编排，普通遭遇应能在 1–2 回合内解决”；§9.4 坑 2（真实差评：战斗拖沓）。",
+  "_note": "MVP 敌人表。min_turns_to_kill 是**校验字段**：非 Boss 必须 ≤2（COC-DESIGN §2.6 硬性平衡约束，验收 V-15 第 ③ 条在 promp 接线任务里机读；本任务的数据已满足）。",
+  "enemies": [
+    { "id": "Thin Man", "name": "瘦长男人", "hp": 8, "power": 3, "damage": 2, "boss": true,
+      "traits": [], "min_turns_to_kill": 4, "drops": [],
+      "_unverified": true, "_source": "本项目设计（数值骨架）：HP/伤害为探针可比对的占位值；Boss 身份来自 mysteries.json 的 boss 字段（§5.5 Boss 战不可逃）" },
+    { "id": "Doll Nurse", "name": "人偶护士", "hp": 6, "power": 4, "damage": 2, "boss": true,
+      "traits": [], "min_turns_to_kill": 3, "drops": [],
+      "_unverified": true, "_source": "MECHANICS.md §5.1 提及 Doll Nurse 有遭遇专属动作；数值为本项目设计骨架" },
+    { "id": "Roommate", "name": "同住者", "hp": 2, "power": 1, "damage": 1, "boss": false,
+      "traits": ["incorporeal"], "min_turns_to_kill": 0, "drops": [],
+      "_unverified": true, "_source": "MECHANICS.md §5.4 幽灵名单含 Roommate；incorporeal 幽灵免疫普通攻击，须用 4 个 Spiritual 动作/法术/投掷物" },
+    { "id": "Jane Doe", "name": "无名女尸", "hp": 2, "power": 1, "damage": 1, "boss": false,
+      "traits": ["incorporeal"], "min_turns_to_kill": 0, "drops": ["Bandage"],
+      "_unverified": true, "_source": "MECHANICS.md §5.4 幽灵名单含 Jane Doe" },
+    { "id": "Toilet Ghost", "name": "厕所里的东西", "hp": 2, "power": 1, "damage": 1, "boss": false,
+      "traits": ["incorporeal"], "min_turns_to_kill": 0, "drops": ["OccultDiary"],
+      "_unverified": true, "_source": "MECHANICS.md §5.4 幽灵名单含 Toilet Ghost" }
+  ]
+}

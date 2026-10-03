@@ -18,6 +18,21 @@ _ROOT = os.path.dirname(os.path.dirname(_HERE))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# ── 结构性隔离闸门（fail-fast）──────────────────────────────────────────────
+# 为什么放在这里而不是"写文档提醒"：本会话反复出现"要求成员隔离、成员也照做了，
+# 但某条路径仍写进真实数据目录"——包括一次孤儿回归运行器持续往用户目录写了 13 个档。
+# 靠人记得已被证明失效，所以改成"忘记设置 TSF_DATA_DIR 就根本跑不起来"。
+# 注意：这里只**拒绝未设**，不校验指向哪里（校验指向会误伤合法的绝对路径样本）。
+if not os.environ.get("TSF_DATA_DIR"):
+    sys.stderr.write(
+        "\n[隔离闸门] 拒绝运行：未设置 TSF_DATA_DIR。\n"
+        "  本测试套件会写存档；若 DATA_DIR 落在真实数据目录，就会污染玩家数据。\n"
+        "  请先设置，例如：\n"
+        '    set TSF_DATA_DIR=D:\\dsh创造\\coc-test-iso        (cmd)\n'
+        '    $env:TSF_DATA_DIR="D:\\dsh创造\\coc-test-iso"    (powershell)\n'
+        "  然后重跑。\n\n")
+    sys.exit(3)
+
 MODULES = [
     "test_tuning_provenance",
     "test_dice",

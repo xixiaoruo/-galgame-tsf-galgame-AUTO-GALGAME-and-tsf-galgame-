@@ -108,11 +108,23 @@ class LLMError(Exception):
 
 
 def strip_json_block(text: str) -> str:
-    """剥离可能的 markdown 代码块标记与前后杂文字。"""
+    """剥离可能的 markdown 代码块标记与前后杂文字。
+
+    ⚠️ 围栏不能被**无条件**用来替换原文：反引号可以出现在 JSON 的**字符串值内部**，
+    例如 {"scene": "他说 ```你好```"} —— 此时围栏正则会匹配到「值里的首尾反引号」，
+    把中间挖掉，剩下的文本必然解析失败（实测 JSONDecodeError）。
+    所以只在「围栏内容本身能解析」时才采用它；否则落到下面的花括号截取。
+    """
     text = text.strip()
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if m:
-        text = m.group(1).strip()
+        candidate = m.group(1).strip()
+        try:
+            json.loads(candidate)
+            text = candidate
+        except json.JSONDecodeError:
+            # 围栏内容不是有效 JSON（例如字符串值里含反引号）→ 保留原文，走花括号截取
+            pass
     # 截取第一个 { 到最后一个 } 之间，容忍模型前后加话
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:

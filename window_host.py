@@ -38,6 +38,23 @@ import urllib.request
 # **之前**设好，免得打包后还要求玩家自己配环境变量。
 os.environ.setdefault("PYTHONNET_RUNTIME", "coreclr")
 
+# QtWebEngine 的 renderer 子进程：默认（Chromium 沙箱开启）在本机**起不来**。
+# 实测证据（第 16 轮，8765 空闲时期的首选路径启动）：
+#   [WINDOW] QtWebEngine 窗口已显示（启动页）        ← 窗口创建成功
+#   [WINDOW] 窗口导航失败：Main window failed to start  ← 页面渲染失败
+#   判定：QtWebEngineProcess 曾出现 = False            ← renderer 从未生成
+#   同一次：QTWEBENGINE_CHROMIUM_FLAGS = None
+# 对照：t45/t52 的测试之所以"窗口已显示"为真，是因为**外部 shell 注入了**
+#   QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox。本行之前刻意不设（t49 契约 ⑤），
+#   结果是玩家双击看到**窗口出现但白屏**。
+#
+# ⚠️ 安全代价（必须显式可见，不得静默）：`--no-sandbox` 降低 Chromium 的进程隔离等级。
+#   本页内容来自本机回环服务（127.0.0.1），不加载任意外部网页，风险面比公开浏览器小得多；
+#   但这是一处**已知的安全降级**，故：
+#     · 用 `setdefault` ⇒ 玩家/运维显式设过就不覆盖（保留覆盖能力）；
+#     · 启动时打一行 `⚠ 已启用 --no-sandbox` 进 window.log，让降级**可追溯**。
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
+
 PORT = int(os.environ.get("TSF_PORT", "8765") or 8765)   # 与 server.py 同一约定
 # 单实例锁：生产恒为 8765 ⇒ 恒用 47653；用 TSF_PORT 做隔离测试时按端口错开，
 # 免得"两个不同端口的测试实例互相认为对方已在运行"（测试夹具层面的坑，不影响交付形态）。
@@ -461,16 +478,21 @@ def main() -> int:
     # `_harden_stdio()` 统一改成 UTF-8 + errors="replace"，之后任何打印都**不会崩**。
     _log("启动自检：stdio 加固 " + _harden_stdio())
 
-    # ★ 安全取证（t49 契约 ⑤）：交付物**绝不自行设置** `--no-sandbox`。
-    # 这里只**记录**当前取值（冻结产物在干净环境下应为 None）；开发沙箱里为了
-    # 让 Qt renderer 起来，才由外部 shell 设 `QTWEBENGINE_CHROMIUM_FLAGS`。
+    # ★ 安全取证（原 t49 契约 ⑤：交付物绝不自行设置 --no-sandbox）。
+    # 该契约已被**实测推翻**：不设它时 renderer 起不来 ⇒ 窗口白屏（见文件头注释）。
+    # 现改为：模块级 `os.environ.setdefault(..., "--no-sandbox")` 内置，
+    # 并在**每次启动**打一行明确记录 —— 降级必须**可追溯**，不能静默。
     _qtflags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS")
-    if _qtflags and "--no-sandbox" in _qtflags:
+    _builtin = "--no-sandbox" in (_qtflags or "")
+    if _builtin:
         _log("启动自检：QTWEBENGINE_CHROMIUM_FLAGS=" + repr(_qtflags)
-             + "  ⚠ 含 --no-sandbox（降低 Chromium 隔离等级，仅开发环境应如此）")
+             + "  ⚠ 已启用 --no-sandbox：这是**已知的安全降级**"
+               "（Chromium 进程隔离等级降低）。原因：不开沙箱时 renderer 无法启动，"
+               "窗口会白屏。本页仅加载本机回环 127.0.0.1 的内容，不加载任意外部网页。"
+               " 如需收紧：外部显式设置该变量即可覆盖本默认值。")
     else:
         _log("启动自检：QTWEBENGINE_CHROMIUM_FLAGS=" + repr(_qtflags)
-             + "  （未设置 / 不含 --no-sandbox）")
+             + "  （不含 --no-sandbox：沙箱保持开启）")
     _log("启动自检：frozen=" + str(getattr(sys, "frozen", False))
          + " stdout=" + repr(sys.stdout) + " stderr=" + repr(sys.stderr))
     # 加固后：即使 stdout=None 或原编码是 gbk，打印（含非 GBK 字符）都不抛异常

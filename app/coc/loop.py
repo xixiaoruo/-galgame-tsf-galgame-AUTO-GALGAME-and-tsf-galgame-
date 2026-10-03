@@ -271,13 +271,28 @@ class Run:
 
     # ------------------------------------------------------ 程序化修改（唯一写点）
 
-    def apply(self, delta: Any, *, reason: str, clamp: bool = True) -> dict:
-        """所有数值/标签/flag 变化的**唯一入口**（委托到 sanitize.apply_delta）。
+    def apply(self, delta: Any, *, reason: str, clamp: bool = True,
+              trust: str = "engine") -> dict:
+        """所有数值/标签/flag 变化的**唯一入口**（委托到 `sanitize.apply_delta_*`）。
 
         每次调用都记一条 `delta` 事件 —— V-08 A2 的"DOOM 为何变化"就是靠这份账本。
+
+        ## 信任层（第二轮复核后新增）
+
+        默认 `trust="engine"`：本类是**引擎**，它调用 `apply` 的每一处都是确定性结算
+        （抽卡结果 / 章完成 / 战斗伤害 / 探针刻度）。传 `trust="llm"` 会走**被限制**的
+        那一层，只能写 `exp`/`funds`/物品/属性 —— 用于"这里拿到的可能是模型原值"的场合。
+
+        为什么默认 engine 而不是 llm：这是**引擎自己的方法**，它的语义就是"我结算完了，落账"。
+        真正的防线在 `sanitize.apply_delta` 的**默认**参数上（默认 llm），
+        所以"外部/新路径直接调 sanitize"仍然受限；而"新路径调 Run.apply 且传模型原值"
+        这种误用，靠 `reason=` 参数与代码审查可见（每处调用都带 reason）。
+
+        ⚠️ 注意：`prompt.narr_turn` 已经把模型提案过了 `sanitize_llm_delta`（白名单+钳制），
+        所以 `session.py:206` 的 `run.apply(turn["coc_delta"])` 落进来的是**已清洗**的值。
         """
         before = {k: int(self.state.get(k, 0)) for k in ("doom", "sta", "rea", "exp", "funds")}
-        res = _san.apply_delta(self.state, delta, self.cfg, clamp=clamp)
+        res = _san.apply_delta(self.state, delta, self.cfg, clamp=clamp, trust=trust)
         after = {k: int(self.state.get(k, 0)) for k in ("doom", "sta", "rea", "exp", "funds")}
         changes = {k: after[k] - before[k] for k in before if after[k] != before[k]}
         self.log("delta", {"reason": reason, "changes": changes,

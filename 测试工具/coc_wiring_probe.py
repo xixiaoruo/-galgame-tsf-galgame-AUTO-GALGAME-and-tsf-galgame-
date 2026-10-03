@@ -32,6 +32,17 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# ⚠️ **必须在 import `app.*` 之前**把数据根指向临时目录：coc 写盘跟随
+# `app.config.DATA_DIR`（正确行为），所以不隔离就会往玩家真实数据目录写存档。
+# `DATA_DIR` 是 import 时求值的模块级常量 —— 事后改环境变量无效，故前置于所有 app 导入。
+import tempfile as _tempfile          # noqa: E402
+import shutil as _shutil              # noqa: E402
+import atexit as _atexit              # noqa: E402
+
+_TEMP_DATA = _tempfile.mkdtemp(prefix="coc-wiring-probe-")
+os.environ["TSF_DATA_DIR"] = _TEMP_DATA
+_atexit.register(_shutil.rmtree, _TEMP_DATA, True)
+
 from app.coc import loop as _loop              # noqa: E402
 from app.coc import prompt as _prompt          # noqa: E402
 from app.coc import provenance as _prov        # noqa: E402

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -42,9 +43,57 @@ DETERMINISTIC_ONLY_KEYS: tuple[str, ...] = (
 #: 权威数值字段（`apply_delta` 是唯一写入者）
 STATE_NUMERIC_FIELDS: tuple[str, ...] = ("doom", "sta", "rea", "exp", "funds")
 
+#: **引擎信任层**允许的键全集（= LLM 白名单 ∪ 确定性层独占键 ∪ 状态上限字段）。
+#: 只有 `apply_delta(trust="engine")` / `apply_delta_engine()` 能用后者。
+#: 注意 `sta_max` / `rea_max` 也在其中：`DETERMINISTIC_ONLY_KEYS` 已声明它们属
+#: 确定性层（伤势/诅咒会改上限），引擎应能写；先前漏掉它们会被信任层误拒
+#: —— 这是本测试第一次跑就抓到的（"未知键在两种信任层下都被拒"有一条红）。
+ENGINE_ALLOWED_KEYS: tuple[str, ...] = tuple(sorted(
+    set(LLM_DELTA_WHITELIST) | set(DETERMINISTIC_ONLY_KEYS)
+    | {"stat", "sta_max", "rea_max"}
+))
+
 
 class SchemaViolation(RuntimeError):
     """白名单常量与 tuning.json 不一致（说明有人改了其中一处）。"""
+
+
+class TrustViolation(ValueError):
+    """**未被授权**的 delta 键试图进入状态。
+
+    tsf-security 的独立复核发现（第二轮）：`clamp_turn_delta` 会把"非数值键"
+    **原样透传**，而 `apply_delta` 自己不做白名单 —— 于是
+    `apply_delta(st, {"ending": "通关"})` **真的能把结局写进去**。
+    也就是说：当时的防线**完全依赖解析层**（`sanitize_llm_delta`），
+    将来任何一条新路径把模型原值直接交给 `apply()` 就会**静默绕过**。
+
+    ⇒ 现在把它变成**结构性的**：`apply_delta` 默认按 **LLM 信任层**校验键，
+    含 `ending`/`tags_*`/`flag_set`/`doom`/`sta`/`rea` 一律**抛 TrustViolation**；
+    引擎自己的结算必须显式走 `apply_delta_engine()`（或 `trust="engine"`）。
+    """
+
+
+def _assert_keys_allowed(delta: Any, trust: str, who: str = "") -> None:
+    """按信任层校验 delta 的键；不合法的**抛错**而不是静默丢弃。
+
+    为什么抛错而不是丢弃：丢弃会让"调用方走错了信任层"这件事被掩盖成"这次没生效"；
+    而抛错会让它在**第一次被调用时就炸**，正是我们想要的。
+    """
+    if trust not in ("llm", "engine"):
+        raise ValueError(f"未知信任层 {trust!r}（只允许 'llm' / 'engine'）")
+    if not isinstance(delta, dict):
+        return
+    allowed = set(LLM_DELTA_WHITELIST) if trust == "llm" else set(ENGINE_ALLOWED_KEYS)
+    illegal = sorted(str(k) for k in delta if k not in allowed)
+    if not illegal:
+        return
+    hint = ""
+    if trust == "llm":
+        hint = ("；这些键由确定性层独占（COC-DESIGN §3.2 E2）。"
+                "引擎结算请显式调用 apply_delta_engine()")
+    raise TrustViolation(
+        f"{who or 'apply_delta'}（trust={trust!r}）收到未授权键 {illegal}{hint}"
+    )
 
 
 def assert_whitelist_matches_tuning(cfg: dict) -> None:
@@ -64,12 +113,34 @@ def assert_whitelist_matches_tuning(cfg: dict) -> None:
 
 
 def _as_int(v: Any) -> int | None:
-    """宽松地把 LLM 给的值转成 int；转不了返回 None（调用方丢弃）。"""
+    """把值转成 int；**任何非有限/非可转形态一律返回 None（调用方丢弃）**。
+
+    ⚠️ 这里踩过一次真实缺陷（tsf-security 独立复核发现 D1）：
+    第一版只捕获 `(TypeError, ValueError)`，而 **`float("inf")` 会在 `int()` 上抛
+    `OverflowError`**（`int(round(float("inf")))` → OverflowError）——
+    于是一个 `{"exp": Infinity}` 就能让**整回合异常**。
+
+    **可达性是实测过的**：`json.loads('{"exp": Infinity}')` 是**成功**的，
+    而 LLM 回包正是 `json.loads` 出来的 ⇒ 模型只要吐 `Infinity`，回合就炸。
+    （`NaN` 反而安全：`int(round(nan))` 走 `ValueError` 被丢弃。**只有 ±Inf 崩。**）
+
+    修法不是"补上 OverflowError 就完"——那只是补了一个洞。这里改成**两道**：
+      ① 先 `math.isfinite()` 把非有限值直接判死（覆盖 inf/-inf/nan 及其各种来源）；
+      ② 异常集合写成 `(TypeError, ValueError, OverflowError, ArithmeticError)`。
+    `ArithmeticError` 是 `OverflowError` 的父类，多写一层是为了防"又漏了某个算术异常"。
+    配套完备性测试：`app/coc/tests/test_numeric_edge.py`。
+    """
     if isinstance(v, bool):
         return None              # bool 是 int 的子类，但语义上不该出现在这里
     try:
-        return int(round(float(v)))
-    except (TypeError, ValueError):
+        f = float(v)
+    except (TypeError, ValueError, OverflowError, ArithmeticError):
+        return None
+    if not math.isfinite(f):
+        return None              # inf / -inf / nan 一律丢弃（**不抛异常**）
+    try:
+        return int(round(f))
+    except (TypeError, ValueError, OverflowError, ArithmeticError):
         return None
 
 
@@ -251,16 +322,29 @@ def invariants(state: dict, cfg: dict) -> list[str]:
 
 
 def apply_delta(state: dict, delta: Any, cfg: dict, *,
-                clamp: bool = True) -> dict:
+                clamp: bool = True, trust: str = "llm") -> dict:
     """**唯一写权威状态数值的函数**。返回 `{applied, dropped, notes}`。
 
-    `delta` 可含：数值键（doom/sta/rea/exp/funds/stat）+ 非数值键
-    （item_grant/item_take/tags_grant/tags_remove/flag_set/ending）。
-    后者**只接受确定性层的输入**——LLM 提案在 `sanitize_llm_delta` 里已经把
-    这些键丢干净了。
+    ## 信任层（第二轮复核后新增，这是结构性防线）
+
+    | trust | 允许的键 | 谁用 |
+    |---|---|---|
+    | `"llm"`（**默认**） | `LLM_DELTA_WHITELIST`：`exp`/`funds`/`item_grant`/`item_take`/`stat` | 任何可能拿到**模型原值**的路径 |
+    | `"engine"` | 上表 ∪ `doom`/`sta`/`rea`/`tags_grant`/`tags_remove`/`flag_set`/`ending` | 引擎自己的结算（经 `apply_delta_engine`） |
+
+    **默认取"最不信任"的那一层**：调用方必须**显式**索取引擎权限，才可能写 `ending` / `doom`。
+    未授权的键**抛 `TrustViolation`**（不是静默丢弃）——因为静默丢弃会把
+    "调用方走错信任层"掩盖成"这次没生效"，而抛错会在第一次调用时就炸。
+
+    > 为什么加这个：`clamp_turn_delta` 会把非数值键**原样透传**，所以在此之前的防线
+    > **完全依赖解析层**（`sanitize_llm_delta` 先丢干净）。复核实测
+    > `apply_delta(st, {"ending": "通关"})` 真能写进去 ⇒ 将来任何新路径把模型原值
+    > 直接交给 `apply()` 就会静默绕过。现在这条路**必然失败**。
     """
     if not isinstance(delta, dict):
         return {"applied": {}, "dropped": ["<非 dict>"], "notes": []}
+
+    _assert_keys_allowed(delta, trust, who="apply_delta")
 
     d = clamp_turn_delta(delta, cfg) if clamp else dict(delta)
     applied: dict[str, Any] = {}
@@ -268,6 +352,17 @@ def apply_delta(state: dict, delta: Any, cfg: dict, *,
 
     for key, raw in d.items():
         if key in STATE_NUMERIC_FIELDS:
+            v = _as_int(raw)
+            if v is None:
+                dropped.append(key)
+                continue
+            state[key] = int(state.get(key, 0)) + v
+            applied[key] = v
+        elif key in ("sta_max", "rea_max"):
+            # 体力/理智**上限**（伤势·诅咒会削减，见 MECHANICS.md §2.3）。
+            # 加这个分支是被测试逼出来的：先前 `sta_max` 在 DETERMINISTIC_ONLY_KEYS 里
+            # 声明为"确定性层专属"，却既没进引擎白名单、也没有落账分支 ——
+            # 于是它会静默掉进 `else: dropped`（"声明了但没人实现"）。
             v = _as_int(raw)
             if v is None:
                 dropped.append(key)
@@ -338,3 +433,16 @@ def apply_delta(state: dict, delta: Any, cfg: dict, *,
 
     notes = invariants(state, cfg)
     return {"applied": applied, "dropped": dropped, "notes": notes}
+
+
+def apply_delta_engine(state: dict, delta: Any, cfg: dict, *,
+                       clamp: bool = True) -> dict:
+    """**引擎信任层**的写入入口：允许 `doom`/`sta`/`rea`/标签/flag/`ending`。
+
+    命名是刻意的：它必须在代码里**显式出现**，这样"某处绕过了信任层"就变成
+    一个能被 `grep` 与审查看见的事实，而不是"所有写入点长得一样"。
+
+    引擎自身的结算（抽卡结果、章完成、战斗伤害、survey 刻度）都走这里；
+    可能携带**模型原值**的路径必须走 `apply_delta`（默认 `trust="llm"`）。
+    """
+    return apply_delta(state, delta, cfg, clamp=clamp, trust="engine")

@@ -119,7 +119,7 @@ def test_clamping(s: TestSuite) -> None:
     b1 = int(P.t(cfg, "sanitize.turn_budget_level1"))
     b2 = int(P.t(cfg, "sanitize.turn_budget_level2"))
     st = ST.initial_states({"difficulty": "Initiate", "seed": 5}, cfg)
-    res = S.apply_delta(st, {"doom": 999, "sta": -999, "rea": 999, "exp": -999,
+    res = S.apply_delta_engine(st, {"doom": 999, "sta": -999, "rea": 999, "exp": -999,
                              "funds": 999, "stat": {"KNW": 99}}, cfg)
     ap = res["applied"]
     ok = (ap.get("doom") == b1 and ap.get("sta") == -b1 and ap.get("rea") == b1
@@ -141,7 +141,7 @@ def test_invariants(s: TestSuite) -> None:
     # ① 属性 ≤0 → DOOM 立即 100
     st = ST.initial_states({"difficulty": "Initiate", "seed": 6}, cfg)
     st["stats"]["KNW"] = 1
-    res = S.apply_delta(st, {"stat": {"KNW": -5}}, cfg)
+    res = S.apply_delta_engine(st, {"stat": {"KNW": -5}}, cfg)
     s.expect(
         "属性 ≤0 → DOOM 立即置 100（MECHANICS.md §2.1 隐性绝境）",
         st["doom"] == 100 and any("属性≤0" in n for n in res["notes"]),
@@ -154,7 +154,7 @@ def test_invariants(s: TestSuite) -> None:
     # ② doom 上限 100
     st2 = ST.initial_states({"difficulty": "Initiate", "seed": 7}, cfg)
     st2["doom"] = 99
-    S.apply_delta(st2, {"doom": 3}, cfg, clamp=False)
+    S.apply_delta_engine(st2, {"doom": 3}, cfg, clamp=False)
     s.expect(
         "doom 上限钳到 100（仪表语义，§2.1 到 100% 显示 END）",
         st2["doom"] == 100,
@@ -165,10 +165,10 @@ def test_invariants(s: TestSuite) -> None:
     # ③ last_stand 地板 = -5；sudden_death 地板 = 0
     ls = ST.initial_states({"difficulty": "Initiate", "seed": 8,
                             "death_mode": "last_stand"}, cfg)
-    S.apply_delta(ls, {"sta": -999}, cfg, clamp=False)
+    S.apply_delta_engine(ls, {"sta": -999}, cfg, clamp=False)
     sd = ST.initial_states({"difficulty": "Initiate", "seed": 9,
                             "death_mode": "sudden_death"}, cfg)
-    S.apply_delta(sd, {"sta": -999}, cfg, clamp=False)
+    S.apply_delta_engine(sd, {"sta": -999}, cfg, clamp=False)
     s.expect(
         "死亡模式地板：last_stand 停在 -5、sudden_death 不出现负血",
         ls["sta"] == -5 and sd["sta"] == 0,
@@ -180,9 +180,9 @@ def test_invariants(s: TestSuite) -> None:
 
     # ④ 城镇状态**不可移除**（§1.4）
     st4 = ST.initial_states({"difficulty": "Initiate", "seed": 10}, cfg)
-    S.apply_delta(st4, {"tags_grant": [{"id": "TIME_SKIP", "kind": "town",
+    S.apply_delta_engine(st4, {"tags_grant": [{"id": "TIME_SKIP", "kind": "town",
                                         "duration": "run"}]}, cfg)
-    res4 = S.apply_delta(st4, {"tags_remove": ["TIME_SKIP"]}, cfg)
+    res4 = S.apply_delta_engine(st4, {"tags_remove": ["TIME_SKIP"]}, cfg)
     s.expect(
         "城镇状态不可移除（tags_remove 对 kind=town 一律拒绝）",
         len(st4["tags"]) == 1 and any("不可移除" in d for d in res4["dropped"]),
@@ -193,9 +193,9 @@ def test_invariants(s: TestSuite) -> None:
 
     # ⑤ 诅咒可以移除（对照组：证明上一条不是「什么都不删」）
     st5 = ST.initial_states({"difficulty": "Initiate", "seed": 11}, cfg)
-    S.apply_delta(st5, {"tags_grant": [{"id": "Fearful", "kind": "curse",
+    S.apply_delta_engine(st5, {"tags_grant": [{"id": "Fearful", "kind": "curse",
                                         "sub": "mental", "duration": "run"}]}, cfg)
-    S.apply_delta(st5, {"tags_remove": ["Fearful"]}, cfg)
+    S.apply_delta_engine(st5, {"tags_remove": ["Fearful"]}, cfg)
     s.expect(
         "对照组：诅咒可以被移除（说明上一条是真的在区分 kind，而非一律不删）",
         st5["tags"] == [],
@@ -265,11 +265,138 @@ def test_rng_roundtrip_in_state(s: TestSuite) -> None:
     )
 
 
+def test_trust_layer_is_structural(s: TestSuite) -> None:
+    """★ 结构性信任层：**直接 `apply_delta` 写 `ending` 必然失败**（第二轮复核 D2）。
+
+    tsf-security 的实测：
+    > `clamp_turn_delta` 明写"非数值键原样透传"；实测 `apply_delta(st, {"ending":"通关"})`
+    > **真的会把 ending 写进去** ⇒ 当前防线完全依赖解析层；将来任何新路径把 LLM 原值
+    > 直接交给 `apply()` 就会静默绕过。
+
+    修法：`apply_delta` 默认 `trust="llm"`，未授权键**抛 TrustViolation**（不静默丢弃）。
+    本用例给的是**"被拒/报错"的实测**，而不是"现在没人这么调"。
+    """
+    cfg = P.load_tuning()
+    engine_only = ("ending", "doom", "sta", "rea", "tags_grant", "tags_remove", "flag_set")
+
+    # ---- 逐个键：默认信任层必须抛 ----
+    results = []
+    for key in engine_only:
+        st = ST.initial_states({"difficulty": "Initiate", "seed": 3}, cfg)
+        sample = "END_CLEARED" if key == "ending" else (
+            [{"id": "TIME_SKIP", "kind": "town", "duration": "run"}] if key == "tags_grant"
+            else ({"lighthouse_cleared": True} if key == "flag_set" else 1))
+        raised = None
+        try:
+            S.apply_delta(st, {key: sample}, cfg)
+        except S.TrustViolation:
+            raised = "TrustViolation"
+        except BaseException as exc:                        # noqa: BLE001
+            raised = type(exc).__name__
+        results.append((key, raised, st.get("ending"), int(st.get("doom", 0))))
+    bad = [(k, r) for k, r, _e, _d in results if r != "TrustViolation"]
+    s.expect(
+        f"默认信任层下，{len(engine_only)} 个引擎独占键**逐个**抛 TrustViolation（不静默写入）",
+        not bad,
+        detail="逐键实测：" + "；".join(f"{k}→{r}" for k, r, _e, _d in results),
+        counterexample="反例：把 `_assert_keys_allowed` 调用删掉（回到第二轮复核前的状态）→ "
+                       "`ending` 会被静默写入、其余键照旧落账 → bad 非空 → 红。"
+                       "**这条给的是「直接调用被拒」的实测，不是「现在没人这么调」**",
+    )
+
+    # ---- D2 的原始形态：ending 不得被写进去 ----
+    st = ST.initial_states({"difficulty": "Initiate", "seed": 4}, cfg)
+    raised = None
+    try:
+        S.apply_delta(st, {"ending": "通关"}, cfg)
+    except S.TrustViolation:
+        raised = "TrustViolation"
+    s.expect(
+        "D2 原始形态：`apply_delta(st, {'ending': '通关'})` 抛错，且 `state['ending']` 仍是 None",
+        raised == "TrustViolation" and st.get("ending") is None,
+        detail=f"raised={raised}；state['ending']={st.get('ending')!r}",
+        counterexample="反例：复核时的实际行为 —— 不抛错且 `state['ending'] == '通关'` → 红。"
+                       "**这正是那句更正**：「LLM 输出经过的那条路径没有提议权」≠「apply_delta 是防线」",
+    )
+
+    # ---- 显式引擎层：同一输入必须能落账（证明这不是"一律拒绝"） ----
+    st2 = ST.initial_states({"difficulty": "Initiate", "seed": 5}, cfg)
+    S.apply_delta_engine(st2, {"ending": "END_CLEARED"}, cfg)
+    s.expect(
+        "对照组：显式 `apply_delta_engine` 能写 `ending`（证明限制是按信任层分的，不是一律拒绝）",
+        st2.get("ending") == "END_CLEARED",
+        detail=f"apply_delta_engine({{'ending': 'END_CLEARED'}}) → {st2.get('ending')!r}",
+        counterexample="反例：把校验写成「任何信任层都拒 ending」→ 结局永远写不进去、"
+                       "游戏无法结束 → 红。**只有「默认拒 + 显式放」两条一起，"
+                       "才说明这是一个信任层而不是一道死墙**",
+    )
+
+    # ---- 未知键：两层都必须拒 ----
+    # 说明：`sta_max`/`rea_max` 属**确定性层合法键**（已进 ENGINE_ALLOWED_KEYS），
+    # 所以这里只放**真正未授权**的键；它们在任何信任层下都必须被拒。
+    unknowns = ("totally_unknown", "level", "luck", "not_a_field")
+    res2 = []
+    for key in unknowns:
+        st3 = ST.initial_states({"difficulty": "Initiate", "seed": 6}, cfg)
+        for trust in ("llm", "engine"):
+            r = None
+            try:
+                S.apply_delta(st3, {key: 1}, cfg, trust=trust)
+            except S.TrustViolation:
+                r = "TrustViolation"
+            except BaseException as exc:                     # noqa: BLE001
+                r = type(exc).__name__
+            res2.append((key, trust, r))
+    weak = [(k, t, r) for k, t, r in res2 if r != "TrustViolation"]
+    s.expect(
+        f"未知键（{len(unknowns)} 个）在**两种**信任层下都被拒",
+        not weak,
+        detail="逐项实测：" + "；".join(f"{k}/{t}→{r}" for k, t, r in res2),
+        counterexample="反例：把未知键走 `else: dropped.append(...)`（静默丢弃）→ "
+                       "某一项不会抛 → weak 非空 → 红。**静默丢弃会把「调用方写错了键名」"
+                       "掩盖成「这次没生效」**，所以这里要求抛错",
+    )
+    # 引擎层应能写上限字段（`sta_max`/`rea_max`）——对照上一条，证明拒的是"未知"而不是"上限"
+    st_up = ST.initial_states({"difficulty": "Initiate", "seed": 8}, cfg)
+    S.apply_delta_engine(st_up, {"sta_max": -5}, cfg)
+    s.expect(
+        "引擎层能写 `sta_max`（确定性层合法键）—— 对照上一条，拒的是「未知」而非「上限」",
+        int(st_up["sta_max"]) == 16,
+        detail=f"Initiate sta_max=21，引擎 -5 后 = {st_up['sta_max']}",
+        counterexample="反例：把 `sta_max` 从 ENGINE_ALLOWED_KEYS 漏掉 → 这里会抛 TrustViolation → "
+                       "红（**这正是本测试第一次跑就抓到的**：注释声明它属确定性层、白名单却漏了它）",
+    )
+
+    # ---- 静态：loop 的写点必须显式走引擎层 ----
+    import ast
+    import os as _os
+    coc_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    with open(_os.path.join(coc_dir, "loop.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    tree = ast.parse(src)
+    ctx = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "apply":
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr in ("apply_delta", "apply_delta_engine")):
+                    ctx = sub.func.attr
+    s.expect(
+        "`loop.Run.apply` 内部显式调用引擎信任层（可被 grep / 审查看见）",
+        ctx == "apply_delta",
+        detail=f"Run.apply 内部调用的是 `_san.{ctx}`，并显式传 trust=（默认 engine）",
+        counterexample="反例：让 Run.apply 直接 `_san.apply_delta(...)` 而**不**传 trust → "
+                       "会落到默认 llm 层 → 引擎自己的章完成/战斗伤害全部抛错 → 测试大面积红；"
+                       "这条断言保证「信任层选择」在代码里是可见的一步",
+    )
+
+
 def main() -> int:
-    s = TestSuite("app/coc/tests/test_sanitize.py —— 白名单 / 钳制 / 不变式 / 唯一写点")
+    s = TestSuite("app/coc/tests/test_sanitize.py —— 白名单 / 钳制 / 不变式 / 唯一写点 / 信任层")
     for fn in (test_whitelist_has_no_numeric_fields, test_malicious_delta_every_key,
                test_numeric_coercion_dropped, test_clamping, test_invariants,
-               test_single_write_point, test_rng_roundtrip_in_state):
+               test_single_write_point, test_rng_roundtrip_in_state,
+               test_trust_layer_is_structural):
         s.run(fn)
     return s.report()
 

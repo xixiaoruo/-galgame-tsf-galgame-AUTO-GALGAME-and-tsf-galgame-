@@ -27,6 +27,10 @@ MODULES = [
     "test_content",
     # P18-A（t51）接线期新增：三硬闸门（空串 + 最终 prompt 逐字节相等）
     "test_gate_empty",
+    # 缺陷修复：两类路径（随包只读 vs 玩家可写）—— 防"存档写进安装目录"回归
+    "test_paths_layout",
+    # 复核 D1：数值边界异常形态完备性（inf/-inf/nan/Decimal/字符串/超大整数…）
+    "test_numeric_edge",
 ]
 
 

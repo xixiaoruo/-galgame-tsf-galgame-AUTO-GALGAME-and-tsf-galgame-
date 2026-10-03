@@ -27,6 +27,21 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# ⚠️ **必须在 import `app.config` 之前**把数据根指向临时目录。
+# 理由（t51 缺陷之后才想明白）：coc 写盘现在跟随 `app.config.DATA_DIR` —— 这是**正确行为**，
+# 但意味着"跑一次探针"就会往**玩家真实数据目录**里写存档（本会话确实写进去了：
+# 6 个 coc 存档 + 1 个 coc 槽，已用 `测试工具/清理coc测试存档.py` 清除）。
+# `app.config.DATA_DIR` 是**模块级常量、import 时求值**，事后改环境变量无效，
+# 所以隔离必须前置于任何 `app.*` 导入。
+# 本项目**故意不引 pytest**（零依赖约定），故不用 conftest/fixture，直接在文件顶部设。
+import tempfile as _tempfile          # noqa: E402
+import shutil as _shutil              # noqa: E402
+import atexit as _atexit              # noqa: E402
+
+_TEMP_DATA = _tempfile.mkdtemp(prefix="coc-http-probe-")
+os.environ["TSF_DATA_DIR"] = _TEMP_DATA
+_atexit.register(_shutil.rmtree, _TEMP_DATA, True)
+
 CHECKS: list[dict] = []
 
 

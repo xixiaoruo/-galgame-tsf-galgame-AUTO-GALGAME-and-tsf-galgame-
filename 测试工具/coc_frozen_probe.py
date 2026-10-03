@@ -49,12 +49,27 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="coc-frozen-")
     internal = os.path.join(tmp, "_internal")
     try:
-        # 1) _internal/app/（含 __init__.py 与 coc 包）
-        os.makedirs(os.path.join(internal, "app"), exist_ok=True)
-        io.open(os.path.join(internal, "app", "__init__.py"), "w",
-                encoding="utf-8").close()
-        shutil.copytree(SRC_COC, os.path.join(internal, "app", "coc"),
-                        ignore=shutil.ignore_patterns("__pycache__", "tests"))
+        # 1) _internal/app/**（**整个 app 包**）+ config.example.json
+        #    ⚠️ 不能只放 app/coc/：`paths.py` 会 `from .. import config`，
+        #    而 `app/config.py` 在 import 期就要读 config.example.json（config.py:93 的 DEFAULTS）。
+        #    先前那版只复制 app/coc/，恰好绕过了 `paths → config` 这条依赖，
+        #    对 t51 的「存档落进安装目录」缺陷**假通过** —— 本段因此被改写。
+        app_dst = os.path.join(internal, "app")
+        os.makedirs(app_dst, exist_ok=True)
+        app_src = os.path.join(PROJ, "app")
+        for _fn in sorted(os.listdir(app_src)):
+            _src = os.path.join(app_src, _fn)
+            _dst = os.path.join(app_dst, _fn)
+            if os.path.isdir(_src):
+                if _fn == "coc":
+                    shutil.copytree(_src, _dst,
+                                    ignore=shutil.ignore_patterns("__pycache__", "tests"))
+                continue
+            if _fn.endswith(".py"):
+                shutil.copy2(_src, _dst)
+        _ex = os.path.join(PROJ, "config.example.json")
+        if os.path.isfile(_ex):
+            shutil.copy2(_ex, os.path.join(internal, "config.example.json"))
 
         # 2) _internal/data/coc/**（模拟 spec 里 _coc_datas 的落点）
         shutil.copytree(SRC_DATA, os.path.join(internal, "data", "coc"),
@@ -66,7 +81,9 @@ def main() -> int:
             "sys.path.insert(0, sys.argv[1])\n"
             "from app.coc import paths, provenance\n"
             "out = {'ROOT': paths.ROOT, 'TUNING': paths.TUNING_PATH,\n"
-            "       'exists': os.path.isfile(paths.TUNING_PATH)}\n"
+            "       'exists': os.path.isfile(paths.TUNING_PATH),\n"
+            "       'SAVES_DIR': paths.SAVES_DIR, 'SLOTS_DIR': paths.SLOTS_DIR,\n"
+            "       'DATA_DIR_LIVE': paths.configured_data_dir()}\n"
             "try:\n"
             "    cfg = provenance.load_tuning()\n"
             "    out['loaded'] = True\n"
@@ -107,6 +124,21 @@ def main() -> int:
               int(got.get("cards", 0)) == 24,
               f"卡池 {got.get('cards')} 张（期望 24）",
               "反例：spec 只收集了 *.json 顶层、漏了 cards/ 子目录 → 卡池 0 张 → 红")
+
+        # ★ t51 修复的新增断言：玩家可写路径**不得**落在安装目录内
+        norm = os.path.normcase
+        saves = str(got.get("SAVES_DIR", ""))
+        slots = str(got.get("SLOTS_DIR", ""))
+        check("FROZEN-SAVES-OUTSIDE", "★ 冻结：SAVES_DIR / SLOTS_DIR **不在安装目录内**",
+              saves and slots
+              and not norm(saves).startswith(norm(internal) + os.sep)
+              and not norm(slots).startswith(norm(internal) + os.sep),
+              f"安装目录(_internal)={internal}\n"
+              f"         SAVES_DIR={saves}\n"
+              f"         SLOTS_DIR={slots}",
+              "反例：**修复前**的真实行为 —— 两者由 `__file__` 推，冻结下分别是 "
+              "`_internal/data/coc/saves/` 与 `_internal/data/saves/`（都在安装目录内）→ "
+              "更新替换目录连带丢档 → 红。tsf-engineer 在真实 exe 里实测到的就是这个路径")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

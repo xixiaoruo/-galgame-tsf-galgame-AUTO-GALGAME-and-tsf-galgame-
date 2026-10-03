@@ -183,16 +183,22 @@ def from_json_obj(obj: dict) -> dict:
 
 
 def save(state: dict) -> str:
-    """落盘到 `data/coc/saves/<sid>.json`，返回路径。"""
-    os.makedirs(paths.SAVES_DIR, exist_ok=True)
-    path = os.path.join(paths.SAVES_DIR, f"{state['sid']}.json")
+    """落盘到 `<DATA_DIR>/saves/<sid>.json`，返回路径。
+
+    路径**跟随 `app.config.DATA_DIR`**（含 `TSF_DATA_DIR` 逃逸舱），不再由包内 `__file__` 推 ——
+    后者会写进安装目录，更新替换目录时连带丢档（详见 `paths.py` 顶部的两类路径说明）。
+    这里调 `paths.saves_dir()` 取**当下值**而不是读顶层常量，避免进程内切换数据根后拿到旧路径。
+    """
+    target = paths.saves_dir()
+    os.makedirs(target, exist_ok=True)
+    path = os.path.join(target, f"{state['sid']}.json")
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(dumps(state))
     return path
 
 
 def load(sid: str) -> dict:
-    path = os.path.join(paths.SAVES_DIR, f"{sid}.json")
+    path = os.path.join(paths.saves_dir(), f"{sid}.json")
     with open(path, "r", encoding="utf-8") as fh:
         return loads(fh.read())
 
@@ -223,9 +229,13 @@ def sanitize_delta(delta: Any, cfg: dict) -> dict:
     return cleaned
 
 
-def apply_delta(state: dict, delta: Any, cfg: dict) -> dict:
-    """vn.py:80 `apply_delta` 的 CoC 版：委托到唯一写入点。"""
-    return _san.apply_delta(state, delta, cfg)
+def apply_delta(state: dict, delta: Any, cfg: dict, *, trust: str = "llm") -> dict:
+    """vn.py:80 `apply_delta` 的 CoC 版：委托到唯一写入点。
+
+    `trust` 默认 `"llm"`（**最不信任**的那一层）—— 与 `sanitize.apply_delta` 一致。
+    引擎结算请用 `sanitize.apply_delta_engine()`（第二轮复核后新增的显式信任层）。
+    """
+    return _san.apply_delta(state, delta, cfg, trust=trust)
 
 
 def panel_view(state: dict) -> dict:

@@ -353,8 +353,14 @@ def _state_extra(st: dict) -> list[dict]:
 # ---------------------------------------------------------------- 存档槽
 
 def _slots_dir() -> str:
-    os.makedirs(paths.SLOTS_DIR, exist_ok=True)
-    return paths.SLOTS_DIR
+    """存档槽目录：**与既有模式同一个**（`DATA_DIR/slots`，见 `app/game._slots_dir`）。
+
+    每次调用重新取 `paths.slots_dir()`（跟随 `app.config.DATA_DIR` / `TSF_DATA_DIR`），
+    不再读顶层常量 —— 顶层常量是 import 时的快照，进程内换数据根会拿到旧路径。
+    """
+    d = paths.slots_dir()
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def save_slot(sid: str, name: str) -> dict:
@@ -392,7 +398,7 @@ def save_slot(sid: str, name: str) -> dict:
 
 def peek_slot_mode(slot_id: str) -> str:
     """只读 envelope 的 `mode`（用于分发点判断，**不注册会话、不产生副作用**）。"""
-    path = os.path.join(paths.SLOTS_DIR, f"{str(slot_id)}.json")
+    path = os.path.join(paths.slots_dir(), f"{str(slot_id)}.json")
     if not os.path.isfile(path):
         return ""
     try:
@@ -404,7 +410,7 @@ def peek_slot_mode(slot_id: str) -> str:
 
 def load_slot(slot_id: str) -> dict:
     """从全局存档槽恢复 coc 会话（重建 Run 与 rng，注册进 coc 会话表）。"""
-    path = os.path.join(paths.SLOTS_DIR, f"{str(slot_id)}.json")
+    path = os.path.join(paths.slots_dir(), f"{str(slot_id)}.json")
     if not os.path.isfile(path):
         raise CocError("存档不存在")
     with open(path, "r", encoding="utf-8") as fh:
@@ -434,17 +440,18 @@ def load_slot(slot_id: str) -> dict:
 # ---------------------------------------------------------------- 面板/配置
 
 def list_slots() -> list[dict]:
-    """coc 的存档槽（读同一目录，只挑 `mode=="coc"`）。"""
+    """coc 的存档槽（读**与既有模式同一个**目录，只挑 `mode=="coc"`）。"""
     out = []
+    d = paths.slots_dir()
     try:
-        names = sorted(os.listdir(paths.SLOTS_DIR))
+        names = sorted(os.listdir(d))
     except OSError:
         return out
     for fn in names:
         if not fn.endswith(".json"):
             continue
         try:
-            with open(os.path.join(paths.SLOTS_DIR, fn), "r", encoding="utf-8") as fh:
+            with open(os.path.join(d, fn), "r", encoding="utf-8") as fh:
                 env = json.load(fh)
         except (json.JSONDecodeError, OSError):
             continue

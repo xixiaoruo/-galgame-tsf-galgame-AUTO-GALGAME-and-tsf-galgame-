@@ -22,6 +22,27 @@ from app.coc import provenance as PR
 from app.coc import sanitize as S
 from app.coc.tests.harness import TestSuite
 
+
+class _BoomFloat:
+    """哨兵：`float()` 时抛**非算术**异常（旧写法会漏掉这类）。"""
+
+    def __float__(self):
+        raise RuntimeError("boom-from-__float__")
+
+    def __repr__(self):
+        return "<Boom(__float__→RuntimeError)>"
+
+
+class _BoomKey:
+    """哨兵：`float()` 时抛另一个更"意外"的异常类型。"""
+
+    def __float__(self):
+        raise KeyError("boom-from-__float__")
+
+    def __repr__(self):
+        return "<Boom(__float__→KeyError)>"
+
+
 #: 完备性输入表：(标签, 值)。**只追求"想到多少喂多少"**，追求覆盖面而非优雅。
 NON_INT_FORMS: list[tuple[str, object]] = [
     # —— 非有限浮点（D1 的直接形态）——
@@ -65,6 +86,11 @@ NON_INT_FORMS: list[tuple[str, object]] = [
     ("complex(1,2)", complex(1, 2)),
     ("object()", object()),
     ("lambda", (lambda: 1)),
+    # —— t53 接手时补：**非枚举异常**的哨兵（__float__ 抛 RuntimeError）——
+    # 这一形态证明"枚举异常类型"永远不够：只要有人在 __float__ 里抛别的异常，
+    # 旧写法（except (TypeError, ValueError, OverflowError, ArithmeticError)）就会漏。
+    ("Boom(__float__→RuntimeError)", _BoomFloat()),
+    ("Boom(__float__→KeyError)", _BoomKey()),
 ]
 
 

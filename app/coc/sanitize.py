@@ -126,21 +126,28 @@ def _as_int(v: Any) -> int | None:
 
     修法不是"补上 OverflowError 就完"——那只是补了一个洞。这里改成**两道**：
       ① 先 `math.isfinite()` 把非有限值直接判死（覆盖 inf/-inf/nan 及其各种来源）；
-      ② 异常集合写成 `(TypeError, ValueError, OverflowError, ArithmeticError)`。
-    `ArithmeticError` 是 `OverflowError` 的父类，多写一层是为了防"又漏了某个算术异常"。
-    配套完备性测试：`app/coc/tests/test_numeric_edge.py`。
+      ② 异常**不再枚举**：`except Exception` —— 本函数的契约是"转不成 int 就返回 None
+         （调用方丢弃）"，所以**任何**转失败都该走这条路，而不是"我列全了已知异常"。
+
+    为什么②要从枚举改成 `Exception`（t53 接手时实测的第二个洞）：枚举法永远只覆盖
+    *已知* 的异常类型。只要有一个对象在 `__float__` / `__index__` 里抛**别的**
+    异常（实测一个 `__float__` 抛 `RuntimeError` 的哨兵对象），`_as_int` 就会
+    把它原样抛给上层 —— 与 D1 的 OverflowError 是**同一类**缺陷，只是换了个异常名。
+    注意**不吞 `BaseException`**：KeyboardInterrupt / SystemExit 必须照常向上传播。
+
+    配套完备性测试：`app/coc/tests/test_numeric_edge.py`（24 形态 × 3 入口 + 嵌套形态）。
     """
     if isinstance(v, bool):
         return None              # bool 是 int 的子类，但语义上不该出现在这里
     try:
         f = float(v)
-    except (TypeError, ValueError, OverflowError, ArithmeticError):
+    except Exception:
         return None
     if not math.isfinite(f):
         return None              # inf / -inf / nan 一律丢弃（**不抛异常**）
     try:
         return int(round(f))
-    except (TypeError, ValueError, OverflowError, ArithmeticError):
+    except Exception:
         return None
 
 

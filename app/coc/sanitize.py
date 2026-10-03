@@ -32,7 +32,16 @@ from .provenance import t
 
 #: LLM 提议 delta 的键白名单（= tuning.json 的 `llm_delta_whitelist`）
 #: 这里只是"常量便于静态检查"，**取值仍以 tuning.json 为准**（加载时断言一致）。
-LLM_DELTA_WHITELIST: tuple[str, ...] = ("exp", "funds", "item_grant", "item_take", "stat")
+#:
+#: t54 追加 `tsf_nudge`：转变进度的**有界**推动。它不改变既有防护 ——
+#: `doom`/`sta`/`rea`/`tags_*`/`flag_set`/`ending` 依旧**不在**白名单里。
+LLM_DELTA_WHITELIST: tuple[str, ...] = (
+    "exp", "funds", "item_grant", "item_take", "stat", "tsf_nudge",
+)
+
+#: `tsf_nudge` 的单轮上限（±）。**独立于 level-1/level-2 预算**，
+#: 因为它推动的是 0–100 的进度，若用 ±3/±5 会让模型一回合跨段。
+TSF_NUDGE_MAX: int = 1
 
 #: **明确不在**白名单里的键 —— 这些由确定性层独占（用于测试与审计输出）
 DETERMINISTIC_ONLY_KEYS: tuple[str, ...] = (
@@ -209,6 +218,15 @@ def sanitize_llm_delta(delta: Any, cfg: dict) -> tuple[dict, list[str]]:
             if kept:
                 out[key] = kept
             continue
+        if key == "tsf_nudge":
+            # t54：转变进度的有界推动。**在清洗层就钳到 ±TSF_NUDGE_MAX**，
+            # 这样"模型提议 +5"在进入状态之前就变成 +1。
+            v = _as_int(raw)
+            if v is None:
+                dropped.append(key)
+                continue
+            out[key] = max(-TSF_NUDGE_MAX, min(TSF_NUDGE_MAX, v))
+            continue
         if key == "stat":
             if not isinstance(raw, dict):
                 dropped.append(key)
@@ -256,6 +274,13 @@ def clamp_turn_delta(delta: Any, cfg: dict) -> dict:
             if v is None:
                 continue
             out[key] = max(-b2, min(b2, v))
+        elif key == "tsf_nudge":
+            # t54：用**专用上限**（±1），不借用 level-2 的 ±5 ——
+            # 进度是 0–100 的跨段量纲，±5 会让单回合跨段（与 E3 的意图相反）。
+            v = _as_int(raw)
+            if v is None:
+                continue
+            out[key] = max(-TSF_NUDGE_MAX, min(TSF_NUDGE_MAX, v))
         elif key == "stat":
             if not isinstance(raw, dict):
                 continue
@@ -375,6 +400,18 @@ def apply_delta(state: dict, delta: Any, cfg: dict, *,
                 dropped.append(key)
                 continue
             state[key] = int(state.get(key, 0)) + v
+            applied[key] = v
+        elif key == "tsf_nudge":
+            # t54：推动 TSF 进度。委托给 `coc.tsf.apply_nudge` —— 那里做
+            # 「只增不减」的单调硬约束（负推动夹成 0），并写一条 `tsf_nudge` 账本。
+            # 延迟 import：`coc.tsf` 会延迟 import `app/tsf.py`，放在模块顶端会
+            # 让 sanitize 在 import 期就依赖它（而 sanitize 是"唯一写点"，应保持轻）。
+            from . import tsf as _tsf_mod
+            v = _as_int(raw)
+            if v is None:
+                dropped.append(key)
+                continue
+            _tsf_mod.apply_nudge(state, v, reason="llm_proposal")
             applied[key] = v
         elif key == "stat":
             subs = raw if isinstance(raw, dict) else {}

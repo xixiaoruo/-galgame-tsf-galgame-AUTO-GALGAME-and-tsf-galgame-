@@ -34,7 +34,12 @@ class UnknownThreatError(ValueError):
 
 @dataclass(frozen=True)
 class CheckResult:
-    """一次检定的**已定稿结果**（确定性层产出，LLM 只能收到它，不能改它）。"""
+    """一次检定的**已定稿结果**（确定性层产出，LLM 只能收到它，不能改它）。
+
+    `dc` 是**对玩家侧的总修正**（卡内难度 + 转变修正），保持"只有一个修正载体"
+    的形式，因此公式与既有穷举测试（`stat + threat_mod + dc >= roll + 1`）
+    **逐字不变**。
+    """
 
     stat: str
     stat_value: int
@@ -44,10 +49,14 @@ class CheckResult:
     roll: int
     success: bool
     reason: str = field(default="")
+    #: 卡内难度（`dc` 里扣掉转变修正后的部分）—— 用于叙述与诊断。
+    dc_card: int = field(default=0)
+    #: 本次由 **TSF 转变**带来的修正（`app/coc/tsf.py` 提供）。0 = 无转变影响。
+    tsf_shift: int = field(default=0)
 
     @property
     def effective_mod(self) -> int:
-        """本次检定对玩家侧的总修正 = 威胁修正 + 卡内额外难度。"""
+        """本次检定对玩家侧的总修正 = 威胁修正 + 卡内难度 + TSF 转变修正。"""
         return self.threat_mod + self.dc
 
     @property
@@ -90,6 +99,26 @@ def clamp_dc(dc: Any, cfg: dict) -> int:
     return max(lo, min(hi, v))
 
 
+def _clamp_tsf_shift(shift: Any, cfg: dict) -> int:
+    """把 TSF 转变修正钳进同一 `checks.dc_min..dc_max` 域（缺省 0）。
+
+    **为什么用同一个域**：`dc` 是"对玩家侧的总修正"的唯一载体，
+    转变修正与卡内难度在公式里是同一种东西。用同一个域可以保证
+    「卡内 dc 与转变修正的合计」不会突破 `dc_min..dc_max` 的设计边界
+    （t53 §10 的"避免与 DOOM 叠加失控"考虑）。
+    非数值/非法输入一律当 0（**不抛**）：这是从 LLM 与旧档都可能来的数据。
+    """
+    lo = int(t(cfg, "checks.dc_min"))
+    hi = int(t(cfg, "checks.dc_max"))
+    if isinstance(shift, bool):
+        return 0
+    try:
+        v = int(shift)
+    except (TypeError, ValueError):
+        return 0
+    return max(lo, min(hi, v))
+
+
 def check(
     stat_name: str,
     stat_value: int,
@@ -98,18 +127,25 @@ def check(
     cfg: dict,
     *,
     dc: int = 0,
+    tsf_shift: int = 0,
 ) -> CheckResult:
     """执行一次检定并返回**已定稿结果**。
 
     `rng` 由会话持有（`random.Random`，种子落盘）——LLM 从不接触它。
     `cfg` 是已校验来源的 tuning 数据（见 provenance.load_tuning）。
+
+    `tsf_shift`（t54 新增）：`app/coc/tsf.py` 给出的**转变修正**，直接相加进 `dc`。
+    默认 0 ⇒ 未接入时行为**逐字不变**。它不是随机量、也不增加掷骰次数 ——
+    同一 `(stat, threat, dc, tsf_shift)` 下结果只由 `rng` 当次取值决定，
+    因此**可复现性不受影响**。
     """
     lo = int(t(cfg, "checks.roll_min"))
     hi = int(t(cfg, "checks.roll_max"))
     roll = rng.randint(lo, hi)
     smod = threat_mod(threat, cfg)
     d = clamp_dc(dc, cfg)
-    eff = smod + d
+    shift = _clamp_tsf_shift(tsf_shift, cfg)
+    eff = smod + d + shift
     # 「数值大的一方胜；平手判玩家胜」→ 玩家胜 ⟺ stat + eff >= roll + 1
     success = (stat_value + eff) >= (roll + 1)
     reason = (
@@ -122,10 +158,12 @@ def check(
         stat_value=int(stat_value),
         threat=threat,
         threat_mod=smod,
-        dc=d,
+        dc=d + shift,
         roll=roll,
         success=success,
         reason=reason,
+        dc_card=d,
+        tsf_shift=shift,
     )
 
 
@@ -137,18 +175,23 @@ def resolve_deterministic(
     cfg: dict,
     *,
     dc: int = 0,
+    tsf_shift: int = 0,
 ) -> CheckResult:
-    """用**给定**的掷骰结果结算（测试与探针用；不消耗 rng）。"""
+    """用**给定**的掷骰结果结算（测试与探针用；不消耗 rng）。
+
+    `tsf_shift` 语义同 `check()`。默认 0 ⇒ 既有调用与测试**逐字不变**。
+    """
     smod = threat_mod(threat, cfg)
     d = clamp_dc(dc, cfg)
-    eff = smod + d
+    shift = _clamp_tsf_shift(tsf_shift, cfg)
+    eff = smod + d + shift
     success = (stat_value + eff) >= (roll + 1)
     return CheckResult(
         stat=stat_name,
         stat_value=int(stat_value),
         threat=threat,
         threat_mod=smod,
-        dc=d,
+        dc=d + shift,
         roll=int(roll),
         success=success,
         reason=(
@@ -156,6 +199,8 @@ def resolve_deterministic(
             f"→ {'胜' if success else '负'}"
             + ("（平手，判玩家胜）" if stat_value + eff == roll + 1 else "")
         ),
+        dc_card=d,
+        tsf_shift=shift,
     )
 
 

@@ -342,16 +342,18 @@ function bindUiPart04() {
     const world = $("inp-world").value.trim();
     // P18-A：CoC 模式**不需要**世界观（它的题材由古神/角色/难度决定），
     // 且**不带头像管线**（no portrait / anchor），所以这条校验对 coc 跳过。
-    if (S.mode !== "coc" && !world) {
+    // C×T4（t56）：coc_tsf 与 coc 同规则（世界观可留空）。
+    const isCocMode = S.mode === "coc" || S.mode === "coc_tsf";
+    if (!isCocMode && !world) {
       toast("请先填写世界观/剧情设定，或点「随机生成设定」"); return;
     }
     const cocSel = (id, dflt) => { const el = $(id); return el ? el.value : dflt; };
     const payload = {
       mode: S.mode,
       title: $("inp-title").value.trim(),
-      world: S.mode === "coc" ? (world || "盐川町") : world,
-      characters: S.mode === "coc" ? [] : collectNPCs(),
-      protagonist: S.mode === "coc"
+      world: isCocMode ? (world || "盐川町") : world,
+      characters: isCocMode ? [] : collectNPCs(),
+      protagonist: isCocMode
         ? { name: cocSel("coc-character", "Kirie"), anchor: "" }
         : {
             name: $("prot-name").value.trim() || "主角",
@@ -426,21 +428,32 @@ function bindUiPart05() {
 /* ---------- 模式切换（TSF / 普通 Galgame / CoC 跑团） ---------- */
 
 function setSetupMode(mode, silent) {
-  // P18-A（t51）：三模式。未知值一律回退 tsf（与旧行为一致，不新增异常路径）。
-  S.mode = (mode === "vn") ? "vn" : (mode === "coc" ? "coc" : "tsf");
+  // P18-A（t51）：三模式；C×T4（t56）：新增第四模式 coc_tsf。
+  // 未知值一律回退 tsf（与旧行为一致，不新增异常路径）。
+  S.mode = (mode === "vn" || mode === "coc" || mode === "coc_tsf") ? mode : "tsf";
   $("mode-btn-tsf").classList.toggle("on", S.mode === "tsf");
   $("mode-btn-vn").classList.toggle("on", S.mode === "vn");
   const cocBtn = $("mode-btn-coc");
   if (cocBtn) cocBtn.classList.toggle("on", S.mode === "coc");
+  const cocTsfBtn = $("mode-btn-coc-tsf");
+  if (cocTsfBtn) cocTsfBtn.classList.toggle("on", S.mode === "coc_tsf");
   localStorage.setItem("galgame_mode", S.mode);
   // 模式差异：TSF 用锚点构建器（发色/瞳色/服装/气质+预览）；普通模式只需一段外貌描述；
-  // CoC 用调查员设定（难度/死法/古神/角色），与两者的开局表单都不同。
+  // CoC / CoC×TSF 用调查员设定（难度/死法/古神/角色），与两者的开局表单都不同。
   const isVn = S.mode === "vn";
-  const isCoc = S.mode === "coc";
+  const isCoc = S.mode === "coc" || S.mode === "coc_tsf";
+  const isCocTsf = S.mode === "coc_tsf";
   const vnBox = $("vn-anchor-box");
   if (vnBox) vnBox.classList.toggle("hidden", !isVn);
   const cocBox = $("coc-setup-box");
   if (cocBox) cocBox.classList.toggle("hidden", !isCoc);
+  // C×T4：同一个设置框两种 CoC 模式共用，只换提示文案（避免复制整块 → 不会新增 id 冲突面）
+  const cocHint = $("coc-setup-hint");
+  if (cocHint) {
+    cocHint.textContent = isCocTsf
+      ? "调查员设定（CoC×TSF：CoC 玩法 + TSF 转变进度与阶段立绘，需生成立绘）"
+      : "调查员设定（CoC 模式：数值由难度表决定，不生成立绘）";
+  }
   const ap = document.querySelector(".anchor-preview");
   if (ap) ap.classList.toggle("hidden", isVn || isCoc);
   const pg = document.querySelector(".prot-grid");   // class，非 id
@@ -450,16 +463,20 @@ function setSetupMode(mode, silent) {
   const pt = $("prot-head-title");
   if (pt) pt.textContent = isVn
     ? "② 主角设定（普通故事的主角）"
-    : (isCoc ? "② 调查员设定（CoC 模式不带头像管线）" : "② 主角设定（转变将从 TA 开始）");
+    : (isCocTsf
+      ? "② 调查员设定（CoC×TSF 模式：带转变进度与阶段立绘）"
+      : (isCoc ? "② 调查员设定（CoC 模式不带头像管线）" : "② 主角设定（转变将从 TA 开始）"));
   // 1.7.33 最终变化样式面板：仅 TSF 模式显示
   const tgtPanel = $("tsf-target-panel");
   if (tgtPanel) tgtPanel.style.display = (isVn || isCoc) ? "none" : "";
   if (!silent) {
     toast(isVn
       ? "普通模式：心情 / 好感 / 性敏感 / 高潮度"
-      : (isCoc
-        ? "CoC 跑团：DOOM 倒计时 / 双血条 / 属性检定（第三个独立模式）"
-        : "TSF 模式：性别转换数值演进（同化/体质/沉溺…）"), 2600);
+      : (isCocTsf
+        ? "CoC×TSF：CoC 跑团 + TSF 转变进度/阶段立绘（第四个独立模式）"
+        : (isCoc
+          ? "CoC 跑团：DOOM 倒计时 / 双血条 / 属性检定（第三个独立模式）"
+          : "TSF 模式：性别转换数值演进（同化/体质/沉溺…）")), 2600);
   }
   renderStatEditor();
   // P18-A：CoC 的开局下拉（古神/调查员）按需懒加载一次
@@ -495,6 +512,9 @@ function bindUiPart06() {
   // 用存在性判断，兼容未同步更新 index.html 的旧副本。
   const cocBtn = $("mode-btn-coc");
   if (cocBtn) cocBtn.addEventListener("click", () => setSetupMode("coc"));
+  // C×T4（t56）：第四模式按钮（同样写在既有绑定函数内，不新增顶层零缩进绑定）
+  const cocTsfBtn = $("mode-btn-coc-tsf");
+  if (cocTsfBtn) cocTsfBtn.addEventListener("click", () => setSetupMode("coc_tsf"));
   // P18-A（t51）：CoC 存档按钮（写在既有绑定函数内，不新增顶层零缩进绑定）
   const cocSave = $("btn-coc-save-slot");
   if (cocSave) {
@@ -1009,6 +1029,7 @@ function enterGame(state, { instant }) {
   S.tsf = state.tsf || null;
   S.vn = state.vn || null;
   S.coc = state.coc || null;
+  S.cocTsf = state.coc_tsf || null;      // C×T4（t56）：第四模式的 TSF 视图（服务端 t54 接口取值）
   S.charStats = state.char_stats || null;
   S.charPrev = {};
   S.tsfPrev = null;
@@ -1022,8 +1043,9 @@ function enterGame(state, { instant }) {
   $("setup-screen").classList.remove("active");
   $("game-screen").classList.add("active");
   // 按模式切换右侧状态面板：TSF 数值面板 / 普通模式心情面板 / CoC 跑团面板（P18-A）
+  // C×T4（t56）：coc_tsf 复用 CoC 面板（面板内多一段 TSF 进度）
   const isVn = S.mode === "vn";
-  const isCoc = S.mode === "coc";
+  const isCoc = S.mode === "coc" || S.mode === "coc_tsf";
   $("tsf-panel").classList.toggle("hidden", isVn || isCoc);
   $("vn-panel").classList.toggle("hidden", !isVn);
   const cocPanel = $("coc-panel");
@@ -1263,7 +1285,7 @@ function renderStatRows(box, states, prev, append) {
 
 function renderStatsPanels() {
   if (S.mode === "vn") renderVnPanel();
-  else if (S.mode === "coc") renderCocPanel();
+  else if (S.mode === "coc" || S.mode === "coc_tsf") renderCocPanel();   // C×T4（t56）
   else renderTsfPanel();
 }
 
@@ -1312,6 +1334,41 @@ function renderCocPanel() {
   const extra = $("coc-extra");
   if (extra && Array.isArray(c.extra)) {
     extra.innerHTML = c.extra.map((d) => `${d.name} ${d.value}`).join("　");
+  }
+  renderCocTsfBox();
+}
+
+/* ---------- C×T4（t56）：CoC×TSF 的进度块 ----------
+   数值 100% 来自服务端（`app/coc/tsf.py` 的 `mechanical_effects`，即 t54 的接口）：
+   前端**不重算**阶段，只做显示。没有 `coc_tsf` 字段（纯 coc 局）时整块隐藏。 */
+
+function renderCocTsfBox() {
+  const box = $("coc-tsf-box");
+  if (!box) return;
+  const view = S.cocTsf;
+  if (!view) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  const prog = Math.max(0, Math.min(100, Number(view.progress) || 0));
+  const pct = $("coc-tsf-pct");
+  if (pct) pct.textContent = `${prog}%`;
+  const bar = $("coc-tsf-bar");
+  if (bar) bar.style.width = `${prog}%`;
+  const stageBox = $("coc-tsf-stage");
+  if (stageBox) {
+    const nm = escapeHtml(String(view.stage_name || ""));
+    const idt = escapeHtml(String(view.identity || ""));
+    const sym = escapeHtml(String(view.symptom || ""));
+    stageBox.innerHTML = `阶段 ${(Number(view.stage) || 0) + 1}：${nm}` +
+      (idt ? `（${idt}）` : "") + (sym ? `<br>症状：${sym}` : "");
+  }
+  const hint = $("coc-tsf-sprite-hint");
+  if (hint) {
+    const ports = (S.assets && S.assets.portraits) || {};
+    const ready = Object.values(ports).filter((p) => p.status === "ready").length;
+    const pending = Object.values(ports).filter((p) => p.status === "pending").length;
+    hint.textContent = ready > 0
+      ? `立绘：${ready} 张已就绪`
+      : (pending > 0 ? "立绘生成中…（无图也不会中断对局）" : "立绘未生成（无图不报错）");
   }
 }
 
@@ -1550,6 +1607,9 @@ function playTurn(state, { instant }) {
   S.tsf = state.tsf;
   S.vn = state.vn;
   S.coc = state.coc || null;
+  // C×T4（t56）：每轮都用服务端新值刷新 TSF 视图（缺字段时保留旧值，避免面板闪空）
+  if (state.coc_tsf) S.cocTsf = state.coc_tsf;
+  if (state.assets) S.assets = state.assets;
   // 关键：推进/发言/读档后立即同步背景映射，否则第一帧永远取旧 map，
   // 新幕背景要等轮询才能出现（旧档/已就绪资产无轮询 → 永远不显示）
   S.bgMap = state.bg_map || S.bgMap;
@@ -2064,8 +2124,9 @@ function updateSprites(speaker, emotion) {
 function pickSpriteByState(urls, name, isProt, stage, emotion) {
   const outfit = (S.outfits || {})[name];
   let url;
-  if (isProt && S.mode === "tsf") {
-    // 主角（TSF 模式）：优先当前换装差分 → 阶段立绘 → 回退已有阶段
+  if (isProt && (S.mode === "tsf" || S.mode === "coc_tsf")) {
+    // 主角（TSF / C×T4 的 CoC×TSF）：优先当前换装差分 → 阶段立绘 → 回退已有阶段
+    // coc_tsf 的 stage 由**服务端**给出（`state.tsf.stage` ← t54 的接口），前端不重算。
     url = outfit ? urls[`${name}|${outfit}`] : null;
     if (!url) {
       url = urls[`${name}|阶段${stage + 1}`];

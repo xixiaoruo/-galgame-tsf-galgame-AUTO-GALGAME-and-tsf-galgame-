@@ -112,6 +112,16 @@ def initial_states(payload: dict | None = None, cfg: dict | None = None) -> dict
         "log": [],
         "turn": 0,
         "rng_state": None,
+
+        # ---- t54：CoC 内的 TSF 子系统（`app/coc/tsf.py`）新增的两个字段 ----
+        # **刻意没有** `tsf_progress` / `tsf_stage`：它们是**派生量**
+        # （`tsf.tsf_progress_of` 从账本投影、`tsf.stage_index` 从段表现算），
+        # 落盘反而制造"存档与账本不一致"的可能（t53 §9 的结论，captain 已采纳）。
+        # 下面两个字段不可推导，所以必须落盘：
+        #   · tsf_nudge_total —— 模型被允许提议的、有界的推动累计（账本不记录它）
+        #   · tsf_symptoms    —— 已叙述过的症状档位（同一进度下"看过/没看过"是两种历史）
+        "tsf_nudge_total": 0,
+        "tsf_symptoms": [],
     }
     if p.get("seed") is not None:
         state["rng_state"] = rng_to_json(random.Random(int(p["seed"])))

@@ -40,9 +40,149 @@ from app import vn
 # P18-A（t51）：CoC 作为**第三个独立模式**。只导入会话层，不合并既有分发分支。
 # 位置在既有导入之后 + 仅新增一行 → 与 t37/t38/t39 的改动不构成块级冲突。
 from app.coc import session as coc
+# C×T4（t56）：第四模式 coc_tsf —— 面板进度**复用 t54 的接口取值**（前端不重算阶段）。
+from app.coc import tsf as coc_tsf
 from app.llm import LLMError
 
 import sys as _sys
+
+
+# ---------------------------------------------------------------------------
+# C×T4（t56）：CoC×TSF（第四模式）的**服务端**接线
+#
+# 职责边界（重要）：
+#   · 引擎与镜像的**构造/落盘**在 `app/game.py`（t55：`make_coc_tsf_mirror` /
+#     `coc_tsf_persist` / `coc_tsf_load` / `start_coc_tsf_portrait`）与
+#     `app/coc/tsf.py`（t54：`tsf_progress_of` / `mechanical_effects`）——本文件**只调用**。
+#   · 本文件只做三件事：① 记住"哪些 coc 会话是 coc_tsf"② 每回合把镜像进度刷新/落盘
+#     ③ 把进度与立绘资产**塞进既有的** `GET /api/game/{sid}` 响应（不新增端点、
+#     因此不需要新的鉴权面：沿用同一套中间件）。
+#   · 一切失败都不影响开局/回合：镜像只是"面板与立绘"的附加物。
+# ---------------------------------------------------------------------------
+
+#: 本进程内已知的 coc_tsf 会话 sid（内存注册表，与 game.SESSIONS / coc 的会话表同生命周期）
+_COC_TSF_SIDS: set[str] = set()
+#: 镜像缓存：sid → mirror（含 assets，供面板取立绘；进程内，重启后由 coc_tsf_load 复原）
+_COC_TSF_MIRRORS: dict[str, dict] = {}
+
+
+def _coc_tsf_mirror(sid: str) -> dict | None:
+    """取该会话的 CoC×TSF 镜像；没有就返回 None（调用方据此走原路径）。
+
+    先查进程内缓存，再查 t55 的**自有落盘**（`<DATA_DIR>/coc_tsf/<sid>.json`）——
+    后者让"读档后重新进入 coc_tsf"仍能恢复进度与立绘资产，而不必依赖内存。
+    """
+    if not sid:
+        return None
+    hit = _COC_TSF_MIRRORS.get(sid)
+    if hit is not None:
+        return hit
+    if sid not in _COC_TSF_SIDS:
+        try:
+            loaded = game.coc_tsf_load(sid)
+        except Exception:            # noqa: BLE001  —— 镜像缺失/损坏都不该影响主流程
+            loaded = None
+        if not isinstance(loaded, dict):
+            return None
+        _COC_TSF_SIDS.add(sid)
+        _COC_TSF_MIRRORS[sid] = loaded
+        return loaded
+    return None
+
+
+def _coc_tsf_state(sid: str) -> dict:
+    """取 CoC 会话的原始 state（`coc.get(sid)` 是**会话 dict**，run 在其 `["run"]` 下）。"""
+    return coc.get(sid)["run"].state
+
+
+def _coc_tsf_progress(sid: str) -> int:
+    """当前 CoC×TSF 进度（0–100）——**只走 t54 的接口**，不在此处重算。"""
+    try:
+        return int(coc_tsf.tsf_progress_of(_coc_tsf_state(sid)))
+    except Exception:                # noqa: BLE001
+        return 0
+
+
+def _coc_tsf_start(payload, started: dict) -> None:
+    """开局时建镜像 + 落盘 + 起首张立绘。**任何异常都不影响开局结果**。"""
+    sid = str((started or {}).get("sid") or "")
+    if not sid:
+        return
+    try:
+        p = payload.model_dump() if hasattr(payload, "model_dump") else dict(payload or {})
+        prog = _coc_tsf_progress(sid)
+        mirror = game.make_coc_tsf_mirror(
+            {"sid": sid, "created": time.time(),
+             "run": {"state": _coc_tsf_state(sid)},
+             "content_rating": p.get("content_rating", "18"),
+             "r18_enabled": bool(p.get("r18_enabled", True)),
+             "allow_forced": bool(p.get("allow_forced", True))},
+            progress=prog,
+            anchor=str(p.get("anchor") or ""),
+            character=str(p.get("character") or ""),
+        )
+        _COC_TSF_SIDS.add(sid)
+        _COC_TSF_MIRRORS[sid] = mirror
+        game.coc_tsf_persist(mirror)
+        # 首张立绘：后台排队（`_queue_asset` 内部处理失败回退，不空屏、不抛到请求里）
+        game.start_coc_tsf_portrait(mirror, progress=prog,
+                                    target_en=str(p.get("tsf_target_en") or ""))
+    except Exception as e:           # noqa: BLE001
+        logging.warning("coc_tsf 开局附加流程失败（不影响开局）：%s", e)
+
+
+def _coc_tsf_refresh(sid: str) -> None:
+    """回合结束后同步镜像进度；**段号变化**时才排新立绘（阶段跃迁=重新生成）。"""
+    mirror = _coc_tsf_mirror(sid)
+    if mirror is None:
+        return
+    try:
+        prog = _coc_tsf_progress(sid)
+        prot = mirror.setdefault("protagonist", {})
+        stats = prot.setdefault("stats", {})
+        before_stage = int(mirror.get("_last_stage_idx", -1))
+        stats["progress"] = prog
+        tbl = mirror.get("stages") or coc_tsf.default_stages()
+        idx = coc_tsf.stage_index(prog, tbl)
+        game.coc_tsf_persist(mirror)
+        if idx != before_stage:
+            mirror["_last_stage_idx"] = idx
+            keys = (mirror.get("assets") or {}).get("portraits") or {}
+            busy = any(v.get("status") == "pending" for v in keys.values())
+            if not busy:             # 已在生成就不重复排队
+                game.start_coc_tsf_portrait(mirror, progress=prog)
+    except Exception as e:           # noqa: BLE001
+        logging.warning("coc_tsf 进度刷新失败（不影响回合）：%s", e)
+
+
+def _coc_tsf_view(sid: str) -> dict | None:
+    """给面板的 TSF 视图（进度值 + 阶段名 + 机制档位/修正），值全部来自 t54 的接口。"""
+    mirror = _coc_tsf_mirror(sid)
+    if mirror is None:
+        return None
+    try:
+        eff = coc_tsf.mechanical_effects(_coc_tsf_state(sid))
+    except Exception:                # noqa: BLE001
+        return None
+    eff["target_en"] = str(((mirror.get("protagonist") or {}).get("anchor")) or "")
+    return eff
+
+
+def _coc_tsf_decorate(d, sid: str):
+    """把 coc_tsf 的附加字段挂到**既有响应**上（读状态与推进回合共用一处，避免两处漂移）。
+
+    纯 coc 会话取不到镜像 → 原样返回，t51 的行为逐字段不变。
+    """
+    view = _coc_tsf_view(sid)
+    if view is None or not isinstance(d, dict):
+        return d
+    mirror = _coc_tsf_mirror(sid) or {}
+    d["mode"] = "coc_tsf"
+    d["coc_tsf"] = view
+    d["assets"] = mirror.get("assets") or {"portraits": {}, "backgrounds": {}}
+    d["tsf"] = {"stage": int(view.get("stage", 0))}
+    return d
+
 
 debug_level = logging.DEBUG if "--debug" in _sys.argv else logging.INFO
 logging.basicConfig(level=debug_level,
@@ -457,9 +597,14 @@ def coc_config():
     路径含三段，不会与 `GET /api/game/{sid}` 冲突。
     """
     try:
-        return coc.config_view()
+        view = coc.config_view()
     except Exception as e:      # 数据缺失时也要给出可读错误，而不是 500 堆栈
         raise HTTPException(500, f"CoC 配置不可用：{e}")
+    # C×T4（t56）：告知前端本进程支持哪些模式（纯增字段，老前端忽略即可）。
+    view["modes"] = ["tsf", "vn", "coc", "coc_tsf"]
+    view["coc_tsf"] = {"available": True, "label": "CoC×TSF",
+                       "note": "CoC 跑团 + TSF 转变进度/立绘（第四模式）"}
+    return view
 
 
 @app.post("/api/setup/random")
@@ -566,6 +711,17 @@ class SpeakPayload(BaseModel):
 @app.post("/api/game/start")
 async def start_game(payload: StartPayload):
     try:
+        if payload.mode == "coc_tsf":
+            # C×T4（t56）：第四模式。**新建独立分支**放在既有 coc 分支之前 ——
+            # coc 那一块（t51）一行未动，既有三模式的路径完全不变。
+            # 开局仍是 CoC 的开局（同一引擎），只是额外建一个 TSF 镜像用于面板/立绘。
+            started = coc.start(payload.model_dump())
+            _coc_tsf_start(payload, started)
+            # 开局响应也要带 mode/coc_tsf/assets：前端 enterGame 直接拿这份 state，
+            # 不装饰的话它会以为当前是纯 coc 局（实测：S.mode 回落成 "coc"）。
+            sid0 = str((started or {}).get("sid") or "")
+            _coc_tsf_refresh(sid0)
+            return _coc_tsf_decorate(started, sid0)
         if payload.mode == "coc":
             # P18-A（t51）：第三模式的**早返回**分支。
             # 早返回而不是插在 else 链里，是为了让既有两分支一个字符都不动。
@@ -1576,7 +1732,11 @@ async def advance(sid: str, payload: AdvancePayload):
         # P18-A（t51）：coc 早返回。**不**走 game.get_session（coc 会话不在那本表里，
         # 走那条会抛"会话不存在"）。
         if coc.is_coc(sid):
-            return await coc.advance_async(coc.get(sid), payload.choice_index)
+            # C×T4（t56）：coc_tsf 走同一条推进路径，回合结束后同步镜像进度
+            # （`_coc_tsf_refresh` 对纯 coc 会话是空操作：取不到镜像就直接返回）。
+            done = await coc.advance_async(coc.get(sid), payload.choice_index)
+            _coc_tsf_refresh(sid)
+            return _coc_tsf_decorate(done, sid)
         if game.get_session(sid).get("mode") == "vn":
             return await vn.advance(sid, payload.choice_index)
         return await game.advance(sid, payload.choice_index)
@@ -1602,7 +1762,9 @@ async def game_state(sid: str):
         d = coc.public_state(coc.get(sid))
         d["pinned"] = {}
         d["tsf_target"] = {}
-        return d
+        # C×T4（t56）：coc_tsf 的附加字段（纯 coc 会话不加，行为与 t51 完全一致）。
+        # 值全部来自 t54 的接口（`mechanical_effects`）——前端**不重算**阶段。
+        return _coc_tsf_decorate(d, sid)
     try:
         s = game.get_session(sid)
     except game.GameError as e:
@@ -1619,6 +1781,15 @@ async def game_state(sid: str):
 
 @app.get("/api/game/{sid}/assets")
 def game_assets(sid: str):
+    # C×T4（t56）：coc 会话不在 game.SESSIONS 里，前端 2 秒轮询这条时会拿到 404
+    # （控制台报错）。这里在 `game.get_session` **之前**早返回：
+    #   · coc_tsf → 返回镜像自己的资产（新立绘生成完就能被轮询刷出来，不必刷新页面）
+    #   · 纯 coc  → 返回空资产表（保持 t51 行为：无立绘管线）
+    # 只新增早返回分支，既有 TSF/VN 路径一行未动。
+    if coc.is_coc(sid):
+        mirror = _coc_tsf_mirror(sid)
+        assets = (mirror or {}).get("assets") or {"portraits": {}, "backgrounds": {}}
+        return {"assets": assets, "bg_map": {}}
     try:
         s = game.get_session(sid)
     except game.GameError as e:

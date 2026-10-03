@@ -23,6 +23,7 @@ from . import content
 from . import dice
 from . import sanitize as _san
 from . import state as _state
+from . import tsf as _tsf
 from .provenance import t
 
 
@@ -416,14 +417,22 @@ class Run:
             threat = str(spec.get("threat") or (self.threat_of(locs[0]) if locs else "SAFE"))
             stat_name = str(spec.get("stat"))
             stat_value = int((self.state.get("stats") or {}).get(stat_name, 0))
+            # ★ t54 接线点：TSF 转变修正接进检定公式（**唯一**的检定点）
+            #   · 修正来自 `tsf.check_shift`，是**纯函数**（只读账本投影 + 固定表）
+            #   · 因此同 seed 同输入 ⇒ 同 shift ⇒ 同结果（可复现性见 test_coc_tsf）
+            #   · shift=0 时公式与接入前**逐字相同**（dice.check 的默认参数）
+            tsf_shift = _tsf.check_shift(self.state, stat_name)
             res_check = dice.check(stat_name, stat_value, threat, self.rng, self.cfg,
-                                   dc=spec.get("dc", 0))
+                                   dc=spec.get("dc", 0), tsf_shift=tsf_shift)
             self.log("check", {
                 "card": card["id"], "choice": choice_index, "stat": res_check.stat,
                 "roll": res_check.roll, "threat": res_check.threat,
                 "threat_mod": res_check.threat_mod, "dc": res_check.dc,
                 "target": res_check.target, "margin": res_check.margin,
                 "success": res_check.success, "is_tie": res_check.is_tie,
+                # t54：把转变修正记入账本（V-08 A2 的"数值为何变化"同样适用于它）
+                "tsf_shift": res_check.tsf_shift,
+                "tsf_progress": _tsf.progress(self.state),
             })
             branch = "success" if res_check.success else "failure"
             outcome = dict(ch.get(branch) or {})

@@ -46,6 +46,8 @@ MODULES = [
     "test_paths_layout",
     # 复核 D1：数值边界异常形态完备性（inf/-inf/nan/Decimal/字符串/超大整数…）
     "test_numeric_edge",
+    # t54：CoC 内的 TSF 子系统（机制型）—— 单调/可复现/旧档/边界/白名单/可观察性
+    "test_coc_tsf",
 ]
 
 

@@ -35,6 +35,8 @@
         <span id="version-tag" class="version-tag"></span>
         <button id="mode-btn-vn" class="btn ghost mode-btn">♥ 普通 Galgame</button>
         <button id="mode-btn-coc" class="btn ghost mode-btn">🕯 CoC 跑团</button>
+        <!-- C×T4（t56）：第四模式 CoC×TSF（CoC 玩法 + TSF 转变进度/立绘） -->
+        <button id="mode-btn-coc-tsf" class="btn ghost mode-btn">🕯♀ CoC×TSF</button>
         <button id="mode-btn-tsf" class="btn ghost mode-btn on">♀ TSF Galgame</button>
         <button id="btn-credits" class="btn ghost mode-btn credits-link">🍰 制作名单</button>
       </div>
@@ -63,7 +65,7 @@
         </label>
         <!-- P18-A（t51）：CoC 跑团开局设定（第三个独立模式；不接立绘/锚点管线） -->
         <div class="vn-anchor-box hidden" id="coc-setup-box">
-          <small>调查员设定（CoC 模式：数值由难度表决定，不生成立绘）</small>
+          <small id="coc-setup-hint">调查员设定（CoC 模式：数值由难度表决定，不生成立绘）</small>
           <div class="prot-grid">
             <label>难度
               <select id="coc-difficulty" class="text-input">
@@ -447,6 +449,13 @@
         <div id="coc-stats" class="model-info"></div>
         <div id="coc-tags" class="model-info"></div>
         <div id="coc-extra" class="model-info"></div>
+        <!-- C×T4（t56）：TSF 转变进度（仅 coc_tsf 显示；数值全部由服务端 t54 接口给出） -->
+        <div id="coc-tsf-box" class="hidden">
+          <div class="tsf-row-head"><span>🧬 TSF 转变进度</span><b id="coc-tsf-pct">0%</b></div>
+          <div class="tsf-bar"><div class="tsf-bar-fill" id="coc-tsf-bar" style="width:0%"></div></div>
+          <div id="coc-tsf-stage" class="model-info"></div>
+          <div id="coc-tsf-sprite-hint" class="model-info"></div>
+        </div>
         <div class="tsf-foot">
           <button id="btn-coc-save-slot" class="btn mini ghost" title="存入全局存档槽">💾 存档</button>
         </div>

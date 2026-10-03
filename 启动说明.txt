@@ -1,0 +1,29 @@
+自动化AI Galgame —— 启动方式说明
+================================================
+
+【新版（推荐）】原生窗口，不再开浏览器
+    双击： 启动游戏（新版）.lnk
+    或：   start.bat
+    或直接： dist\TSF_Galgame\TSF_Galgame.exe
+
+    ★ 必须整个目录一起用，不能只复制 exe 文件：
+        dist\TSF_Galgame\TSF_Galgame.exe       ← 双击这个
+        dist\TSF_Galgame\_internal\...        ← 依赖都在这里（Qt / Python / CoC 数据）
+      只把 exe 单独拷到别处会启动失败（找不到 _internal）。
+
+【旧版（浏览器模式，保留可回退）】
+    双击：  start-旧版浏览器模式.bat
+    行为：  用 python 起 server.py，然后用系统浏览器打开 127.0.0.1:8765
+
+【不能同时开两个】
+    游戏是单实例的（防止两份实例同时写同一份存档）。
+    若已有实例在跑，再双击新版会弹提示"游戏已经在运行中"然后退出 —— 这是正常的。
+    要换版本玩，先关掉当前实例。
+
+【存档与配置在哪】
+    存档/缓存： D:\TSF_Galgame_Data\data\
+    配置文件：  D:\TSF_Galgame\config.json      （含 API key，已被 .gitignore 忽略）
+
+【旧 exe（不再使用，保留作回退）】
+    dist\TSF_Galgame.exe            单文件版 2026-09-26（137 MB）
+    TSF_Galgame.exe                  单文件版 2026-09-06（129 MB）

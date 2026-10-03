@@ -657,13 +657,20 @@ def _restore_latest_for(session: dict, group: str, label: str) -> bool:
 
 
 def _queue_asset(session: dict, group: str, key: str, label: str,
-                 coro_factory, base: str, seq: int, ext: str = "png") -> None:
+                 coro_factory, base: str, seq: int, ext: str = "png",
+                 persist_fn=None) -> None:
     """登记一个图片资产并启动后台生成任务。
 
     每个会话有独立可读子目录（标题_主角_随机码）/portraits|backgrounds|raw/，
     成品文件名 = {base}——{序号:03d}_{内容hash8}.{ext}；raw 原图同目录、哈希名。
+
+    `persist_fn`（t55，C×T3）：可选的自有持久化回调，**默认 None = 原行为**
+    （`persist(session)` → 写 `<SAVES_DIR>/<sid>.json`）。给 CoC×TSF 镜像会话用时
+    传 `game.coc_tsf_persist`，把镜像落到 `<DATA_DIR>/coc_tsf/<sid>.json`，
+    避免「CoC 镜像被写成主模式存档 → `load_all()` 把 CoC 局当主模式对局载入」（t53 §4.7/§8.2）。
     """
     assets = session["assets"]
+    _persist = persist_fn or persist          # ← 唯一的持久化出口（三条路径共用）
     if key in assets[group]:
         return  # 已在生成或已就绪
     assets[group][key] = {"status": "pending", "file": "", "label": label,
@@ -713,13 +720,13 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
                 item["status"] = "ready"
                 item["file"] = rel
                 _save_cg_if_bridge(session, key, rel)
-                persist(session)
+                _persist(session)
                 return
             path.write_bytes(data)
             item["status"] = "ready"
             item["file"] = rel
             _save_cg_if_bridge(session, key, rel)
-            persist(session)
+            _persist(session)
             log.info("asset task ready: %s", label)
         except Exception as e:
             # 兜底：任何异常都标记 error（否则任务逃逸会让资产永远 pending）
@@ -729,7 +736,7 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
             # 生成失败：展示上一版旧立绘，不让玩家空屏
             if not _restore_latest_for(session, group, label):
                 pass
-            persist(session)
+            _persist(session)
             # 1.7.32 失败自动重画（用户规则：失败不要卡着，自动重画收盘）：
             # 每个资产 key 失败后延迟 12 秒自动重试一次（防「失败=永久
             # error」——引擎/判定器/构图齐备前提下重试通常即成功）；
@@ -747,7 +754,8 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
                              int(session.get("seed_offset", 0)))
                     assets[group].pop(key, None)
                     _queue_asset(session, group, key, label,
-                                 coro_factory, base, seq, ext)
+                                 coro_factory, base, seq, ext,
+                                 persist_fn=persist_fn)
             except Exception as re:
                 log.warning("asset auto-retry failed %s: %s", label, re)
 
@@ -760,6 +768,181 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
                     "key=%s label=%s -> pending entry rolled back",
                     session.get("sid"), group, key, label)
         raise GameError("后台生成任务未能排入事件循环（服务未就绪），请稍后重试")
+
+
+# =============================================================================
+# CoC×TSF 立绘桥（t55 / C×T3）—— 让 CoC 会话复用**同一个**出图闸门与 tsf 配方
+#
+# 设计依据 `D:\dsh创造\coc-mode\COC-TSF-REUSE.md` §8.2 / §9 / §12：
+#   · CoC 原生会话**保持 CoC 语义不变**，不动 `app/coc/**`（他人 inScope）；
+#   · 另建**镜像会话 mirror**（形状对齐 `new_session` 的最小集）承载资产；
+#   · mirror **不落 `saves/`** —— 走 `coc_tsf_persist` 写 `<DATA_DIR>/coc_tsf/<sid>.json`，
+#     否则 `load_all()` 会把 CoC 局当主模式对局载入（t53 实测）；
+#   · 提示词**只 import `app/tsf.py`**（配方红线：不改它），阶段由 `tsf.stage_of`
+#     按进度算；像素画风由 `_queue_asset` 内的既有钩子（`pixel_mod.apply_async`）自动生效。
+# =============================================================================
+
+#: 镜像会话的存档目录名（相对 `cfgmod.DATA_DIR`）；与 `saves/` 完全不同层
+COC_TSF_DIR = "coc_tsf"
+
+
+def coc_tsf_persist(mirror: dict, cfg: dict | None = None) -> None:
+    """CoC×TSF 镜像会话的**自有**持久化：`<DATA_DIR>/coc_tsf/<sid>.json`。
+
+    为什么不用 `persist()`：`persist` 写 `saves/`，而 `load_all()` 会把「含 `protagonist`
+    的存档」当主模式会话载入 ⇒ CoC 局会出现在主模式对局列表里（t53 §4.7 实测）。
+    这里只写镜像的最小集（assets/progress/stages），不含主模式的会话语义。
+    """
+    try:
+        sid = str(mirror.get("sid") or "")
+        if not sid:
+            return
+        d = cfgmod.DATA_DIR / COC_TSF_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        cfgmod.atomic_write_json(d / f"{sid}.json", {
+            "sid": sid,
+            "title": mirror.get("title", ""),
+            "protagonist": mirror.get("protagonist", {}),
+            "assets": mirror.get("assets", {}),
+            "portrait_history": mirror.get("portrait_history", []),
+            "seed_offset": mirror.get("seed_offset", 0),
+            "stage_idx": mirror.get("_last_stage_idx"),
+            "saved_at": time.time(),
+        }, indent=1)
+    except Exception as e:                     # 持久化失败不得影响出图
+        log.warning("coc_tsf persist failed: %s", e)
+
+
+def coc_tsf_load(sid: str) -> dict | None:
+    """读回 CoC×TSF 镜像（存档联动：读档后立绘与阶段要一致）。"""
+    try:
+        p = cfgmod.DATA_DIR / COC_TSF_DIR / f"{sid}.json"
+        if not p.is_file():
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("coc_tsf load failed %s: %s", sid, e)
+        return None
+
+
+def make_coc_tsf_mirror(coc_session: dict, *, progress: int, anchor: str = "",
+                        character: str = "", stages: list[dict] | None = None,
+                        title: str = "") -> dict:
+    """按 t53 §8.2 的镜像形状建一个 CoC×TSF 会话（**只读** CoC 会话，不改它）。
+
+    `progress` 由 CoC 侧算好（t53 §9 的投影：`tsf_progress_of(run.state)`）；
+    未显式给 `stages` 时用 `tsf.STAGES_V6`（六段，与「一章一段」的 Initiate 对齐）。
+    """
+    sid = str(coc_session.get("sid") or "")
+    name = character or ((coc_session.get("run") or {}).get("state", {})
+                         .get("investigator", {}) or {}).get("name", "") or "调查员"
+    stages_tbl = stages or tsf.build_stages(6)
+    return {
+        "sid": sid,
+        "title": title or f"CoC·{name}",
+        "prot_handle": f"{name}_{sid[:4]}",
+        "created": coc_session.get("created", time.time()),
+        "content_rating": coc_session.get("content_rating", "18"),
+        "r18_enabled": coc_session.get("r18_enabled", True),
+        "allow_forced": coc_session.get("allow_forced", True),
+        "protagonist": {
+            "name": name,
+            "anchor": anchor,
+            "stats": {"progress": int(progress)},
+        },
+        "stages": stages_tbl,
+        "stat_config": [],
+        "assets": {"portraits": {}, "backgrounds": {}},
+        "bg_map": {},
+        "portrait_history": [],
+        "seed_offset": 0,
+        "_coc_tsf": True,            # 标记：这个会话不是主模式会话
+    }
+
+
+def coc_tsf_prompts(mirror: dict, progress: int | None = None,
+                    target_en: str = "") -> dict:
+    """CoC×TSF 立绘的提示词（**只 import tsf.py，不改它**）——纯函数，便于对照验证。
+
+    返回 `{stage_idx, positive, negative, denoise}`：段索引用 `tsf.stage_of`，
+    正/负面词用同一套 `tsf` 函数，保证与主模式**同一配方**。
+    """
+    tbl = tsf.stages_for(mirror) if mirror.get("stages") else tsf.build_stages(6)
+    prot = mirror.get("protagonist") or {}
+    prog = int(progress if progress is not None
+               else (prot.get("stats") or {}).get("progress", 0) or 0)
+    idx = tsf.stage_of(prog, tbl)
+    anchor = prot.get("anchor", "") or ""
+    positive = (tsf.stage_portrait_prompt(anchor, prog, target_en, tbl)
+                + "，" + TRANSFORM_IMPROVE_EN)
+    negative = (tsf.stage_negative_relaxed_stage(idx, tbl)
+                + "，" + TRANSFORM_IMPROVE_NEG + "，" + PROT_AGE_NEG
+                + "，no camera, no phone, no lens")
+    return {"stage_idx": idx, "progress": prog, "positive": positive,
+            "negative": negative,
+            "denoise": tsf.stage_chain_denoise(idx, tbl, cross_stage=False)}
+
+
+def start_coc_tsf_portrait(mirror: dict, *, progress: int | None = None,
+                           target_en: str = "", supply_bytes: bytes | None = None,
+                           cfg: dict | None = None) -> str:
+    """发起一次 CoC×TSF 立绘生成（走**既有** `_queue_asset` 闸门，不复制它的逻辑）。
+
+    `supply_bytes` 仅用于**无真实生图时的管线验证**（喂一张真实缓存立绘走完整闸门：
+    像素钩子 → 成品复检 → 落盘）。为 None 时走与主模式相同的 `ImageClient.generate_portrait`。
+    返回资产 key（`mirror["assets"]["portraits"][key]` 里跟踪状态/文件）。
+    """
+    cfg = cfg or cfgmod.load_config()
+    tbl = tsf.stages_for(mirror) if mirror.get("stages") else tsf.build_stages(6)
+    prot = mirror["protagonist"]
+    p = int(progress if progress is not None
+            else (prot.get("stats") or {}).get("progress", 0) or 0)
+    prot["stats"]["progress"] = p                     # 保持一致（stage_of 也读这里）
+    idx = tsf.stage_of(p, tbl)
+    mirror["_last_stage_idx"] = idx
+    name, anchor = prot["name"], prot.get("anchor", "")
+    prompt = coc_tsf_prompts(mirror, p, target_en)
+    client = ImageClient(cfg)
+    mode_tag = "mock" if client.mock else "real"
+    key = _skey(mirror, "coc-tsf-portrait", mode_tag, PROMPT_VERSION, _params_tag(cfg),
+                *pixel_mod.key_parts(cfg.get("image")),   # 像素开关进 key：开/关各自成图
+                name, anchor, idx, int(p // 10))
+    label = f"{name}·阶段{idx + 1}"
+    handle = mirror.get("prot_handle") or name
+    seq = _reserve_file_name(mirror, handle)
+    style = _img_style(mirror)
+    neg = (prompt["negative"]
+           + ("" if _adult_flags(mirror)[0]
+              else "，nude, naked, underwear only, lingerie, topless"))
+
+    nude_ok = _nude_hint_text("", "")     # CoC 立绘无换装/重画需求 ⇒ 与主模式"阶段立绘"同参
+
+    async def factory():
+        if supply_bytes is not None:                  # 管线验证路径（真实缓存图）
+            data = supply_bytes
+        else:
+            data = await client.generate_portrait(
+                name, prompt["positive"], f"阶段{idx + 1}", f"{name}的阶段立绘",
+                style, extra_negative=neg, seed=_seed_for(mirror, f"coc|{name}|{idx}"),
+                strict=True)
+        # ★ t58：补齐与主模式（`_start_protagonist_portrait` L2333-2350）**同一套**三步后处理。
+        # `generate_portrait` 不含抠图，`_queue_asset` 也不负责抠图 ⇒ 不补这三步，
+        # CoC×TSF 立绘就是"带背景的不透明方图"（t55 实测 alpha 级=1、透明 0%）。
+        raw_name = f"{_session_dir_name(mirror)}/raw/{key}_raw.png"
+        (cfgmod.CACHE_DIR / raw_name).write_bytes(data)          # 1) 未抠图原图（同名同目录约定）
+        out = await process_portrait_async(data, _cutout_mode())  # 2) 抠图（rembg，CPU）
+        issue = await asyncio.to_thread(
+            _final_check_issue, out, nude_ok=nude_ok)             # 3) 成品完整性复检
+        if issue:
+            # 语义与主模式**阶段立绘**（`not outfit_s`）一致：CoC×TSF 立绘没有"换装差分"形态，
+            # 不合格就该拒绝入库 → 由 `_queue_asset` 的失败路径回退上一版（不空屏），
+            # 而不是把一张有缺陷的图写进 ready（主模式对换装差分才只软告警）。
+            raise ImageGenError(f"成品完整性复检未通过（{issue}）")
+        return out, raw_name
+
+    _queue_asset(mirror, "portraits", key, label, factory, handle, seq,
+                 persist_fn=coc_tsf_persist)
+    return key
 
 
 # 1.7.35 场景→制服自动映射（用户：学园背景角色应统一校服；神社/女仆店/

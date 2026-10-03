@@ -203,7 +203,11 @@ async def _narrate(session: dict, res: Resolution) -> dict:
         turn = _prompt.narr_turn(raw, cfg)
         # E2/E3 再走一次：提案只能落在白名单内，且只能叠加在已定稿结果之上
         if turn.get("coc_delta"):
-            run.apply(turn["coc_delta"], reason="llm_proposal")
+            # ⚠️ 必须显式 trust="llm"：`Run.apply` 的默认是 engine（引擎结算用），
+            # 而这里拿到的是**模型原值**。即使 `narr_turn` 已经过白名单，也要在这一层
+            # 把边界写成结构化事实——这样任何绕过解析层的改动都会**当场抛
+            # TrustViolation**（被下面的 except 降级为系统文案），而不是静默获得引擎权限。
+            run.apply(turn["coc_delta"], reason="llm_proposal", trust="llm")
         return turn
     except Exception as exc:   # 兜底：绝不因叙事失败让对局崩
         return dict(_fallback_text(res, error=repr(exc)), _degraded=True)

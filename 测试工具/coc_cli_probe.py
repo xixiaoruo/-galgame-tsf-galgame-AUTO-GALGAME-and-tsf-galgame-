@@ -445,9 +445,12 @@ def scenario_sanitize() -> Report:
     )
 
     # 越界钳制：level-1 ±3、level-2 ±5
+    # ⚠️ 这里必须走**引擎信任层**：doom/sta 是确定性层独占键，`apply_delta` 默认
+    # `trust="llm"` 会（正确地）抛 TrustViolation。本探针扮演的是引擎结算，
+    # 所以用 `apply_delta_engine()` —— 与 `loop.Run.apply` 的默认信任层一致。
     st = _state.initial_states({"difficulty": "Initiate", "seed": 1}, cfg)
     st_before = dict(st)
-    res = _san.apply_delta(st, {"doom": 999, "sta": -999, "exp": -999}, cfg)
+    res = _san.apply_delta_engine(st, {"doom": 999, "sta": -999, "exp": -999}, cfg)
     b1 = int(_prov.t(cfg, "sanitize.turn_budget_level1"))
     b2 = int(_prov.t(cfg, "sanitize.turn_budget_level2"))
     clamp_ok = (res["applied"].get("doom") == b1 and res["applied"].get("sta") == -b1
@@ -455,7 +458,7 @@ def scenario_sanitize() -> Report:
     rep.check(
         "E3", f"单轮钳制：level-1 ±{b1}、level-2 ±{b2}",
         clamp_ok,
-        f"apply_delta({{doom: 999, sta: -999, exp: -999}}) → applied="
+        f"apply_delta_engine({{doom: 999, sta: -999, exp: -999}}) → applied="
         f"{res['applied']}（doom={res['applied'].get('doom')}, sta={res['applied'].get('sta')}, "
         f"exp={res['applied'].get('exp')}）",
         "反例：去掉 clamp_turn_delta → doom 会直接 +100 并被 invariants 截成 100 → applied.doom=100 ≠ ±3 → 变红",
@@ -501,22 +504,68 @@ def scenario_sanitize() -> Report:
         "反例：在 loop.py 里写 state['doom'] = 100 → offenders 非空 → 变红",
     )
 
-    # E1：结算先于"叙事"—— 本任务里不存在任何 LLM 调用点
-    llm_hits = []
-    for name in sorted(os.listdir(coc_dir)):
-        if not name.endswith(".py"):
-            continue
-        with open(os.path.join(coc_dir, name), encoding="utf-8") as fh:
+    # E1：结算先于「叙事」—— 判据按**层**拆开（t51 引入叙事层后重写，见报告 §判据口径）
+    #
+    # 为什么拆：t48 写这条时的口径是「app/coc/*.py 里不许出现任何 LLM 标记」，
+    # 当时 coc 只有确定性引擎。t51 把**叙事层**（session.py/prompt.py/rules_*）
+    # 放进同一个包 —— 它必须能调 LLM，于是原来的粗口径必然变红。
+    # 拆开后反而更强：**确定性层零 LLM**（原保证）+ **叙事层只允许函数内惰性导入**
+    # （新保证）+ **模型提案进状态必须显式 trust="llm"**（新保证，AST 检查）。
+    LLM_MARKERS = ("import openai", "import requests", "httpx", "urllib.request",
+                   "from ..llm", "from app.llm", "chat_json")
+    #: 确定性结算层：必须零 LLM/网络标记
+    DET_CORE = ("dice.py", "provenance.py", "content.py", "sanitize.py",
+                "state.py", "loop.py")
+    #: 叙事层：允许引用 LLM，但只允许**函数内**惰性导入/调用
+    NARRATIVE = ("session.py", "prompt.py", "rules_horror_erotic.py")
+
+    def _marker_lines(name: str) -> list[tuple[int, str]]:
+        p = os.path.join(coc_dir, name)
+        if not os.path.isfile(p):
+            return []
+        out = []
+        with open(p, encoding="utf-8") as fh:
             for i, line in enumerate(fh, 1):
-                low = line.lower()
-                if any(k in low for k in ("import openai", "import requests", "httpx", "urllib.request",
-                                          "from ..llm", "from app.llm", "chat_json")):
-                    llm_hits.append(f"{name}:{i}")
+                if any(k in line.lower() for k in LLM_MARKERS):
+                    out.append((i, line))
+        return out
+
+    core_hits = [f"{n}:{i}" for n in DET_CORE for i, _ in _marker_lines(n)]
     rep.check(
-        "E1-NO-LLM", "引擎里不存在任何 LLM / 网络调用点（结算先于叙事的结构前提）",
-        not llm_hits,
-        f"扫描 app/coc/*.py 的 LLM/网络导入：命中 {len(llm_hits)} 处 {llm_hits}",
+        "E1-DET-CORE", "确定性结算层零 LLM/网络标记（结算先于叙事的结构前提）",
+        not core_hits,
+        f"扫描 {list(DET_CORE)}：LLM/网络标记命中 {len(core_hits)} 处 {core_hits}",
         "反例：在 loop.py 里 from ..llm import LLMClient → 命中非空 → 变红",
+    )
+
+    top_level_hits = [f"{n}:{i}" for n in NARRATIVE for i, ln in _marker_lines(n)
+                      if ln[:1] not in ("", " ", "\t")]
+    rep.check(
+        "E1-NARR-LAZY", "叙事层的 LLM 引用只允许出现在函数体内（模块顶层导入会让引擎启动即依赖 LLM）",
+        not top_level_hits,
+        f"扫描 {list(NARRATIVE)} 的**顶格** LLM 标记：命中 {len(top_level_hits)} 处 {top_level_hits}",
+        "反例：在 session.py 顶格写 from ..llm import LLMClient → 命中非空 → 变红",
+    )
+
+    # AST：叙事层把模型提案交给引擎时必须**显式** trust="llm"（否则会继承 Run.apply 的 engine 默认）
+    trust_hits = []
+    sess = os.path.join(coc_dir, "session.py")
+    if os.path.isfile(sess):
+        with open(sess, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=sess)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "apply"):
+                kw = {k.arg: k for k in node.keywords}
+                t_node = kw.get("trust")
+                got = (t_node.value.value if isinstance(t_node, ast.keyword)
+                       and isinstance(t_node.value, ast.Constant) else None)
+                trust_hits.append(got)
+    rep.check(
+        "E1-LLM-TRUST", "叙事层把 LLM 提案交给 run.apply 时显式 trust=\"llm\"（不得继承 engine 默认）",
+        bool(trust_hits) and all(x == "llm" for x in trust_hits),
+        f"session.py 里 .apply() 调用的 trust 实参：{trust_hits}（全部应为 'llm'）",
+        "反例：写成 run.apply(delta, reason=...)（不传 trust）→ 继承 engine 默认 → 变红",
     )
 
     return rep

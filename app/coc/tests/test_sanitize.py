@@ -391,6 +391,31 @@ def test_trust_layer_is_structural(s: TestSuite) -> None:
     )
 
 
+    # ---- 静态：叙事层把模型提案交给引擎时，必须显式 trust="llm" ----
+    # 为什么需要这条：`Run.apply` 的默认是 engine（引擎结算用），而叙事层拿到的是
+    # **模型原值**。若叙事层不显式索取 llm 信任层，就会**静默继承 engine 权限**——
+    # 这正好是 D2 那条"防线只在解析层"的同类漏洞，只是发生在调用方一侧。
+    with open(_os.path.join(coc_dir, "session.py"), encoding="utf-8") as fh:
+        sess_src = fh.read()
+    sess_tree = ast.parse(sess_src)
+    trusts = []
+    for node in ast.walk(sess_tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "apply"):
+            kw = {k.arg: k for k in node.keywords}
+            t_node = kw.get("trust")
+            trusts.append(t_node.value.value
+                          if isinstance(t_node, ast.keyword)
+                          and isinstance(t_node.value, ast.Constant) else None)
+    s.expect(
+        "`session._narrate` 把 LLM 提案交给 `run.apply` 时显式 `trust=\"llm\"`",
+        bool(trusts) and all(x == "llm" for x in trusts),
+        detail=f"session.py 里 .apply() 调用的 trust 实参 = {trusts}（应全为 'llm'）",
+        counterexample="反例：写成 `run.apply(turn['coc_delta'], reason='llm_proposal')`（不传 trust）→ "
+                       "继承 engine 默认 → 模型原值一旦漏过解析层就获得引擎权限 → 本断言变红",
+    )
+
+
 def main() -> int:
     s = TestSuite("app/coc/tests/test_sanitize.py —— 白名单 / 钳制 / 不变式 / 唯一写点 / 信任层")
     for fn in (test_whitelist_has_no_numeric_fields, test_malicious_delta_every_key,

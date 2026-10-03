@@ -37,6 +37,9 @@ from app import safe as safemod
 from app import story
 from app import updater
 from app import vn
+# P18-A（t51）：CoC 作为**第三个独立模式**。只导入会话层，不合并既有分发分支。
+# 位置在既有导入之后 + 仅新增一行 → 与 t37/t38/t39 的改动不构成块级冲突。
+from app.coc import session as coc
 from app.llm import LLMError
 
 import sys as _sys
@@ -410,6 +413,19 @@ def update_config(payload: ConfigPayload):
 
 # ---------- 设定辅助 ----------
 
+@app.get("/api/game/coc/config")
+def coc_config():
+    """P18-A（t51）：CoC 开局可选值（难度/死法/古神/角色/双轴档位/白名单）。
+
+    纯读接口，**不注册会话、不触发任何生成**。
+    路径含三段，不会与 `GET /api/game/{sid}` 冲突。
+    """
+    try:
+        return coc.config_view()
+    except Exception as e:      # 数据缺失时也要给出可读错误，而不是 500 堆栈
+        raise HTTPException(500, f"CoC 配置不可用：{e}")
+
+
 @app.post("/api/setup/random")
 async def random_setup(mode: str = "tsf"):
     try:
@@ -514,6 +530,10 @@ class SpeakPayload(BaseModel):
 @app.post("/api/game/start")
 async def start_game(payload: StartPayload):
     try:
+        if payload.mode == "coc":
+            # P18-A（t51）：第三模式的**早返回**分支。
+            # 早返回而不是插在 else 链里，是为了让既有两分支一个字符都不动。
+            return coc.start(payload.model_dump())
         if payload.mode == "vn":
             return await vn.start(payload.model_dump())
         return await game.start_game(payload.model_dump())
@@ -1140,6 +1160,12 @@ class SaveSlotPayload(BaseModel):
 
 @app.post("/api/game/{sid}/slots")
 def save_slot(sid: str, payload: SaveSlotPayload):
+    # P18-A（t51）：coc 早返回（coc 会话不在 game.SESSIONS 里）。
+    if coc.is_coc(sid):
+        try:
+            return coc.save_slot(sid, payload.name)
+        except coc.CocError as e:
+            raise HTTPException(404, str(e))
     try:
         return game.save_slot(sid, payload.name)
     except game.GameError as e:
@@ -1149,6 +1175,13 @@ def save_slot(sid: str, payload: SaveSlotPayload):
 @app.post("/api/slots/{slot_id}/load")
 async def load_slot(slot_id: str):
     slot_id = _req_id(slot_id, "存档槽 id")   # 同批：id 会拼 slots/{id}.json
+    # P18-A（t51）：先看 envelope 的 mode（**只读，不注册会话、无副作用**）。
+    # 必须在 game.load_slot 之前判：它会顺带 ensure_scene_bg()，对 coc 存档没有意义。
+    if coc.peek_slot_mode(slot_id) == "coc":
+        try:
+            return coc.load_slot(slot_id)
+        except coc.CocError as e:
+            raise HTTPException(404 if "不存在" in str(e) else 400, str(e))
     try:
         r = game.load_slot(slot_id)
     except game.GameError as e:
@@ -1163,6 +1196,11 @@ async def load_slot(slot_id: str):
 async def load_slot_compat(sid: str, slot_id: str):
     # 兼容旧前端：读档改用全局存档库
     slot_id = _req_id(slot_id, "存档槽 id")
+    if coc.peek_slot_mode(slot_id) == "coc":
+        try:
+            return coc.load_slot(slot_id)
+        except coc.CocError as e:
+            raise HTTPException(404 if "不存在" in str(e) else 400, str(e))
     try:
         r = game.load_slot(slot_id)
     except game.GameError as e:
@@ -1499,10 +1537,16 @@ def open_folder(payload: OpenFolderPayload = OpenFolderPayload()):
 @app.post("/api/game/{sid}/advance")
 async def advance(sid: str, payload: AdvancePayload):
     try:
+        # P18-A（t51）：coc 早返回。**不**走 game.get_session（coc 会话不在那本表里，
+        # 走那条会抛"会话不存在"）。
+        if coc.is_coc(sid):
+            return await coc.advance_async(coc.get(sid), payload.choice_index)
         if game.get_session(sid).get("mode") == "vn":
             return await vn.advance(sid, payload.choice_index)
         return await game.advance(sid, payload.choice_index)
     except game.GameError as e:
+        raise HTTPException(404 if "不存在" in str(e) else 400, str(e))
+    except coc.CocError as e:
         raise HTTPException(404 if "不存在" in str(e) else 400, str(e))
     except LLMError as e:
         raise HTTPException(502, str(e))
@@ -1515,6 +1559,14 @@ async def game_state(sid: str):
     B-02：必须是 async——ensure_scene_bg 会排后台生成任务，同步端点跑在
     线程池里没有事件循环（旧行为：RuntimeError 被吞掉、背景永不补生成，
     每次刷新还泄漏一个永久 pending 资产）。"""
+    # P18-A（t51）：coc 必须在 game.get_session 之前早返回 ——
+    # coc 会话不在 game.SESSIONS 里；而且即使塞进去，下面的
+    # game.ensure_scene_bg() / game.public_state() 会读 prot["stats"]（TSF 字段）而炸。
+    if coc.is_coc(sid):
+        d = coc.public_state(coc.get(sid))
+        d["pinned"] = {}
+        d["tsf_target"] = {}
+        return d
     try:
         s = game.get_session(sid)
     except game.GameError as e:

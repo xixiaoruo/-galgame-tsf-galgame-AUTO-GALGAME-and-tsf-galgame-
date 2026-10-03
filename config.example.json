@@ -65,5 +65,20 @@
     "style_mode": "default",
     "inject_outline": true,
     "history_max_per_label": 10
+  },
+  "coc": {
+    "_comment": "CoC 跑团模式（第三个独立模式）。数值真值在 data/coc/tuning.json；这里只放开关与展示默认值。",
+    "enabled": true,
+    "default_difficulty": "Initiate",
+    "default_death_mode": "last_stand",
+    "default_old_god": "Goizo",
+    "default_character": "Kirie",
+    "flavor": "coc",
+    "erotic_tier_max": "explicit",
+    "art": {
+      "portrait_size": "832x1216",
+      "background_size": "1920x1080",
+      "cg_size": "1024x1024"
+    }
   }
 }

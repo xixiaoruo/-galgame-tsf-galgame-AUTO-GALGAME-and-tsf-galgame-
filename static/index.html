@@ -34,6 +34,7 @@
         <span class="mode-label">模式：</span>
         <span id="version-tag" class="version-tag"></span>
         <button id="mode-btn-vn" class="btn ghost mode-btn">♥ 普通 Galgame</button>
+        <button id="mode-btn-coc" class="btn ghost mode-btn">🕯 CoC 跑团</button>
         <button id="mode-btn-tsf" class="btn ghost mode-btn on">♀ TSF Galgame</button>
         <button id="btn-credits" class="btn ghost mode-btn credits-link">🍰 制作名单</button>
       </div>
@@ -60,6 +61,31 @@
           <small>主角外貌描述（发色、瞳色、服装、气质，供立绘生成与剧情保持一致）：</small>
           <input id="vn-anchor" class="text-input" placeholder="如：黑色短发，深色眼瞳，白衬衫" maxlength="200">
         </label>
+        <!-- P18-A（t51）：CoC 跑团开局设定（第三个独立模式；不接立绘/锚点管线） -->
+        <div class="vn-anchor-box hidden" id="coc-setup-box">
+          <small>调查员设定（CoC 模式：数值由难度表决定，不生成立绘）</small>
+          <div class="prot-grid">
+            <label>难度
+              <select id="coc-difficulty" class="text-input">
+                <option value="Sceptic">Sceptic（最宽裕 · 4 个谜团）</option>
+                <option value="Initiate" selected>Initiate（标准 · 5 个谜团）</option>
+                <option value="Cultist">Cultist（吃紧 · 5 个谜团）</option>
+              </select>
+            </label>
+            <label>死亡模式
+              <select id="coc-death-mode" class="text-input">
+                <option value="last_stand" selected>LAST STAND（−5 缓冲带）</option>
+                <option value="sudden_death">SUDDEN DEATH（归零即死）</option>
+              </select>
+            </label>
+            <label>古神
+              <select id="coc-old-god" class="text-input"></select>
+            </label>
+            <label>调查员
+              <select id="coc-character" class="text-input"></select>
+            </label>
+          </div>
+        </div>
         <div class="prot-grid">
           <input id="prot-name" class="text-input" placeholder="主角名字" maxlength="12" value="">
           <select id="prot-hair" class="text-input">
@@ -407,6 +433,25 @@
       </div>
     </div>
     <button id="vn-tab" class="tsf-tab hidden">◈ 状态 ▸</button>
+
+    <!-- P18-A（t51）：CoC 跑团状态面板（DOOM 仪表 / 双血条 / 五项属性 / 状态标签计数）
+         与两既有面板并列，互不干扰；数值全部来自 /api/game/{sid} 的 coc 字段。 -->
+    <div id="coc-panel" class="tsf-panel hidden">
+      <div class="tsf-head">
+        <span>🕯 CoC · DOOM 与调查员状态</span>
+        <button id="coc-collapse" class="btn mini ghost" title="收起状态框">—</button>
+      </div>
+      <div class="tsf-body">
+        <div id="coc-doom" class="model-info"></div>
+        <div id="coc-bars"></div>
+        <div id="coc-stats" class="model-info"></div>
+        <div id="coc-tags" class="model-info"></div>
+        <div id="coc-extra" class="model-info"></div>
+        <div class="tsf-foot">
+          <button id="btn-coc-save-slot" class="btn mini ghost" title="存入全局存档槽">💾 存档</button>
+        </div>
+      </div>
+    </div>
 
     <div id="sprite-layer" class="sprite-layer"></div>
 

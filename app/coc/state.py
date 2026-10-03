@@ -319,3 +319,19 @@ def unease_phrase(state: dict) -> str:
     if d >= 40:
         return "街上比平时安静，安静得不太对"
     return "暂时还算正常"
+
+
+def extra_dimensions(state: dict) -> list[dict]:
+    """额外面板维度（周目 / 次数 / 等级）。
+
+    `COC-DESIGN.md` §9.1 的验收要求"存档读档后**周目**一致"，
+    这里把周目相关的计数量显式暴露出来，好让面板与报告都能看到它们。
+    """
+    return [
+        {"key": "mystery_idx", "name": "已过谜团", "value": int(state.get("mystery_idx", 0))},
+        {"key": "keys", "name": "钥匙", "value": int(state.get("keys", 0))},
+        {"key": "investigations_total", "name": "累计调查",
+         "value": int(state.get("investigations_total", 0))},
+        {"key": "level", "name": "等级", "value": int(state.get("level", 1))},
+    ]
+

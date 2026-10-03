@@ -32,3 +32,11 @@ CAST_PATH = os.path.join(DATA_DIR, "cast.json")
 
 #: 存档目录（本任务落在项目 data/coc/saves/；接线任务可切到 TSF_Galgame_Data）
 SAVES_DIR = os.path.join(DATA_DIR, "saves")
+
+#: **全局存档槽**目录：与既有两个模式**共用** `data/saves/`
+#: （= `app.game._slots_dir()`）。共用带来的好处：CoC 存档会自动出现在
+#: `/api/slots` 列表里，**不必改 `app/game.py`**（它不在本任务 inScope）。
+#: 共用是安全的：真正的 coc 读档由 `server.py` 的 coc 分支在**调用 game 之前**接管，
+#: 而 `game.load_slot()` 对缺字段一律 `setdefault` 补齐，不会崩。
+SLOTS_DIR = os.path.join(ROOT, "data", "saves")
+

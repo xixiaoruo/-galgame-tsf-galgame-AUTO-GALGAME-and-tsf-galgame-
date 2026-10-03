@@ -30,6 +30,7 @@ const S = {
   npcs: [],
   tsf: null,           // 状态面板数据
   vn: null,            // 普通模式状态数据
+  coc: null,           // CoC 模式状态数据（P18-A：DOOM / 双血条 / 属性 / 标签）
   charStats: null,     // 每个角色一套数值（两种模式共用）
   statWho: null,       // 状态面板当前查看的角色
   charPrev: {},        // 上一幕各角色数值（算 ▲▼）
@@ -339,16 +340,28 @@ function bindUiPart04() {
 
   $("btn-start").addEventListener("click", async () => {
     const world = $("inp-world").value.trim();
-    if (!world) { toast("请先填写世界观/剧情设定，或点「随机生成设定」"); return; }
+    // P18-A：CoC 模式**不需要**世界观（它的题材由古神/角色/难度决定），
+    // 且**不带头像管线**（no portrait / anchor），所以这条校验对 coc 跳过。
+    if (S.mode !== "coc" && !world) {
+      toast("请先填写世界观/剧情设定，或点「随机生成设定」"); return;
+    }
+    const cocSel = (id, dflt) => { const el = $(id); return el ? el.value : dflt; };
     const payload = {
       mode: S.mode,
       title: $("inp-title").value.trim(),
-      world,
-      characters: collectNPCs(),
-      protagonist: {
-        name: $("prot-name").value.trim() || "主角",
-        anchor: S.mode === "vn" ? $("vn-anchor").value.trim() : buildAnchor(),
-      },
+      world: S.mode === "coc" ? (world || "盐川町") : world,
+      characters: S.mode === "coc" ? [] : collectNPCs(),
+      protagonist: S.mode === "coc"
+        ? { name: cocSel("coc-character", "Kirie"), anchor: "" }
+        : {
+            name: $("prot-name").value.trim() || "主角",
+            anchor: S.mode === "vn" ? $("vn-anchor").value.trim() : buildAnchor(),
+          },
+      // CoC 开局参数（服务端 app/coc/session.py::start 读取）
+      difficulty: cocSel("coc-difficulty", "Initiate"),
+      death_mode: cocSel("coc-death-mode", "last_stand"),
+      old_god: cocSel("coc-old-god", "Goizo"),
+      character: cocSel("coc-character", "Kirie"),
       outline: $("inp-outline").value.trim(),
       lorebook: collectLorebook(),
       directives: collectDirectives(),
@@ -410,41 +423,94 @@ function bindUiPart05() {
   $("btn-shutdown-setup").addEventListener("click", shutdownGame);
 }
 
-/* ---------- 模式切换（TSF / 普通 Galgame） ---------- */
+/* ---------- 模式切换（TSF / 普通 Galgame / CoC 跑团） ---------- */
 
 function setSetupMode(mode, silent) {
-  S.mode = (mode === "vn") ? "vn" : "tsf";
+  // P18-A（t51）：三模式。未知值一律回退 tsf（与旧行为一致，不新增异常路径）。
+  S.mode = (mode === "vn") ? "vn" : (mode === "coc" ? "coc" : "tsf");
   $("mode-btn-tsf").classList.toggle("on", S.mode === "tsf");
   $("mode-btn-vn").classList.toggle("on", S.mode === "vn");
+  const cocBtn = $("mode-btn-coc");
+  if (cocBtn) cocBtn.classList.toggle("on", S.mode === "coc");
   localStorage.setItem("galgame_mode", S.mode);
-  // 模式差异：TSF 用锚点构建器（发色/瞳色/服装/气质+预览）；普通模式只需一段外貌描述
+  // 模式差异：TSF 用锚点构建器（发色/瞳色/服装/气质+预览）；普通模式只需一段外貌描述；
+  // CoC 用调查员设定（难度/死法/古神/角色），与两者的开局表单都不同。
   const isVn = S.mode === "vn";
+  const isCoc = S.mode === "coc";
   const vnBox = $("vn-anchor-box");
   if (vnBox) vnBox.classList.toggle("hidden", !isVn);
+  const cocBox = $("coc-setup-box");
+  if (cocBox) cocBox.classList.toggle("hidden", !isCoc);
   const ap = document.querySelector(".anchor-preview");
-  if (ap) ap.classList.toggle("hidden", isVn);
+  if (ap) ap.classList.toggle("hidden", isVn || isCoc);
   const pg = document.querySelector(".prot-grid");   // class，非 id
-  if (pg) pg.style.display = isVn ? "none" : "";
+  if (pg) pg.style.display = (isVn || isCoc) ? "none" : "";
   const pe = $("prot-extra");
-  if (pe) pe.style.display = isVn ? "none" : "";
+  if (pe) pe.style.display = (isVn || isCoc) ? "none" : "";
   const pt = $("prot-head-title");
   if (pt) pt.textContent = isVn
     ? "② 主角设定（普通故事的主角）"
-    : "② 主角设定（转变将从 TA 开始）";
+    : (isCoc ? "② 调查员设定（CoC 模式不带头像管线）" : "② 主角设定（转变将从 TA 开始）");
   // 1.7.33 最终变化样式面板：仅 TSF 模式显示
   const tgtPanel = $("tsf-target-panel");
-  if (tgtPanel) tgtPanel.style.display = isVn ? "none" : "";
+  if (tgtPanel) tgtPanel.style.display = (isVn || isCoc) ? "none" : "";
   if (!silent) {
     toast(isVn
       ? "普通模式：心情 / 好感 / 性敏感 / 高潮度"
-      : "TSF 模式：性别转换数值演进（同化/体质/沉溺…）", 2600);
+      : (isCoc
+        ? "CoC 跑团：DOOM 倒计时 / 双血条 / 属性检定（第三个独立模式）"
+        : "TSF 模式：性别转换数值演进（同化/体质/沉溺…）"), 2600);
   }
   renderStatEditor();
+  // P18-A：CoC 的开局下拉（古神/调查员）按需懒加载一次
+  if (isCoc) populateCocSelects();
+}
+
+/** P18-A（t51）：把 CoC 的可选古神/调查员填进下拉（只填一次）。 */
+async function populateCocSelects() {
+  const og = $("coc-old-god");
+  const ch = $("coc-character");
+  if (!og || !ch || og.dataset.filled) return;
+  try {
+    const cfgv = await api("/api/game/coc/config");
+    (cfgv.old_gods || []).forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id; o.textContent = id; og.appendChild(o);
+    });
+    (cfgv.characters || []).forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id; o.textContent = id; ch.appendChild(o);
+    });
+    og.dataset.filled = "1";
+  } catch (e) {
+    og.dataset.filled = "1";   // 失败不重试，保持默认值可用
+  }
 }
 // —— UI 绑定段 bindUiPart06（t37：自模块顶层收敛至此，内容逐字未改）——
 function bindUiPart06() {
   $("mode-btn-tsf").addEventListener("click", () => setSetupMode("tsf"));
   $("mode-btn-vn").addEventListener("click", () => setSetupMode("vn"));
+  // P18-A（t51）：新增绑定写在既有绑定函数内（**不新增顶层零缩进绑定**，
+  // 保持 check_frontend_ids.py --max-toplevel 138 的棘轮不上升）。
+  // 用存在性判断，兼容未同步更新 index.html 的旧副本。
+  const cocBtn = $("mode-btn-coc");
+  if (cocBtn) cocBtn.addEventListener("click", () => setSetupMode("coc"));
+  // P18-A（t51）：CoC 存档按钮（写在既有绑定函数内，不新增顶层零缩进绑定）
+  const cocSave = $("btn-coc-save-slot");
+  if (cocSave) {
+    cocSave.addEventListener("click", async () => {
+      if (!S.sid) return;
+      try {
+        const r = await api(`/api/game/${S.sid}/slots`, {
+          method: "POST",
+          body: JSON.stringify({ name: $("game-title").textContent || "CoC 存档" }),
+        });
+        toast(`已存档：${r.slot_id || r.name || "OK"}`, 2600);
+      } catch (e) {
+        toast("存档失败：" + e.message);
+      }
+    });
+  }
 }
 
 /* ---------- 状态栏自定义（开局前编辑） ---------- */
@@ -942,6 +1008,7 @@ function enterGame(state, { instant }) {
   S.imgVersion = (S.imgVersion || 0) + 1;
   S.tsf = state.tsf || null;
   S.vn = state.vn || null;
+  S.coc = state.coc || null;
   S.charStats = state.char_stats || null;
   S.charPrev = {};
   S.tsfPrev = null;
@@ -954,10 +1021,13 @@ function enterGame(state, { instant }) {
   $("mock-badge").classList.toggle("hidden", !(S.mock.llm && S.mock.image));
   $("setup-screen").classList.remove("active");
   $("game-screen").classList.add("active");
-  // 按模式切换右侧状态面板：TSF 数值面板 / 普通模式心情面板
+  // 按模式切换右侧状态面板：TSF 数值面板 / 普通模式心情面板 / CoC 跑团面板（P18-A）
   const isVn = S.mode === "vn";
-  $("tsf-panel").classList.toggle("hidden", isVn);
+  const isCoc = S.mode === "coc";
+  $("tsf-panel").classList.toggle("hidden", isVn || isCoc);
   $("vn-panel").classList.toggle("hidden", !isVn);
+  const cocPanel = $("coc-panel");
+  if (cocPanel) cocPanel.classList.toggle("hidden", !isCoc);
   $("tsf-tab").classList.add("hidden");
   $("vn-tab").classList.add("hidden");
   buildSprites();
@@ -1193,7 +1263,56 @@ function renderStatRows(box, states, prev, append) {
 
 function renderStatsPanels() {
   if (S.mode === "vn") renderVnPanel();
+  else if (S.mode === "coc") renderCocPanel();
   else renderTsfPanel();
+}
+
+/* ---------- CoC 面板（DOOM 仪表 / 双血条 / 五项属性 / 标签计数）—— P18-A（t51） ----------
+   数据全部来自 /api/game/{sid} 的 `coc` 字段（服务端 app/coc/session.py 的 panel）。
+   注意：这里**只渲染数值 HUD**；检定属性名在结算前不展示（信息遮蔽）。 */
+
+function renderCocPanel() {
+  const c = S.coc;
+  if (!c) return;
+  const doomBox = $("coc-doom");
+  if (doomBox) {
+    const pct = Math.max(0, Math.min(100, Number(c.doom) || 0));
+    doomBox.innerHTML =
+      `<div class="tsf-bar"><div class="tsf-bar-fill" style="width:${pct}%"></div></div>` +
+      `<div class="model-info">${c.doom_line || ""}</div>`;
+  }
+  const bars = $("coc-bars");
+  if (bars) {
+    bars.innerHTML = "";
+    const rows = [
+      { name: "体力 STA", value: c.sta, max: c.sta_max },
+      { name: "理智 REA", value: c.rea, max: c.rea_max },
+    ];
+    rows.forEach((r) => {
+      const max = Math.max(1, Number(r.max) || 1);
+      const pct = Math.max(0, Math.min(100, (Number(r.value) / max) * 100));
+      const row = document.createElement("div");
+      row.className = "tsf-row";
+      row.innerHTML =
+        `<div class="tsf-row-head"><span>${r.name}</span><b>${r.value} / ${r.max}</b></div>` +
+        `<div class="tsf-bar"><div class="tsf-bar-fill" style="width:${pct}%"></div></div>`;
+      bars.appendChild(row);
+    });
+  }
+  const stats = $("coc-stats");
+  if (stats && c.stats) {
+    stats.innerHTML = "属性：" + Object.keys(c.stats)
+      .map((k) => `${k} ${c.stats[k]}`).join("　");
+  }
+  const tags = $("coc-tags");
+  if (tags && c.tag_counts) {
+    tags.innerHTML = `状态标签：伤势 ${c.tag_counts.injury}　诅咒 ${c.tag_counts.curse}　` +
+      `城镇 ${c.tag_counts.town}（${c.severity || "normal"}）`;
+  }
+  const extra = $("coc-extra");
+  if (extra && Array.isArray(c.extra)) {
+    extra.innerHTML = c.extra.map((d) => `${d.name} ${d.value}`).join("　");
+  }
 }
 
 /* ---------- TSF 状态面板（主角：转变数值 + 自己的四项；其他角色：各自四项）---------- */
@@ -1430,6 +1549,7 @@ function playTurn(state, { instant }) {
   S.turn = state;
   S.tsf = state.tsf;
   S.vn = state.vn;
+  S.coc = state.coc || null;
   // 关键：推进/发言/读档后立即同步背景映射，否则第一帧永远取旧 map，
   // 新幕背景要等轮询才能出现（旧档/已就绪资产无轮询 → 永远不显示）
   S.bgMap = state.bg_map || S.bgMap;

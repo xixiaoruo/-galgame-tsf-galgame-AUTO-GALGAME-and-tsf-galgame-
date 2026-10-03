@@ -25,6 +25,8 @@ MODULES = [
     "test_state",
     "test_loop",
     "test_content",
+    # P18-A（t51）接线期新增：三硬闸门（空串 + 最终 prompt 逐字节相等）
+    "test_gate_empty",
 ]
 
 
@@ -55,6 +57,11 @@ def main() -> int:
           f"失败 {len(failed)} 个")
     if failed:
         print("  失败模块：" + "、".join(failed))
+    print()
+    print("  提示：接线期的另外三个门（在同一进程外跑，避免互相污染）：")
+    print("    python -B 测试工具/coc_wiring_probe.py   # 三硬闸门/白名单/存读档/config")
+    print("    python -B 测试工具/coc_http_probe.py     # 五处分发点（TestClient）")
+    print("    python -B 测试工具/coc_frozen_probe.py   # 冻结布局数据落点")
     print("#" * 78)
     return 1 if failed else 0
 

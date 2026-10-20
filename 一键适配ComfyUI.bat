@@ -16,5 +16,5 @@ if errorlevel 1 (
     pause
 )
 echo.
-echo [Next] 启动游戏...
-start "" "%~dp0TSF_Galgame.exe"
+echo [Next] 通过统一入口启动游戏...
+call "%~dp0start.bat"

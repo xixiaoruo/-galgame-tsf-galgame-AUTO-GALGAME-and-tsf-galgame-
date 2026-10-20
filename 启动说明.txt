@@ -1,29 +1,34 @@
-自动化AI Galgame —— 启动方式说明
-================================================
+自动化AI Galgame —— 统一启动说明
+===============================================
 
-【新版（推荐）】原生窗口，不再开浏览器
-    双击： 启动游戏（新版）.lnk
-    或：   start.bat
-    或直接： dist\TSF_Galgame\TSF_Galgame.exe
+【唯一正式启动方式】
+    双击：启动游戏（新版）.lnk
+    或：  start.bat
+    或：  start_current.ps1
 
-    ★ 必须整个目录一起用，不能只复制 exe 文件：
-        dist\TSF_Galgame\TSF_Galgame.exe       ← 双击这个
-        dist\TSF_Galgame\_internal\...        ← 依赖都在这里（Qt / Python / CoC 数据）
-      只把 exe 单独拷到别处会启动失败（找不到 _internal）。
+启动入口固定指向（优先 1.9.20 AI 控制台版）：
+    dist-1.9.20\TSF_Galgame\TSF_Galgame.exe
+（若该目录不存在，自动回退到 dist\TSF_Galgame\TSF_Galgame.exe）
 
-【旧版（浏览器模式，保留可回退）】
-    双击：  start-旧版浏览器模式.bat
-    行为：  用 python 起 server.py，然后用系统浏览器打开 127.0.0.1:8765
+每次启动前，统一入口会：
+    1. 只终止旧的 TSF_Galgame.exe 及其子进程；
+    2. 等待文件锁释放；
+    3. 启动当前 onedir 版本。
 
-【不能同时开两个】
-    游戏是单实例的（防止两份实例同时写同一份存档）。
-    若已有实例在跑，再双击新版会弹提示"游戏已经在运行中"然后退出 —— 这是正常的。
-    要换版本玩，先关掉当前实例。
+不会按 python、cmd 或端口名匹配，不会误杀其他应用；不会删除存档或配置。
+必须保留整个 dist-1.9.20\TSF_Galgame\ 目录，不能只复制 exe：
+    dist-1.9.20\TSF_Galgame\TSF_Galgame.exe
+    dist-1.9.20\TSF_Galgame\_internal\...
 
-【存档与配置在哪】
-    存档/缓存： D:\TSF_Galgame_Data\data\
-    配置文件：  D:\TSF_Galgame\config.json      （含 API key，已被 .gitignore 忽略）
+【已移除】
+    旧版浏览器启动脚本和旧 Tk 启动器已删除；不要再运行 python server.py
+    作为用户启动方式。源码 server.py 仅用于开发诊断。
 
-【旧 exe（不再使用，保留作回退）】
-    dist\TSF_Galgame.exe            单文件版 2026-09-26（137 MB）
-    TSF_Galgame.exe                  单文件版 2026-09-06（129 MB）
+【其他工具】
+    开发者更新：开发者更新游戏状态.bat
+    ComfyUI 适配：一键适配ComfyUI.bat（适配完成后仍通过 start.bat 启动）
+    旧实例维护：杀掉所有游戏实例.bat（只匹配 TSF_Galgame.exe）
+
+【存档与配置】
+    存档/缓存：游戏专属数据目录\data\
+    配置文件：程序目录\config.json（含 API Key，仅保存在本机）

@@ -38,6 +38,7 @@ venv/
 # ================= 分发产物（单文件 exe 129MB，超过 GitHub 单文件 100MB 上限）=================
 # 只能作为 Release 附件分发，不能进仓库
 *.exe
+*.exe.*
 TSF_Galgame.zip
 *.tmp.zip
 

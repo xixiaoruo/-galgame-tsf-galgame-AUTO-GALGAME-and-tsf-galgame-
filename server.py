@@ -26,20 +26,28 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import archive as archive_mod
+from app import characters as charm
 from app import cgbook
 from app import exporter
 from app import game
 from app import image as image_mod
 from app import inject
+from app import ai_console as ai_console_mod
+from app import legacy as legacy_mod
 from app import library
 from app import plugins as plugins_mod
+from app import rng as rng_mod
 from app import safe as safemod
 from app import story
+from app import uniforms as uniforms_mod
 from app import updater
 from app import vn
 # P18-A（t51）：CoC 作为**第三个独立模式**。只导入会话层，不合并既有分发分支。
 # 位置在既有导入之后 + 仅新增一行 → 与 t37/t38/t39 的改动不构成块级冲突。
 from app.coc import session as coc
+from app.coc import state as coc_state
+# t73：自定义剧本的校验错误（要回 400 给玩家，不是 500 —— 那是输入问题）
+from app.coc.scenario import ScenarioError as CocScenarioError
 # C×T4（t56）：第四模式 coc_tsf —— 面板进度**复用 t54 的接口取值**（前端不重算阶段）。
 from app.coc import tsf as coc_tsf
 from app.llm import LLMError
@@ -247,7 +255,7 @@ async def _unhandled_exception(request, exc):
 #     python 测试工具/check_version_sync.py
 #     python 测试工具/check_version_sync.py --fix     # 用本常量回写 index.html 两处
 # 注意：不要用中间件注入 HTML 去改 `?v=`——StaticFiles 是流式响应、没有 body 可改。
-GAME_VERSION = "1.7.52"
+GAME_VERSION = "1.9.20"
 
 
 # ---------- 请求参数安全校验（B-01：路径穿越 / id 边界）----------
@@ -519,48 +527,101 @@ async def no_cache_middleware(request, call_next):
 
 # ---------- 配置 ----------
 
+#: F1-U1（t65）：`image.style_custom` 的接口层上限 —— **单一真源**：
+#: 直接问清洗函数要（`app/image.py::sanitize_style_custom` 内部就是截断到 300）。
+#: 不在 server 里再抄一个数字：那边改上限，这里自动跟随。
+_STYLE_CUSTOM_MAX = len(image_mod.sanitize_style_custom("x" * 5000))
+
+
+def _style_presets_view() -> list[dict]:
+    """画风预设清单（供前端下拉）—— id / 中文名 / 可选 hint，**全部来自 `image.STYLE_PRESETS`**。
+
+    前端据此渲染选项、并据 `hint.pixel_art` 决定是否提示"去开像素开关" ⇒ 前端零硬编码。
+    """
+    out: list[dict] = []
+    for pid, preset in image_mod.STYLE_PRESETS.items():
+        item = {"id": str(pid), "name": str((preset or {}).get("name") or pid)}
+        hint = (preset or {}).get("hint")
+        if isinstance(hint, dict) and hint:
+            item["hint"] = hint
+        out.append(item)
+    return out
+
+
 class ConfigPayload(BaseModel):
     config: dict
+
+
+# 设置弹窗每次打开都会请求 /api/config。旧实现同步探测 SD/Comfy（timeout=3s），
+# SD 未开或响应慢时按钮就像“卡住”几秒。这里做短超时 + 10 秒缓存：首次最多
+# 0.8 秒，之后立即返回；弹窗本身也会先显示再异步填值。
+_MODEL_PROBE_CACHE: dict = {"key": "", "ts": 0.0, "value": None}
+_MODEL_PROBE_TTL = 10.0
+
+
+def _probe_model_fast(cfg: dict) -> dict | None:
+    """带缓存的模型探测（仅设置页展示用，失败/超时返回 None，不阻塞）。"""
+    image = cfg.get("image") or {}
+    provider = str(image.get("provider") or "openai")
+    base = str(image.get("base_url") or "").rstrip("/")
+    key = f"{provider}|{base}"
+    now = time.time()
+    if _MODEL_PROBE_CACHE["key"] == key and now - _MODEL_PROBE_CACHE["ts"] < _MODEL_PROBE_TTL:
+        return _MODEL_PROBE_CACHE["value"]
+    if provider not in ("sdwebui", "comfyui"):
+        _MODEL_PROBE_CACHE.update(key=key, ts=now, value=None)
+        return None
+    value = None
+    try:
+        import httpx as _httpx
+        with _httpx.Client(timeout=0.8) as c:
+            if provider == "comfyui":
+                r = c.get(f"{base}/system_stats")
+                ck = json.loads(r.text).get("system", {})\
+                    .get("comfyui_version", "")
+                value = {"checkpoint": f"ComfyUI {ck}", "preset_name": "ComfyUI"}
+            else:
+                r = c.get(f"{base}/sdapi/v1/options")
+                ck = r.json().get("sd_model_checkpoint", "") or ""
+                from app.image import match_model_preset
+                preset = match_model_preset(ck)
+                value = {
+                    "checkpoint": ck,
+                    "preset_name": preset["name"],
+                    "steps": preset["steps"],
+                    "cfg": preset["cfg"],
+                    "sampler": preset["sampler"],
+                    "hr_fix": preset["enable_hr"],
+                    "hr_scale": preset.get("hr_scale", 2),
+                }
+    except Exception:
+        value = None
+    _MODEL_PROBE_CACHE.update(key=key, ts=now, value=value)
+    return value
 
 
 @app.get("/api/config")
 def get_config():
     cfg = cfgmod.load_config()
-    model_detected = None
-    if cfg["image"].get("provider", "openai") in ("sdwebui", "comfyui"):
-        try:
-            import httpx as _httpx
-            base = (cfg["image"].get("base_url") or "").rstrip("/")
-            with _httpx.Client(timeout=3) as c:
-                if cfg["image"].get("provider") == "comfyui":
-                    r = c.get(f"{base}/system_stats")
-                    ck = json.loads(r.text).get("system", {})\
-                        .get("comfyui_version", "")
-                    model_detected = {"checkpoint": f"ComfyUI {ck}", "preset_name": "ComfyUI"}
-                else:
-                    r = c.get(f"{base}/sdapi/v1/options")
-                    ck = r.json().get("sd_model_checkpoint", "") or ""
-                    from app.image import match_model_preset
-                    preset = match_model_preset(ck)
-                    model_detected = {
-                        "checkpoint": ck,
-                        "preset_name": preset["name"],
-                "steps": preset["steps"],
-                "cfg": preset["cfg"],
-                "sampler": preset["sampler"],
-                "hr_fix": preset["enable_hr"],
-                "hr_scale": preset.get("hr_scale", 2),
-            }
-        except Exception:
-            model_detected = None
+    model_detected = _probe_model_fast(cfg)
     from app.llm import LLMClient
     llm_client = LLMClient(cfg)
+    # F1-U1（t65）：把画风系统的可选项与当前值暴露给前端（此前只能手改 config.json）。
+    # `style_preset` 回传的是**生效值**（未知/缺失一律按 none 显示，与引擎 style_preset() 的回退一致）。
+    img_cfg = cfg.get("image") or {}
+    pid = str(img_cfg.get("style_preset") or "none").strip().lower()
+    if pid not in image_mod.STYLE_PRESETS:
+        pid = "none"
     return {
         "config": cfgmod.masked(cfg),
         "llm_ready": cfgmod.is_llm_configured(cfg),
         "llm_mock": llm_client.mock,
         "image_ready": cfgmod.is_image_configured(cfg),
         "model_detected": model_detected,
+        "style_presets": _style_presets_view(),
+        "style_preset": pid,
+        "style_custom": image_mod.sanitize_style_custom(img_cfg.get("style_custom")),
+        "style_custom_max": _STYLE_CUSTOM_MAX,
     }
 
 
@@ -577,6 +638,22 @@ def update_config(payload: ConfigPayload):
                 incoming[section].pop("api_key", None)
             elif "*" in key or "填入" in key:
                 incoming[section].pop("api_key", None)
+    # F1-U1（t65）：画风字段的**接口层校验**（两个字段都只在这一个既有端点上收，不新开路由）
+    #  · style_preset：先规范化（strip+lower，与引擎取值口径一致），空值视为 none；
+    #    **未知 id ⇒ 明确 400**（引擎 style_preset() 对未知值是静默落回 none，接口层报错更诚实：
+    #    否则玩家以为选上了，实际什么都没变）。
+    #  · style_custom：调**引擎同一个**清洗函数（折叠空白/去破坏格式的字符/截断到上限）。
+    img_in = incoming.get("image")
+    if isinstance(img_in, dict):
+        if "style_preset" in img_in:
+            pid = str(img_in.get("style_preset") or "").strip().lower() or "none"
+            if pid not in image_mod.STYLE_PRESETS:
+                raise HTTPException(
+                    400, f"未知画风 id：{pid!r}（合法值：{sorted(image_mod.STYLE_PRESETS)}）")
+            img_in["style_preset"] = pid
+        if "style_custom" in img_in:
+            img_in["style_custom"] = image_mod.sanitize_style_custom(
+                img_in.get("style_custom"))
     merged = dict(current)
     for k, v in incoming.items():
         if isinstance(v, dict):
@@ -584,7 +661,13 @@ def update_config(payload: ConfigPayload):
         else:
             merged[k] = v
     cfgmod.save_config(merged)
-    return {"ok": True}
+    # 回传实际生效值：`style_custom` 已被清洗/截断 ⇒ 前端可把它写回输入框，
+    # 避免"界面显示 500 字、实际只存了 300 字"的错觉。
+    img_saved = merged.get("image") or {}
+    return {"ok": True,
+            "style_preset": str(img_saved.get("style_preset") or "none").strip().lower(),
+            "style_custom": image_mod.sanitize_style_custom(img_saved.get("style_custom")),
+            "style_custom_max": _STYLE_CUSTOM_MAX}
 
 
 # ---------- 设定辅助 ----------
@@ -621,6 +704,196 @@ async def random_setup(mode: str = "tsf"):
     return data
 
 
+# ---------- 1.9.0：随机制服 / 角色卡背景 / 旧档案找回 ----------
+
+class UniformRandomPayload(BaseModel):
+    scene: str = ""
+    exclude: list[str] = []
+    seed: int | None = None
+
+
+@app.get("/api/uniforms")
+def uniform_list():
+    """随机制服提示词库（开局与游戏内换装共用）。"""
+    return {"presets": uniforms_mod.list_presets()}
+
+
+@app.post("/api/uniforms/random")
+def uniform_random(payload: UniformRandomPayload):
+    return uniforms_mod.random_preset(payload.scene, payload.exclude,
+                                      seed=payload.seed)
+
+
+class CharacterRandomPayload(BaseModel):
+    world: str = ""
+    seed: int | None = None
+    avoid_names: list[str] = []
+
+
+@app.post("/api/characters/random")
+def character_random(payload: CharacterRandomPayload):
+    """本地随机角色卡（不调用 LLM；断网/无 Key 也能用）。"""
+    return charm.random_character(world=payload.world,
+                                  avoid_names=payload.avoid_names,
+                                  seed=payload.seed)
+
+
+class CharacterBackgroundPayload(BaseModel):
+    sid: str = ""
+    name: str = ""
+    role: str = ""
+    appearance: str = ""
+    personality: str = ""
+    world: str = ""
+    title: str = ""
+    protagonist: str = ""
+    existing: list[str] = []
+    update: bool = False
+
+
+@app.post("/api/characters/background")
+async def character_background(payload: CharacterBackgroundPayload):
+    """自动谱写角色背景；可选把结果写回当前对局的角色卡。"""
+    world, title, protagonist, existing = (
+        payload.world, payload.title, payload.protagonist, payload.existing)
+    session = None
+    if payload.sid:
+        try:
+            session = game.get_session(payload.sid)
+        except game.GameError:
+            session = None
+    if session:
+        world = world or str(session.get("world", ""))
+        title = title or str(session.get("title", ""))
+        protagonist = protagonist or str(
+            (session.get("protagonist") or {}).get("name", ""))
+        existing = existing or [str(c.get("name", ""))
+                                for c in (session.get("characters") or [])]
+    try:
+        result = await charm.write_background(
+            name=payload.name, role=payload.role,
+            appearance=payload.appearance, personality=payload.personality,
+            world=world, title=title, protagonist=protagonist,
+            existing=existing)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:      # 背景生成失败不能让角色卡编辑页崩掉
+        logging.exception("character background failed: %r", e)
+        raise HTTPException(502, f"自动谱写失败：{e}")
+    if payload.update and session:
+        for c in (session.get("characters") or []):
+            if str(c.get("name", "")) == payload.name:
+                c["background"] = result["background"]
+                if payload.role:
+                    c["role"] = payload.role
+                game.persist(session)
+                result["updated"] = True
+                break
+    result["ok"] = True
+    return result
+
+
+class CharacterFineTunePayload(BaseModel):
+    card: dict = {}
+    instruction: str = ""
+    world: str = ""
+    title: str = ""
+    protagonist: str = ""
+
+
+@app.post("/api/characters/fine-tune")
+async def character_fine_tune(payload: CharacterFineTunePayload):
+    """AI 微调角色卡；locked_fields / personality_locked 字段不会被改写。"""
+    try:
+        result = await charm.fine_tune_character(
+            payload.card, payload.instruction,
+            world=payload.world, title=payload.title,
+            protagonist=payload.protagonist)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logging.exception("character fine-tune failed: %r", e)
+        raise HTTPException(502, f"角色卡微调失败：{e}")
+    result["ok"] = True
+    return result
+
+
+class RngRollPayload(BaseModel):
+    notation: str = "1d100"
+    label: str = ""
+    sid: str = ""
+
+
+class RngCocPayload(BaseModel):
+    sid: str = ""
+    stat: str = "KNW"
+    threat: str = "LOW"
+    dc: int = 0
+
+
+@app.post("/api/rng/roll")
+def rng_roll(payload: RngRollPayload):
+    """通用随机数 / 骰子（secrets.SystemRandom，不走 LLM）。"""
+    try:
+        return rng_mod.roll(payload.notation, payload.label)
+    except rng_mod.RngError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/rng/coc-check")
+def rng_coc_check(payload: RngCocPayload):
+    """CoC 手动检定：复用 app.coc.dice 的公式，只读，不写会话。"""
+    sid = str(payload.sid or "").strip()
+    if not sid or not coc.is_coc(sid):
+        raise HTTPException(400, "仅 CoC 对局可用")
+    try:
+        session = coc.get(sid)
+        state = session["run"].state
+        stats = state.get("stats") or {}
+        stat = str(payload.stat or "KNW").upper()
+        if stat not in stats:
+            raise HTTPException(400, f"当前调查员没有属性 {stat}")
+        return rng_mod.coc_check(stat, int(stats[stat]), payload.threat,
+                                 max(-3, min(3, int(payload.dc or 0))))
+    except HTTPException:
+        raise
+    except rng_mod.RngError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logging.exception("rng coc-check failed: %r", e)
+        raise HTTPException(500, f"检定失败：{e}")
+
+
+class LegacyRestorePayload(BaseModel):
+    storylines: bool = True
+    roster: bool = True
+    archives: bool = False
+    generate_backgrounds: bool = False
+
+
+@app.get("/api/legacy/scan")
+def legacy_scan():
+    """扫描旧档案/旧角色卡/对局 zip（只读，不改任何数据）。"""
+    try:
+        return legacy_mod.scan()
+    except Exception as e:
+        logging.exception("legacy scan failed: %r", e)
+        raise HTTPException(500, f"旧档案扫描失败：{e}")
+
+
+@app.post("/api/legacy/restore")
+async def legacy_restore(payload: LegacyRestorePayload):
+    """把扫描到的旧档案/角色卡/zip 找回并适配到当前数据目录。"""
+    try:
+        return await legacy_mod.restore(
+            storylines=payload.storylines, roster=payload.roster,
+            archives=payload.archives,
+            generate_backgrounds=payload.generate_backgrounds)
+    except Exception as e:
+        logging.exception("legacy restore failed: %r", e)
+        raise HTTPException(500, f"旧档案找回失败：{e}")
+
+
 # ---------- 游戏 ----------
 
 class StartPayload(BaseModel):
@@ -641,8 +914,15 @@ class StartPayload(BaseModel):
     stat_config: list[dict] = []
     uniform_en: str = ""
     uniform_neg: str = ""
+    uniform_name: str = ""
+    stage_count: int = 0
     # 1.7.33 主角最终变化样式（身材/胸/瞳色/发色/气质/最终衣物）
     tsf_target: dict = {}
+    # t73：**自定义剧本**（CoC 系）：让世界观真正决定地点/谜团/古神/事件卡。
+    # 形状见 `app/coc/scenario.py`；留空 = 用随包内容（行为完全不变）。
+    scenario: dict = {}
+    # 1.9.19：剧本预设 id（data/coc/scenarios.json）；空 = 原版盐川町。
+    scenario_id: str = ""
 
 
 class OutlinePayload(BaseModel):
@@ -666,6 +946,13 @@ class RegeneratePayload(BaseModel):
     # 1.7.31：force_fullgen=True 时重画=全量精美重画（内建 3 种子轮换+质检，
     # 跨性别变化只有全量做得到）；False 走链式保守（重画需求的温和路径）
     force_fullgen: bool = False
+
+class StageRunPayload(BaseModel):
+    """1.8.0 六段演变工坊：index=单段；indices=多段；都不传=全部六段。"""
+    index: int | None = None
+    indices: list[int] | None = None
+    force: bool = False
+
 
 class DebugPayload(BaseModel):
     action: str = ""
@@ -731,6 +1018,10 @@ async def start_game(payload: StartPayload):
         return await game.start_game(payload.model_dump())
     except game.GameError as e:
         raise HTTPException(400, str(e))
+    except CocScenarioError as e:
+        # t73：剧本校验失败是**玩家输入问题**（400），不是服务器故障（500）。
+        # 必须原样把原因回给玩家 —— 静默忽略会让 TA 以为设定已生效。
+        raise HTTPException(400, str(e))
     except LLMError as e:
         raise HTTPException(502, str(e))
 
@@ -792,6 +1083,8 @@ class StoryPayload(BaseModel):
     stat_config: list[dict] = []
     uniform_en: str = ""
     uniform_neg: str = ""
+    uniform_name: str = ""
+    stage_count: int = 6
     tsf_target: dict = {}
 
 
@@ -1250,6 +1543,57 @@ def portrait_history(sid: str):
         raise HTTPException(404, str(e))
 
 
+@app.get("/api/game/{sid}/stages")
+def game_stages(sid: str):
+    """1.8.0 六段演变工坊：段表 + 每段预演资产状态 + 任务进度（只读）。"""
+    try:
+        return game.stage_tour_view(_req_id(sid, "会话 id"))
+    except game.GameError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/game/{sid}/stages/run")
+async def game_stages_run(sid: str, payload: StageRunPayload | None = None):
+    """用游戏内同一条立绘引擎按顺序生成「六段性转变」全程。
+
+    必须 async——内部 create_task 需要运行中的事件循环；body 可省略。
+    """
+    try:
+        sid2 = _req_id(sid, "会话 id")
+        p = payload or StageRunPayload()
+        if p.index is not None:
+            idxs = [int(p.index)]
+        elif p.indices:
+            idxs = [int(i) for i in p.indices]
+        else:
+            idxs = None
+        return await game.run_stage_tour(sid2, idxs, bool(p.force))
+    except game.GameError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/game/{sid}/stages/cancel")
+async def game_stages_cancel(sid: str):
+    """取消六段演变预演：已完成段保留，未开始段不再消耗算力。
+
+    必须 async：`Task.cancel()` 只能在事件循环线程调用（同步路由跑在线程池，
+    跨线程 cancel 是未定义行为）。"""
+
+    try:
+        return game.cancel_stage_tour(_req_id(sid, "会话 id"))
+    except game.GameError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/game/{sid}/perf")
+def game_perf(sid: str):
+    """本局与本次运行的生成耗时 / 缓存命中 / 串行队列状态（性能面板）。"""
+    try:
+        return game.perf_view(_req_id(sid, "会话 id"))
+    except game.GameError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.post("/api/game/{sid}/recut")
 async def recut_portraits(sid: str, payload: RecutPayload):
     """按当前抠图模式，对全部（或指定角色）立绘的原始图重新抠图。"""
@@ -1348,6 +1692,290 @@ def list_slots(sid: str):
 
 class SaveSlotPayload(BaseModel):
     name: str = "存档"
+
+
+# ---------------------------------------------------------------- CoC 物品栏动作（t66 / U2）
+
+class CocEquipPayload(BaseModel):
+    """玩家动作：装备 / 卸下（`app/coc/session.py::equip_action`）。
+
+    `action` 只认 `equip` / `unequip`；`equip` 用 `item`（背包里的物品 id），
+    `unequip` 用 `slot`（R/C/B）。字段给默认值是为了让前端在只传一个时也能拿到
+    **结构化失败原因**（`ok=false` + `reason`），而不是 422 校验错误 ——
+    "为什么点不动"必须是可读的（见 t63 §9.2 的契约）。
+    """
+    action: str = ""
+    item: str = ""
+    slot: str = ""
+
+
+@app.post("/api/game/{sid}/coc/equip")
+def coc_equip(sid: str, payload: CocEquipPayload):
+    """装备/卸下（**玩家动作**，走 trust="engine"）。
+
+    安全：这是写操作（POST），因此**自动**落在 `local_access_guard` 里 ——
+    同一条中间件对 `/api/**` 的所有写请求做 Host 回环 + `Sec-Fetch-Site` 非跨站 +
+    Origin 同源 + 浏览器请求必须带本轮 token（`X-Local-Token` / cookie）四道校验。
+    本端点**不新开任何豁免**，也不需要额外的 Depends：守卫是全局中间件。
+
+    权限分层（这是本端点存在的理由）：`equip`/`unequip` 在
+    `sanitize.PLAYER_ACTION_KEYS` 里，**刻意不在 LLM 白名单**中 ——
+    模型无权替玩家装备；UI 也只能走这条受保护端点。
+    """
+    act = str(payload.action or "").strip().lower()
+    if act not in ("equip", "unequip"):
+        return {"ok": False, "action": act, "item": payload.item,
+                "slot": payload.slot, "reason": "unknown_action"}
+    if not coc.is_coc(sid):
+        raise HTTPException(404, "会话不存在或不是 CoC 对局")
+    # 契约 §9.2：换装要能告诉玩家"顶掉了谁"。引擎的 applied 明细里有这个信息，但
+    # `equip_action` 的返回值**没有透传**它（实测返回 {ok,action,item,slot,reason,inventory}）——
+    # 这里用**动作前的权威视图**补上：`inventory_view` 是只读函数，不写状态；
+    # 语义与引擎一致（`replaced` = 该槽原本那件物品的 id，未换装时为 null）。
+    # ⚠️ 只取 `coc.get(sid)["run"].state` 这一条公开路径；失败时**写日志**而不是静默
+    #    （第一版我误用了别的助手名 ⇒ NameError 被 except 吞掉 ⇒ 永远 null，是探针抓出来的）。
+    before_equipped = {}
+    if act == "equip":
+        try:
+            _sess0 = coc.get(sid)
+            before_equipped = (coc_state.inventory_view(_sess0["run"].state).get("equipped")
+                               or {})
+        except Exception as e:  # noqa: BLE001 — 取不到旧视图不该让装备失败，但要留痕
+            logging.getLogger("tsf.coc_equip").warning("replaced 预取失败：%r", e)
+            before_equipped = {}
+    try:
+        res = coc.equip_action(sid, act, item=payload.item, slot=payload.slot)
+    except coc.CocError as e:
+        raise HTTPException(404 if "不存在" in str(e) else 400, str(e))
+    if act == "equip" and res.get("ok"):
+        try:
+            slot_used = res.get("slot")
+            prev = before_equipped.get(slot_used)
+            now = ((res.get("inventory") or {}).get("equipped") or {}).get(slot_used)
+            if prev and now and prev.get("id") != now.get("id"):
+                res["replaced"] = prev.get("id")
+            else:
+                res.setdefault("replaced", None)
+        except Exception:      # noqa: BLE001
+            res.setdefault("replaced", None)
+    # 附带完整 coc 段：前端一次拿到新视图就能整体重渲染，无需再发一次 GET。
+    # `equip_action` 已经回过 `inventory`；这里补的是**整段** coc（DOOM/属性/标签…），
+    # 因为它们也会因装备（如图腾的 doom_down）而变化。
+    sess = coc.get(sid)
+    if sess is not None:
+        try:
+            res["coc"] = coc.public_state(sess)
+        except Exception:      # noqa: BLE001 — 视图组装失败不该让"装备已成功"变成 500
+            pass
+    return res
+
+
+# ---------------------------------------------------------------- 1.9.19：SAN / 商店 / 搜刮 / 物品使用
+
+class CocShopPayload(BaseModel):
+    shop: str = ""
+
+
+class CocShopItemPayload(BaseModel):
+    shop: str = ""
+    item: str = ""
+
+
+class CocSearchPayload(BaseModel):
+    location: str = ""
+
+
+class CocUseItemPayload(BaseModel):
+    item: str = ""
+
+
+class CocSanPayload(BaseModel):
+    loss: str = "0/1d6"
+    difficulty: str = "regular"
+    reason: str = ""
+
+
+def _coc_or_404(sid: str) -> None:
+    if not coc.is_coc(sid):
+        raise HTTPException(404, "会话不存在或不是 CoC 对局")
+
+
+@app.get("/api/game/{sid}/coc/shop")
+def coc_shop_list(sid: str):
+    _coc_or_404(sid)
+    try:
+        return coc.shop_list(sid)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/game/{sid}/coc/shop/open")
+def coc_shop_open(sid: str, payload: CocShopPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.shop_open(sid, payload.shop)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/game/{sid}/coc/shop/buy")
+def coc_shop_buy(sid: str, payload: CocShopItemPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.shop_buy(sid, payload.shop, payload.item)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/game/{sid}/coc/shop/sell")
+def coc_shop_sell(sid: str, payload: CocShopItemPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.shop_sell(sid, payload.shop, payload.item)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/game/{sid}/coc/shop/reroll")
+def coc_shop_reroll(sid: str, payload: CocShopPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.shop_reroll(sid, payload.shop)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/game/{sid}/coc/search")
+def coc_search_loot(sid: str, payload: CocSearchPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.search_loot(sid, payload.location)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/game/{sid}/coc/use-item")
+def coc_use_item(sid: str, payload: CocUseItemPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.use_item(sid, payload.item)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/game/{sid}/coc/san-check")
+def coc_san_check(sid: str, payload: CocSanPayload):
+    _coc_or_404(sid)
+    try:
+        return coc.san_check(sid, loss=payload.loss,
+                             difficulty=payload.difficulty,
+                             reason=payload.reason)
+    except coc.CocError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------------------------------------------------------------- 1.9.20：AI 控制台 / 改对话 / 导演指令
+
+class AiDirectivePayload(BaseModel):
+    text: str = ""
+
+
+class AiDialoguePayload(BaseModel):
+    dialogue: list[dict] = []
+
+
+def _ai_parts(sid: str):
+    """返回 `(会话, 控制台容器, 模式)`；CoC 用 run.state，TSF/VN 用 session。"""
+    if coc.is_coc(sid):
+        sess = coc.get(sid)
+        if sess is None:
+            raise HTTPException(404, "会话不存在或已过期")
+        mode = "coc_tsf" if sid in _COC_TSF_SIDS else "coc"
+        return sess, sess["run"].state, mode
+    try:
+        sess = game.get_session(sid)
+    except game.GameError as e:
+        raise HTTPException(404, str(e))
+    return sess, sess, str(sess.get("mode") or "tsf")
+
+
+def _ai_view(sid: str) -> dict:
+    sess, trace, mode = _ai_parts(sid)
+    if mode in ("coc", "coc_tsf"):
+        pub = coc.public_state(sess)
+        st = sess["run"].state
+        names = [str(st.get("character") or ""), "旁白"]
+        names += [str(x) for x in (st.get("allies") or [])]
+        return {
+            "ok": True, "mode": mode, "title": pub.get("title", ""),
+            "entries": ai_console_mod.entries(trace),
+            "directive": ai_console_mod.get_directive(trace),
+            "dialogue": pub.get("dialogue") or [],
+            "characters": list(dict.fromkeys(x for x in names if x)),
+            "emotions": ["neutral", "happy", "shy", "sad", "angry", "afraid"],
+        }
+    turn = (sess.get("log") or [{}])[-1].get("turn") or {}
+    names = [str((sess.get("protagonist") or {}).get("name") or "")]
+    names += [str(c.get("name")) for c in (sess.get("characters") or [])]
+    return {
+        "ok": True, "mode": mode, "title": sess.get("title", ""),
+        "entries": ai_console_mod.entries(trace),
+        "directive": ai_console_mod.get_directive(trace),
+        "dialogue": turn.get("dialogue") or [],
+        "characters": list(dict.fromkeys(x for x in (names + ["旁白"]) if x)),
+        "emotions": list(sess.get("emotions") or
+                         ["neutral", "happy", "shy", "sad"]),
+    }
+
+
+@app.get("/api/game/{sid}/ai/console")
+def ai_console_view(sid: str):
+    return _ai_view(sid)
+
+
+@app.post("/api/game/{sid}/ai/directive")
+def ai_set_directive(sid: str, payload: AiDirectivePayload):
+    _sess, trace, mode = _ai_parts(sid)
+    text = ai_console_mod.set_directive(trace, payload.text)
+    if mode in ("coc", "coc_tsf"):
+        _sess["run"].save()
+    else:
+        game.persist(_sess)
+    return {"ok": True, "directive": text, "mode": mode}
+
+
+@app.post("/api/game/{sid}/ai/edit-dialogue")
+async def ai_edit_dialogue(sid: str, payload: AiDialoguePayload):
+    _sess, _trace, mode = _ai_parts(sid)
+    try:
+        if mode in ("coc", "coc_tsf"):
+            state = coc.edit_dialogue(sid, payload.dialogue)
+        else:
+            state = game.edit_dialogue(sid, payload.dialogue)
+    except (game.GameError, coc.CocError) as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "state": state, "mode": mode}
+
+
+@app.post("/api/game/{sid}/ai/console/clear")
+def ai_console_clear(sid: str):
+    _sess, trace, mode = _ai_parts(sid)
+    ai_console_mod.clear(trace)
+    if mode in ("coc", "coc_tsf"):
+        _sess["run"].save()
+    else:
+        game.persist(_sess)
+    return {"ok": True, "entries": []}
 
 
 @app.post("/api/game/{sid}/slots")
@@ -1794,7 +2422,18 @@ def game_assets(sid: str):
         s = game.get_session(sid)
     except game.GameError as e:
         raise HTTPException(404, str(e))
-    return {"assets": s["assets"], "bg_map": s["bg_map"]}
+    turn = ((s.get("log") or [{}])[-1] or {}).get("turn") or {}
+    cg_id = turn.get("cg_id") or ""
+    cg_meta = (s.get("cg_map") or {}).get(cg_id) or {}
+    return {
+        "assets": s["assets"], "bg_map": s["bg_map"],
+        # 轮询期间 CG 才生成完时，前端靠这几个字段把图补上（否则 playTurn 时
+        # cg_url 还是空，之后永远不 set src → CG 不显示）。
+        "cg_active": bool(cg_id), "cg_id": cg_id,
+        "cg_key": cg_meta.get("key", ""),
+        "cg_title": (turn.get("cg") or {}).get("title", ""),
+        "cg_url": game._cg_url(s, turn),
+    }
 
 
 @app.get("/api/game/{sid}/tasks")
@@ -1844,8 +2483,15 @@ def serve_image(filename: str):
         raise HTTPException(400, "非法文件名")
     # 文件名白名单：允许空格（历史场景名「星冠学园 · 走廊」会进入文件名，
     # 此前白名单缺空格 → /img 400 → 背景 img onerror → 旧档背景永远黑屏）
-    _FN = r"[A-Za-z0-9_.\-~ \u4e00-\u9fa5（）()·——]+\.(png|jpg|jpeg|webp)"
-    _DIR = r"[\u4e00-\u9fa5A-Za-z0-9_\-]{1,32}"
+    #
+    # 1.8.0 修复（UI 冒烟实测暴露）：**目录名白名单缺空格、长度上限 32**——
+    # 标题「UI2 冒烟测试」生成的目录名 `UI2 冒烟测试_林澈_4f67` 直接 400，
+    # 表现为「立绘/演变缩略图全部裂图」；标题 30 字 + 主角名时还会超长。
+    # 目录名同时补上中文标点（场景名/标题会带「·」「。」「：」）。
+    # 安全性不变：后面仍走 safe_relpath 断言 resolve 后必须位于 CACHE_DIR 内。
+    _FN = (r"[A-Za-z0-9_.\-~ \u4e00-\u9fa5（）()·——。，、；：！？～“”‘’《》"
+           r"【】「」『』]+\.(png|jpg|jpeg|webp)")
+    _DIR = (r"[\u4e00-\u9fa5A-Za-z0-9_\- ·（）()。，、；：！？～—]{1,64}")
     ok = bool(_re.fullmatch(_FN, filename))
     parts = filename.split("/")
     if len(parts) == 2 and _re.fullmatch(_DIR, parts[0]):

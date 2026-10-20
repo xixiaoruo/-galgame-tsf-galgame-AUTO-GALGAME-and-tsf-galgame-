@@ -141,6 +141,177 @@ def apply_style_mode(style_suffix: str, style_mode: str) -> str:
     return style_suffix
 
 
+# =============================================================================
+# F2 生图**画风**预设层（t61）—— 与 MODEL_PRESETS（模型预设）正交：
+#   · 模型预设 = 用哪个 checkpoint + 它的步数/CFG/尺寸（`match_model_preset`）
+#   · 画风预设 = **追加**到提示词尾部的风格词（本表），不改模型、不替换既有提示词
+#
+# 红线（t61 契约）：① 不改 `app/tsf.py`；② 不改任何既有生图判据数值；
+#   ③ 风格后缀是**追加**，绝不替换 TSF 阶段提示词；
+#   ④ **默认（未设 / "none"）时必须零影响** —— `style_suffix()` 返回 ""、
+#      `style_key_part()` 返回空元组 ⇒ 提示词与缓存键与改动前逐字节相同。
+# =============================================================================
+
+#: 「无风格」：默认值，等价于本功能不存在（现行为）
+STYLE_NONE = "none"
+
+STYLE_PRESETS: dict[str, dict] = {
+    STYLE_NONE: {
+        "name": "无风格（默认，与旧行为一致）",
+        "positive": "", "negative": "", "params": {},
+    },
+    "cinematic": {
+        "name": "电影风",
+        "positive": ("cinematic film still, dramatic lighting, shallow depth of "
+                     "field, anamorphic lens, film grain, color graded, "
+                     "volumetric light"),
+        "negative": "flat lighting, digital art, oversaturated, snapshot",
+        "params": {"sd_cfg": -0.5},          # 电影感：略降 CFG 免过饱和
+    },
+    "anime": {
+        "name": "动漫风",
+        "positive": ("anime illustration, clean lineart, cel shading, vivid "
+                     "colors, key visual, high detail 2d art"),
+        "negative": "photorealistic, real person, 3d render, photo, film grain",
+        "params": {},
+    },
+    "realistic": {
+        "name": "写实风",
+        "positive": ("photorealistic, natural skin texture, realistic "
+                     "proportions, soft natural light, 85mm portrait lens, "
+                     "high detail photograph"),
+        "negative": ("anime, cartoon, illustration, cel shading, doll, "
+                     "plastic skin, airbrushed"),
+        "params": {"sd_cfg": -0.3},
+    },
+    "watercolor": {
+        "name": "水彩",
+        "positive": ("watercolor painting, soft pigment washes, wet on wet, "
+                     "paper texture, delicate brush strokes, pastel palette"),
+        "negative": "photorealistic, 3d render, sharp vector lines, heavy outline",
+        "params": {},
+    },
+    "cyberpunk": {
+        "name": "赛博厚涂",
+        "positive": ("cyberpunk digital painting, thick impasto brushwork, "
+                     "neon rim light, magenta and cyan palette, rain-slick "
+                     "night city, high contrast"),
+        "negative": "flat colors, pastel, soft watercolor, low contrast, daylight",
+        "params": {"sd_steps": 2},           # 厚涂细节多：+2 步
+    },
+    "pixel_art": {
+        "name": "像素风（同时建议开启 image.pixel_art）",
+        "positive": ("pixel art, 16-bit game sprite, crisp pixel grid, limited "
+                     "palette, retro console key visual"),
+        "negative": ("blurry, smooth gradients, antialiasing, photorealistic, "
+                     "3d render"),
+        # 像素风真正的"硬"效果由 app/pixel.py 的 CPU 后处理给出（默认关）；
+        # 这里只提示 + 给一条采样参数；**不擅自替用户改开关**。
+        "params": {"sd_steps": -4},          # 像素化前不需要太多细节步数
+        # t70：**专门特训模型**（SDXL 像素风 LoRA）。CPU 量化（pixel.py）只能把平滑图
+        # 压成色块，做不出"手绘像素画"的笔触与结构；真像素风要靠 LoRA 直接生成。
+        # 词法 `<lora:文件名:权重>` 是 A1111 原生语法，由模型加载器解析。
+        "lora": {"name": "pixelArtXL_nerijs", "weight": 1.0},
+        "hint": {"pixel_art": True},
+    },
+}
+
+
+def lora_tag(image_cfg: dict | None) -> str:
+    """当前画风若有绑定 LoRA，返回 A1111 的 `<lora:名称:权重>` 词；否则空串。
+
+    · 名称取**不含扩展名的文件名**（放在 models/Lora 下，A1111 按文件名匹配）；
+    · 权重夹到 [0, 2] 防手滑写坏；
+    · 名称做保守清洗（只留字母数字下划线连字符点空格），**防注入** ——
+      与 `sanitize_style_custom` 不同，这里必须保留 `<` `>` `:`，因为那正是 LoRA 语法。
+    """
+    import re as _re
+    preset = style_preset(image_cfg)
+    lo = preset.get("lora") if isinstance(preset, dict) else None
+    if not isinstance(lo, dict):
+        return ""
+    name = _re.sub(r"[^0-9A-Za-z_\-\. ]", "", str(lo.get("name") or "")).strip()
+    if not name:
+        return ""
+    try:
+        w = float(lo.get("weight", 1.0))
+    except (TypeError, ValueError):
+        w = 1.0
+    w = min(max(w, 0.0), 2.0)
+    return "<lora:%s:%.2f>" % (name, w)
+
+
+def style_preset(image_cfg: dict | None) -> dict:
+    """取当前画风预设（未设/未知 → 「无风格」这条空预设，绝不抛异常）。"""
+    pid = str((image_cfg or {}).get("style_preset") or STYLE_NONE).strip().lower()
+    preset = STYLE_PRESETS.get(pid)
+    if preset is None:
+        log.warning("未知 style_preset=%r，按「无风格」处理", pid)
+        return STYLE_PRESETS[STYLE_NONE]
+    return preset
+
+
+def sanitize_style_custom(text) -> str:
+    """清洗玩家自定义风格文本（`image.style_custom`）。
+
+    规则（都是"防注入/防破格式"，不是内容审查）：
+      · 只取**单行**：换行/制表符等空白折叠成一个空格；
+      · 去掉控制字符与提示词分隔符 `|`、`(`、`)`、`[`、`]`、`{`、`}`、`<`、`>`：
+        这些会破坏 A1111 的权重语法或把整段提示词切坏；
+      · 逗号保留（风格词本来就是逗号分隔的词组），但连续逗号折叠；
+      · 截断到 300 字符（防超长把主体描述挤出 token 窗口）。
+    **它只进 positive**；negative 由预设表 + 既有负面词组装，自定义文本无法触及。
+    """
+    import re as _re
+    s = str(text or "")
+    s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    s = "".join(ch for ch in s if ord(ch) >= 32)
+    s = "".join(ch for ch in s if ch not in "|()[]{}<>")
+    s = _re.sub(r"\s+", " ", s)
+    s = _re.sub(r"(?:\s*,\s*)+", ", ", s)      # 连续/带空格的逗号 → 单个 ", "
+    s = s.strip(" ,")
+    if len(s) > 300:
+        s = s[:300].rstrip(" ,")
+    return s
+
+
+def style_suffix(image_cfg: dict | None) -> str:
+    """画风后缀（**追加**到提示词尾部；默认返回空串 ⇒ 零影响）。
+
+    形态：`，<预设 positive>，<自定义文本>`（两段都可单独缺省）。
+    """
+    preset = style_preset(image_cfg)
+    parts = [preset.get("positive", ""),
+             sanitize_style_custom((image_cfg or {}).get("style_custom"))]
+    parts = [p for p in parts if p]
+    return ("，" + "，".join(parts)) if parts else ""
+
+
+def style_negative(image_cfg: dict | None) -> str:
+    """画风负面追加词（默认返回空串 ⇒ 零影响；自定义文本**不参与**这里）。"""
+    neg = style_preset(image_cfg).get("negative", "")
+    return ("，" + neg) if neg else ""
+
+
+def style_key_part(image_cfg: dict | None) -> tuple:
+    """缓存键增量（照 `pixel.py::key_parts` 的先例）：**默认返回空元组** ⇒ 键逐位不变。
+
+    只要设了预设或自定义文本就返回非空元组 ⇒ 换风格必然换键（否则会命中旧图）。
+    自定义文本进键的是**清洗后**的文本（同一视觉结果同键）。
+    """
+    pid = str((image_cfg or {}).get("style_preset") or STYLE_NONE).strip().lower()
+    custom = sanitize_style_custom((image_cfg or {}).get("style_custom"))
+    if pid in ("", STYLE_NONE) and not custom:
+        return ()
+    return (f"style={pid}", f"custom={custom}")
+
+
+def style_param_deltas(image_cfg: dict | None) -> dict:
+    """画风对采样参数的**差量**（steps/cfg 相加；sampler 非空则覆盖）。默认 {}。"""
+    return dict(style_preset(image_cfg).get("params") or {})
+
+
+
 def append_appearance_en(appearance: str) -> str:
     """把中文描述里的常见外观词翻译成英文标签追加，提升模型服从度。"""
     tags = [v for k, v in APPEARANCE_EN_MAP.items() if k in appearance]
@@ -493,6 +664,150 @@ def _get_sd_sem():
     if _GLOBAL_SD_SEM is None:
         _GLOBAL_SD_SEM = asyncio.Semaphore(1)
     return _GLOBAL_SD_SEM
+
+
+# =============================================================================
+# 1.8.0 绘画线路优化：生成结果去重缓存 / 消耗统计 / 节能预算
+#
+# 为什么做（用户诉求：优化性能与消耗）：
+#   · 同一提示词 × 同一组参数 × 同一 seed 在本地 SD/ComfyUI 上是**确定性的**。
+#     玩家反复打开「六段演变」、重画同一差分、或切回同一阶段时，没必要让
+#     8GB 卡再跑一遍 30 步 txt2img（一张 768x1344 约 20-40s）。
+#   · 只缓存**通过质检**的成品原始字节（`_consider` 返回 True 的那一张），
+#     命中即可直接返回——不会把废图缓存起来。
+#   · 只缓存本地线路（sdwebui/comfyui）且有显式 seed 的 txt2img；img2img
+#     （换装/渐变链）依赖底图，键里没有底图哈希，一律不缓存，避免错图。
+#   · 缓存目录走 `CACHE_DIR/_gencache`，默认上限 384MB，按 mtime 淘汰；
+#     可在设置/配置里关闭（image.gen_cache=false）。
+# =============================================================================
+_GEN_STATS = {
+    "requests": 0,        # 真正发往生图服务的请求数
+    "failed": 0,          # 最终失败的生成次数
+    "cache_hits": 0,      # 命中本地成品缓存的次数
+    "cache_misses": 0,
+    "sd_seconds": 0.0,    # 本地线路实际生成耗时累计
+    "saved_seconds": 0.0, # 缓存命中共省下的估算耗时
+}
+_GEN_CACHE_LOCK = None
+_GEN_CACHE_PRUNE_TS = 0.0
+
+
+def _gen_cache_root() -> Path:
+    """成品缓存目录（跟随 CACHE_DIR，删缓存/清数据时一并清掉）。"""
+    from . import config as cfgmod
+    return Path(cfgmod.CACHE_DIR) / "_gencache"
+
+
+def _gen_cache_lock():
+    global _GEN_CACHE_LOCK
+    if _GEN_CACHE_LOCK is None:
+        import threading
+        _GEN_CACHE_LOCK = threading.Lock()
+    return _GEN_CACHE_LOCK
+
+
+def _gen_cache_key(provider: str, prompt: str, negative: str, width: int,
+                   height: int, seed, steps, cfg_scale, sampler: str,
+                   scheduler: str, extra: str = "") -> str:
+    raw = "|".join(str(x) for x in (
+        provider, "v1", width, height, seed, steps, cfg_scale,
+        sampler, scheduler, extra, prompt, negative))
+    return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()
+
+
+def _gen_cache_load(key: str) -> bytes | None:
+    try:
+        p = _gen_cache_root() / f"{key}.png"
+        if not p.is_file():
+            _GEN_STATS["cache_misses"] += 1
+            return None
+        data = p.read_bytes()
+        if len(data) < 1024:
+            return None
+        return data
+    except OSError:
+        return None
+
+
+def _gen_cache_prune(limit_bytes: int) -> None:
+    """按 mtime 淘汰：超过上限时删到 75%（最多每 10 分钟跑一次）。"""
+    global _GEN_CACHE_PRUNE_TS
+    now = time.time()
+    if now - _GEN_CACHE_PRUNE_TS < 600:
+        return
+    _GEN_CACHE_PRUNE_TS = now
+    root = _gen_cache_root()
+    try:
+        files = [p for p in root.glob("*.png") if p.is_file()]
+    except OSError:
+        return
+    total = sum(p.stat().st_size for p in files)
+    if total <= limit_bytes:
+        return
+    files.sort(key=lambda p: p.stat().st_mtime)
+    target = int(limit_bytes * 0.75)
+    for p in files:
+        try:
+            total -= p.stat().st_size
+            p.unlink()
+        except OSError:
+            continue
+        if total <= target:
+            break
+
+
+def _gen_cache_store(key: str, raw: bytes, limit_mb: int = 384) -> None:
+    try:
+        if not raw or len(raw) < 1024:
+            return
+        if not (raw.startswith(b"\x89PNG") or raw.startswith(b"\xff\xd8")):
+            return
+        root = _gen_cache_root()
+        root.mkdir(parents=True, exist_ok=True)
+        p = root / f"{key}.png"
+        if p.is_file():
+            return
+        with _gen_cache_lock():
+            tmp = root / f"{key}.tmp"
+            tmp.write_bytes(raw)
+            tmp.replace(p)
+            _gen_cache_prune(max(32, int(limit_mb or 384)) * 1024 * 1024)
+    except OSError as e:
+        log.debug("gen cache store failed: %s", e)
+
+
+def _gen_avg_seconds() -> float:
+    n = max(1, int(_GEN_STATS["requests"]))
+    avg = float(_GEN_STATS["sd_seconds"]) / n
+    return max(8.0, min(120.0, avg)) if _GEN_STATS["requests"] else 20.0
+
+
+def _gen_note_request(seconds: float) -> None:
+    _GEN_STATS["requests"] += 1
+    _GEN_STATS["sd_seconds"] += max(0.0, float(seconds))
+
+
+def gen_stats_snapshot(reset: bool = False) -> dict:
+    """生成线路统计快照（纯读；reset=True 时清零，供「性能与消耗」面板用）。"""
+    out = dict(_GEN_STATS)
+    out["cache_hits"] = int(out.get("cache_hits", 0))
+    hits = out["cache_hits"]
+    reqs = max(1, int(out.get("requests", 0))) + hits
+    out["cache_hit_rate"] = round(hits * 100.0 / reqs, 1)
+    out["avg_seconds"] = round(
+        (float(out.get("sd_seconds", 0.0)) / max(1, int(out.get("requests", 0)))), 2)
+    try:
+        root = _gen_cache_root()
+        files = [p for p in root.glob("*.png") if p.is_file()]
+        out["cache_entries"] = len(files)
+        out["cache_mb"] = round(sum(p.stat().st_size for p in files) / 1048576.0, 1)
+    except OSError:
+        out["cache_entries"] = 0
+        out["cache_mb"] = 0.0
+    if reset:
+        for k in list(_GEN_STATS):
+            _GEN_STATS[k] = 0.0 if isinstance(_GEN_STATS[k], float) else 0
+    return out
 
 
 # ---------- SD 调用观测（审计 2.6 / M-06 / B-15）：只记录，不改变互斥 ----------
@@ -1018,6 +1333,11 @@ HAND_POSE_NEG = (
 BACKGROUND_EN_SUFFIX = (
     ", scenery only, no humans, no characters, no people, "
     "wide establishing shot, empty landscape"
+)
+# 旧档场景反复被「双人同框」判废：正向 no humans 常被模型忽略，负面再压一层。
+BACKGROUND_HUMAN_NEG = (
+    "people, person, 1girl, 1boy, human figure, crowd, "
+    "character, characters, silhouette"
 )
 
 # イベントCG 专用（galgame 概念：关键剧情节点的一枚完整插画——必然包含
@@ -2627,15 +2947,46 @@ def _comfy_workflow(prompt: str, negative: str, width: int, height: int,
 
 
 def _comfy_extract_image(history: dict, node_id: str = "7") -> dict | None:
-    """从 ComfyUI /history 响应中提取第一张图 {filename, subfolder, type}。"""
-    try:
-        for _, node in history.items():
-            for out_node in node.get("outputs", {}).values():
-                imgs = out_node.get("images") or []
-                if imgs:
-                    return imgs[0]
-    except Exception:
+    """从 ComfyUI /history 响应中提取第一张图。
+
+    标准响应是 ``{prompt_id: {"outputs": {"7": {"images": [...]}}}}``；
+    旧版适配器也可能把单个 node 或 ``outputs`` 直接传入。逐层容错，避免
+    ComfyUI 已完成但游戏因响应形状差异取不到图。
+    """
+    if not isinstance(history, dict):
         return None
+
+    def images_from(value) -> list:
+        if not isinstance(value, dict):
+            return []
+        direct = value.get("images")
+        if isinstance(direct, list):
+            return direct
+        outputs = value.get("outputs", value)
+        if not isinstance(outputs, dict):
+            return []
+        direct = outputs.get("images")
+        if isinstance(direct, list):
+            return direct
+        for out_node in outputs.values():
+            if isinstance(out_node, dict) and isinstance(out_node.get("images"), list):
+                return out_node["images"]
+        return []
+
+    # 优先尝试明确的 SaveImage 节点，再回退到任意带 images 的输出节点。
+    direct_images = images_from(history)
+    if direct_images:
+        first = direct_images[0]
+        return first if isinstance(first, dict) else None
+    candidates = []
+    if node_id in history:
+        candidates.append(history[node_id])
+    candidates.extend(value for key, value in history.items() if key != node_id)
+    for candidate in candidates:
+        imgs = images_from(candidate)
+        if imgs:
+            first = imgs[0]
+            return first if isinstance(first, dict) else None
     return None
 
 
@@ -2860,8 +3211,10 @@ class ImageClient:
             preset_steps = min(int(preset.get("steps", 30)), cap)
             # HR（Hires 修复）同规则：模型预设 HR 仅在 high 档开启——
             # 8GB 卡 HR 二遍 latent 在游戏长跑中是紫斑糊化触发器（实锤）
+            # 1.8.0 节能：eco_mode 强制关闭 HR 二遍（8GB 长跑下省 ~40% 时间）
             hr_on = bool(preset.get("enable_hr")) and (
-                effective_vram_mode(self.cfg) == "high" or not self._wai_adapt)
+                effective_vram_mode(self.cfg) == "high" or not self._wai_adapt) \
+                and not bool(self.cfg.get("eco_mode"))
             return await self._sd_retry(
                 prompt, w, h, neg, seed, check=_portrait_check,
                 soft=not strict, soft_last=True, matcher=matcher,
@@ -2907,7 +3260,8 @@ class ImageClient:
                              "extra digits, blurry"),
                 ("duplicate objects, cloned buildings, extra windows, "
                  "warped perspective, jpeg artifacts, text, signature, "
-                 "cluttered composition, twisted geometry")] if x)
+                 "cluttered composition, twisted geometry"),
+                BACKGROUND_HUMAN_NEG] if x)
             cap = effective_steps_cap(self.cfg, "background")
             return await self._sd_retry(
                 prompt, w, h, neg, None, check=_bg_check,
@@ -2928,6 +3282,7 @@ class ImageClient:
                 ("duplicate objects, cloned buildings, extra windows, "
                  "warped perspective, jpeg artifacts, text, signature, "
                  "cluttered composition, twisted geometry"),
+                BACKGROUND_HUMAN_NEG,
                 preset.get("negative_extra", "")] if x)
             cap = effective_steps_cap(self.cfg, "background")
             preset_steps = min(int(preset.get("steps", 30)), cap)
@@ -2940,7 +3295,7 @@ class ImageClient:
                                        preset.get("sampler", "DPM++ 2M"))),
                 scheduler=str(self._tune("sd_scheduler", preset.get("scheduler", ""),
                                          preset.get("scheduler", ""))),
-                hr=preset.get("enable_hr"),
+                hr=bool(preset.get("enable_hr")) and not bool(self.cfg.get("eco_mode")),
                 hr_upscaler=preset.get("hr_upscaler", "Latent"),
                 hr_scale=float(preset.get("hr_scale", 2)),
                 hr_steps=int(preset.get("hr_steps", 10)),
@@ -3006,8 +3361,12 @@ class ImageClient:
         if item.get("b64_json"):
             return base64.b64decode(item["b64_json"])
         if item.get("url"):
+            # 响应 URL 也必须经过 SSRF 校验；只校验配置的 API base 不够，
+            # 兼容服务可返回任意 URL，直接请求会把本机变成内网代理。
+            image_url = str(item["url"] or "").strip()
+            _validate_url(image_url, allow_local=False)
             async with httpx.AsyncClient(timeout=120) as client:
-                r = await client.get(item["url"])
+                r = await client.get(image_url)
                 r.raise_for_status()
                 return r.content
         raise ImageGenError("生图 API 响应中既无 b64_json 也无 url")
@@ -3144,6 +3503,56 @@ class ImageClient:
         base_seed = seed if seed is not None else int(_time.time()) % (2 ** 31)
         issue = None
         last_raw = None
+        # ---- 1.8.0 线路优化：节能预算 + 成品缓存（详见本文件顶部说明） ----
+        _eco = bool(self.cfg.get("eco_mode"))
+        _cache_on = (seed is not None and init_b64 is None
+                     and self.provider in ("sdwebui", "comfyui")
+                     and bool(self.cfg.get("gen_cache", True)))
+        _cache_limit_mb = int(self.cfg.get("gen_cache_mb", 384) or 384)
+        _cache_kw = "|".join(sorted(f"{k}={v}" for k, v in kwargs.items()))
+        if _eco:
+            # 节能：最多 2 次变体、跳过转变判定器（打标很贵且只在跃迁时值得）
+            attempts = min(attempts, 2)
+            if matcher is not None:
+                log.info("eco mode: stage matcher skipped")
+                matcher = None
+
+        def _ckey(s):
+            if not _cache_on:
+                return None
+            # 缓存键必须覆盖「会改变最终请求」的全部配置：模型/端点/全局负面词/
+            # wai ClipSkip2 适配——换模型或改负面词后同 prompt/seed 不能命中旧图。
+            _mpre = getattr(self, "_model_preset", None) or {}
+            _env = "|".join(str(x) for x in (
+                self.cfg.get("base_url", ""), self.cfg.get("model", ""),
+                self.cfg.get("comfy_checkpoint", ""),
+                _mpre.get("name", "") if isinstance(_mpre, dict) else "",
+                self.cfg.get("negative_prompt", ""), self.cfg.get("wai_adapt", True),
+                self.cfg.get("vram_mode", ""), self.cfg.get("portrait_quality", ""),
+                self.cfg.get("background_quality", ""),
+                self.cfg.get("cg_quality", ""), self.cfg.get("eco_mode", False)))
+            return _gen_cache_key(self.provider, prompt, extra_negative, width,
+                                  height, s, kwargs.get("steps"),
+                                  kwargs.get("cfg_scale"),
+                                  str(kwargs.get("sampler", "")),
+                                  str(kwargs.get("scheduler", "")),
+                                  _cache_kw + "|" + _env)
+
+        def _cache_put(s, raw):
+            key = _ckey(s)
+            if key:
+                _gen_cache_store(key, raw, _cache_limit_mb)
+
+        async def _cache_get(s):
+            key = _ckey(s)
+            if not key:
+                return None
+            data = _gen_cache_load(key)
+            if data is not None:
+                _GEN_STATS["cache_hits"] += 1
+                _GEN_STATS["saved_seconds"] += _gen_avg_seconds()
+                log.info("gen cache hit (%dx%d seed=%s)", width, height, s)
+            return data
 
         async def _recover_if_bad(issue_text: str) -> None:
             """服务劣化信号连续出现 → 重载模型恢复。1.7.32：**任何质检
@@ -3218,8 +3627,16 @@ class ImageClient:
             attempts = min(attempts, 2)
         for attempt in range(attempts):
             s = (base_seed + attempt * 1997) if seed is not None else None
-            raw = await _variant(s)
+            cached = await _cache_get(s)
+            if cached is not None:
+                return cached
+            t0 = _time.time()
+            try:
+                raw = await _variant(s)
+            finally:
+                _gen_note_request(_time.time() - t0)
             if await _consider(raw):
+                _cache_put(s, raw)
                 return raw
             await asyncio.sleep(1.0)
         if last_raw is not None and ("主体缺失" in str(issue)
@@ -3227,10 +3644,19 @@ class ImageClient:
             # 1.7.32：空白/过曝/连续质检失败（含同簇确定性噪点复现：
             # 0/1997/3994 小步链同簇）——用大步长换一组种子再试一轮
             # （每张立绘最多 6 次变体，仍严格质检）。
-            for k in range(1, 4):
+            # 1.8.0 节能：最多补 1 张（原来补 3 张，长跑下是显存与时间大头）。
+            for k in range(1, 2 if _eco else 4):
                 s = (base_seed + 1000003 * k) % (2 ** 31) if seed is not None else None
-                raw = await _variant(s)
+                cached = await _cache_get(s)
+                if cached is not None:
+                    return cached
+                t0 = _time.time()
+                try:
+                    raw = await _variant(s)
+                finally:
+                    _gen_note_request(_time.time() - t0)
                 if await _consider(raw):
+                    _cache_put(s, raw)
                     return raw
         # 转变判定器收尾：所有质量合格候选里挑「转变符合度 + 同人色差」最优者
         if matcher is not None and candidates:
@@ -3247,9 +3673,11 @@ class ImageClient:
             # 构图类问题（横宽/面积/顶部带）可软接受；空白/过曝类不收——
             # 空白立绘入库比 error 更糟（回退旧版立绘也比纯白好）。
             if "主体缺失" in str(issue):
+                _GEN_STATS["failed"] += 1
                 raise ImageGenError(f"生成检测未通过（{issue}），已自动重试 {attempts} 次")
             log.warning("soft-accept last attempt with issue: %s", issue)
             return last_raw
+        _GEN_STATS["failed"] += 1
         raise ImageGenError(f"生成检测未通过（{issue}），已自动重试 {attempts} 次")
 
     async def _request_retry(self, prompt: str, check=None,
@@ -3652,10 +4080,28 @@ class ImageClient:
     def _tune(self, cfg_key: str, auto_val, fallback):
         """自主调参（image.auto_tune，默认开）：忽略用户手动写入的
         sd_steps/sd_cfg/sd_sampler/sd_scheduler，按「模型预设 + 质量档」
-        自动取值；auto_tune 关闭时才尊重用户显式配置。"""
+        自动取值；auto_tune 关闭时才尊重用户显式配置。
+
+        t61：最后再叠一层**画风差量**（`image.style_preset` 的 `params`）。
+        默认预设（none）的差量为 `{}` ⇒ 本函数返回**与改动前逐位相同**的值。
+        """
         if not self.cfg.get("auto_tune", True) and self.cfg.get(cfg_key):
-            return self.cfg[cfg_key]
-        return auto_val if auto_val is not None else fallback
+            base = self.cfg[cfg_key]
+        else:
+            base = auto_val if auto_val is not None else fallback
+        d = style_param_deltas(self.cfg).get(cfg_key)      # 默认 {} ⇒ d is None
+        if d is None:
+            return base
+        try:
+            if cfg_key in ("sd_steps", "sd_hr_steps"):
+                return max(1, int(float(base) + float(d)))
+            if cfg_key in ("sd_cfg", "cfg_scale"):
+                return round(float(base) + float(d), 2)
+            return d                                        # sampler/scheduler：覆盖
+        except Exception as e:
+            log.warning("画风参数差量应用失败（%s=%r）：%s，按原值", cfg_key, d, e)
+            return base
+
 
     async def generate_cg(self, hint: str, style_suffix: str,
                           cast_en: str = "",
@@ -3797,6 +4243,14 @@ class ImageClient:
                                       json={"image": image_b64, "threshold": 0.35})
                 r.raise_for_status()
             return str(r.json().get("caption") or "")
+        except httpx.HTTPStatusError as e:
+            # 插件已安装但接口 schema 不匹配（常见 4xx/422）时，
+            # 不要让每个 TSF 候选重复撞同一错误；本会话降级到 BLIP。
+            if 400 <= e.response.status_code < 500:
+                self._tagger_ok = 0
+            log.warning("tagger interface unavailable (%s): %s",
+                        e.response.status_code, e)
+            return ""
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
             log.warning("tagger id failed: %s", e)
             return ""
@@ -4170,8 +4624,10 @@ class ImageClient:
           裸体/内衣类（此前硬编码封杀 nude 导致「画裸体又被禁止」→ 模型
           画出怪异半裸畸形：腿部过长/身材杆状/形体错乱）。
         三者提示词均附加「同身形/同比例/同姿态」锁词。"""
-        if self.mock or self.provider != "sdwebui":
+        if self.mock:
             return cut_png
+        if self.provider != "sdwebui":
+            raise ImageGenError("换装图生图仅支持 SD WebUI，已请求全量生成回退")
         try:
             import base64
             from PIL import ImageDraw, ImageFilter, ImageChops
@@ -4293,11 +4749,11 @@ class ImageClient:
             rgb.save(out, "PNG")
             return out.getvalue()
         except Exception as e:
-            log.warning("outfit inpaint skipped: %s", e)
-            return cut_png
+            log.warning("outfit img2img failed: %s", e)
+            raise ImageGenError(f"换装图生图失败：{e}") from e
 
 
-COMFY_PORTS = (8188, 8189, 8187, 6006, 8000, 8080)
+COMFY_PORTS= (8188, 8189, 8187, 6006, 8000, 8080)
 
 
 def desktop_comfy_paths() -> list[str]:

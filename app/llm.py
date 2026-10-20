@@ -4,8 +4,11 @@ import json
 import logging
 import random
 import re
+import time
 
 import httpx
+
+from . import ai_console as _ai
 
 log = logging.getLogger("galgame.llm")
 
@@ -133,8 +136,12 @@ def strip_json_block(text: str) -> str:
 
 
 class LLMClient:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, session: dict | None = None, label: str = ""):
         self.cfg = cfg["llm"]
+        # 1.9.20：主剧情调用带上会话 → 自动写入 AI 控制台。辅助调用保持不传。
+        self.trace_session = session
+        self.trace_label = str(label or "")
+        self._last_entry: dict | None = None
         # 常见配置笔误自动修正：DeepSeek 地址补 /v1
         base = (self.cfg.get("base_url") or "").strip()
         if "api.deepseek.com" in base and not base.rstrip("/").endswith("/v1"):
@@ -146,66 +153,100 @@ class LLMClient:
         )
 
     async def chat(self, messages: list[dict], temperature: float | None = None) -> str:
-        if self.mock:
-            await asyncio.sleep(0.6)
-            world = ""
-            for m in messages:
-                if m.get("role") == "system":
-                    content = m.get("content", "")
-                    if "【世界观设定】" in content:
-                        rest = content.split("【世界观设定】", 1)[1].strip()
-                        lines = [x for x in rest.splitlines() if x.strip()]
-                        world = lines[0].strip() if lines else ""
-                    break
-            world_open = (world[:14] + "……") if len(world) > 14 else (world or "故事从一场细雨开始")
-            scene_base = world[:8] or "某处"
-            global _mock_counter
-            idx = _mock_counter
-            _mock_counter = (_mock_counter + 1) % len(MOCK_TURNS)
-            template = MOCK_TURNS[idx]
-            turn = json.loads(json.dumps(template, ensure_ascii=False))
-            for key in ("scene", "background_hint"):
-                turn[key] = turn[key].format(scene=scene_base)
-            for d in turn.get("dialogue", []):
-                d["text"] = d["text"].format(world_open=world_open)
-            return json.dumps(turn, ensure_ascii=False)
+        temp = (self.cfg.get("temperature", 0.9)
+                if temperature is None else temperature)
+        entry = _ai.begin(self.trace_session, messages,
+                          model=str(self.cfg.get("model", "gpt-4o-mini")),
+                          temperature=temp, mock=bool(self.mock),
+                          label=self.trace_label)
+        self._last_entry = entry
+        started = time.perf_counter()
+        try:
+            if self.mock:
+                await asyncio.sleep(0.6)
+                world = ""
+                for m in messages:
+                    if m.get("role") == "system":
+                        content = m.get("content", "")
+                        if "【世界观设定】" in content:
+                            rest = content.split("【世界观设定】", 1)[1].strip()
+                            lines = [x for x in rest.splitlines() if x.strip()]
+                            world = lines[0].strip() if lines else ""
+                        break
+                world_open = ((world[:14] + "……") if len(world) > 14
+                              else (world or "故事从一场细雨开始"))
+                scene_base = world[:8] or "某处"
+                global _mock_counter
+                idx = _mock_counter
+                _mock_counter = (_mock_counter + 1) % len(MOCK_TURNS)
+                template = MOCK_TURNS[idx]
+                turn = json.loads(json.dumps(template, ensure_ascii=False))
+                for key in ("scene", "background_hint"):
+                    turn[key] = turn[key].format(scene=scene_base)
+                for d in turn.get("dialogue", []):
+                    d["text"] = d["text"].format(world_open=world_open)
+                raw = json.dumps(turn, ensure_ascii=False)
+                _ai.finish(self.trace_session, entry, raw,
+                           reasoning="（演示模式：未调用真实模型，无 reasoning_content）",
+                           duration_ms=int((time.perf_counter() - started) * 1000))
+                return raw
 
-        base = self.cfg["base_url"].rstrip("/")
-        # 出站校验：仅 http/https；本地 LLM（vllm/ollama 等）放行，云端同样校验（见 image._validate_url）
-        from .image import ImageGenError, _validate_url
-        try:
-            _validate_url(base, allow_local=True)
-        except ImageGenError as e:
-            raise LLMError(str(e)) from e
-        url = f"{base}/chat/completions"
-        payload = {
-            "model": self.cfg.get("model", "gpt-4o-mini"),
-            "messages": messages,
-            "temperature": (
-                self.cfg.get("temperature", 0.9)
-                if temperature is None
-                else temperature
-            ),
-        }
-        headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
-        # 1.7.23 分段超时：connect 10s 快速失败（平台半死时不再白白挂 120s）、
-        # read 120s 长文上限、write 30s——游戏「卡在加载中」元凶之一
-        try:
-            async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(180.0, connect=10.0, read=120.0,
-                                          write=30.0, pool=10.0)) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:300]
-            raise LLMError(f"对话 API 返回 {e.response.status_code}：{body}") from e
-        except httpx.HTTPError as e:
-            raise LLMError(f"对话 API 连接失败：{e}") from e
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise LLMError(f"对话 API 响应格式异常：{data}") from e
+            base = self.cfg["base_url"].rstrip("/")
+            # 出站校验：仅 http/https；本地 LLM（vllm/ollama 等）放行，云端同样校验（见 image._validate_url）
+            from .image import ImageGenError, _validate_url
+            try:
+                _validate_url(base, allow_local=True)
+            except ImageGenError as e:
+                _ai.fail(self.trace_session, entry, str(e),
+                         int((time.perf_counter() - started) * 1000))
+                raise LLMError(str(e)) from e
+            url = f"{base}/chat/completions"
+            payload = {
+                "model": self.cfg.get("model", "gpt-4o-mini"),
+                "messages": messages,
+                "temperature": temp,
+            }
+            headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
+            # 1.7.23 分段超时：connect 10s 快速失败（平台半死时不再白白挂 120s）、
+            # read 120s 长文上限、write 30s——游戏「卡在加载中」元凶之一
+            try:
+                async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(180.0, connect=10.0, read=120.0,
+                                              write=30.0, pool=10.0)) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    data = resp.json()
+            except httpx.HTTPStatusError as e:
+                body = e.response.text[:300]
+                err = f"对话 API 返回 {e.response.status_code}：{body}"
+                _ai.fail(self.trace_session, entry, err,
+                         int((time.perf_counter() - started) * 1000))
+                raise LLMError(err) from e
+            except httpx.HTTPError as e:
+                err = f"对话 API 连接失败：{e}"
+                _ai.fail(self.trace_session, entry, err,
+                         int((time.perf_counter() - started) * 1000))
+                raise LLMError(err) from e
+            try:
+                msg = data["choices"][0]["message"]
+                raw = msg.get("content") or ""
+                reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                usage = data.get("usage") or {}
+            except (KeyError, IndexError) as e:
+                err = f"对话 API 响应格式异常：{data}"
+                _ai.fail(self.trace_session, entry, err,
+                         int((time.perf_counter() - started) * 1000))
+                raise LLMError(err) from e
+            _ai.finish(self.trace_session, entry, raw, reasoning=reasoning,
+                       usage=usage,
+                       duration_ms=int((time.perf_counter() - started) * 1000))
+            return raw
+        except LLMError:
+            raise
+        except Exception as e:                      # noqa: BLE001
+            _ai.fail(self.trace_session, entry, repr(e),
+                     int((time.perf_counter() - started) * 1000))
+            raise
 
     async def chat_json(self, messages: list[dict], temperature: float = 0.2) -> dict:
         """请求 JSON 输出并解析；失败时降低温度重试一次。"""
@@ -213,12 +254,22 @@ class LLMClient:
         for attempt in range(2):
             temp = temperature if attempt == 0 else max(0.0, temperature - 0.2)
             raw = await self.chat(messages, temperature=temp)
+            entry = self._last_entry
             if self.mock:
-                return json.loads(raw)
+                try:
+                    parsed = json.loads(raw)
+                    _ai.note_parse(self.trace_session, entry, True)
+                    return parsed
+                except json.JSONDecodeError as e:
+                    _ai.note_parse(self.trace_session, entry, False, str(e))
+                    raise
             try:
-                return json.loads(strip_json_block(raw))
+                parsed = json.loads(strip_json_block(raw))
+                _ai.note_parse(self.trace_session, entry, True)
+                return parsed
             except json.JSONDecodeError as e:
                 last_err = e
+                _ai.note_parse(self.trace_session, entry, False, str(e))
                 log.warning("JSON 解析失败（第 %d 次）：%s", attempt + 1, raw[:200])
         raise LLMError(f"模型未返回有效的 JSON：{last_err}")
 

@@ -1,0 +1,575 @@
+{
+  "_source": "【本项目设计】1.9.19 CoC 剧本预设。结构参考经典 CoC 单页/短篇调查的通用骨架（宅邸调查、沿海邪教、封闭研究站、校园怪谈、都市黑色调查），全部文本为本项目新写，不复制任何商业剧本正文；机制仍完全走 app/coc 的 DOOM/STA/REA/SAN/d12 检定，不因剧本改变数值。",
+  "_note": "运行时由 app/coc/scenarios.py 读取；scenario 段会交给 app/coc/scenario.py 的 normalize 校验。`mystery_len` / `mystery_count` / `starting_items` 是 1.9.19 新增的可选字段。default 预设不覆盖内容，保持原版盐川町。",
+  "scenarios": [
+    {
+      "id": "default",
+      "title": "盐川町（随包原版）",
+      "summary": "四地点、两谜团、两位古神的原版 CoC 骨架；不覆盖任何内容。",
+      "era": "1920s 日式小镇",
+      "tone": "低尺度日常异常",
+      "players": "1 人 + 0~2 名 NPC",
+      "scenario": null
+    },
+    {
+      "id": "manor",
+      "title": "黄昏洋馆",
+      "summary": "受雇清点一座即将拆除的旧宅。门厅的钟停在同一边，书房的信纸每晚多出一行字。",
+      "era": "1920s 郊外",
+      "tone": "宅邸调查 · 家族秘密 · 缓慢逼近",
+      "players": "1 人 + 1 名 NPC",
+      "scenario": {
+        "title": "黄昏洋馆",
+        "world": "1926 年，郊外的雾见町。你受一位远房亲戚委托，在拆除前清点“霜月宅”里遗留的家具与文件。宅子已经空了十七年，但邻居说，每到黄昏，二楼都会传出有人来回踱步的声音。",
+        "outline": "第一夜：清点门厅与书房，发现宅邸的最后一位主人并没有离开。第二夜：顺着被封死的地窖往下，找到家族一直在掩埋的东西。结局不要求拯救所有人，只要求活着把真相带出去。",
+        "storybook": [
+          "霜月宅的钟全部停在 6:40；任何被修好的钟会在第二天重新停住。",
+          "宅子里没有镜子。原本挂镜子的位置留着颜色更浅的墙皮。",
+          "地窖的门从外面封死；封条上的日期是宅邸“空置”之后的第三年。"
+        ],
+        "directives": ["叙述保持冷峻、克制，不使用 jump scare。", "每次发现都要落到具体物件：钟、信纸、封条、墙皮。"],
+        "mystery_len": 3,
+        "mystery_count": 2,
+        "starting_items": ["Notebook", "Flashlight", "Chalk"],
+        "locations": [
+          {"id": "ManorFoyer", "name": "霜月宅·门厅", "threat": "SAFE", "home": true},
+          {"id": "ManorStudy", "name": "霜月宅·书房", "threat": "LOW", "home": false},
+          {"id": "ManorCellar", "name": "霜月宅·地窖", "threat": "DANGEROUS", "home": false}
+        ],
+        "mysteries": [
+          {"id": "MY-MANOR-1", "name": "二楼传来的脚步声", "locations": ["ManorFoyer", "ManorStudy"], "free_roam": true, "boss": "Thin Man"},
+          {"id": "MY-MANOR-2", "name": "被封死的地窖", "locations": ["ManorStudy", "ManorCellar"], "free_roam": true, "boss": "Thin Man"}
+        ],
+        "old_gods": [
+          {"id": "Goizo", "name": "哥伊佐（镜中相）", "global_rule": "rest_extra_doom_2"}
+        ],
+        "cast": [
+          {"name": "Kirie", "display": "雾岛 桐惠", "age_flag": "adult", "role": "investigator"},
+          {"name": "Aiko", "display": "高桥 爱子", "age_flag": "adult", "role": "investigator"}
+        ],
+        "cards": [
+          {
+            "id": "C-201", "locations": ["ManorFoyer"], "mystery_only": "MY-MANOR-1", "weight": 10,
+            "body": "门厅的落地钟停在 6:40。你伸手拨了一下钟摆，它没有动；可你收回手时，听见二楼传来一声很轻的、像有人把重心从左脚换到右脚的响动。",
+            "choices": [
+              {"text": "站在楼梯口听", "check": {"stat": "PER", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"rea": -1}},
+              {"text": "先检查钟背后的墙", "check": {"stat": "KNW", "threat": "SAFE", "dc": 0}, "success": {"exp": 3, "item_grant": ["Chalk"]}, "failure": {"doom": 1}},
+              {"text": "去书房找宅邸平面图", "success": {"exp": 2}}
+            ]
+          },
+          {
+            "id": "C-202", "locations": ["ManorFoyer", "ManorStudy"], "mystery_only": "MY-MANOR-1", "weight": 10,
+            "body": "书房的信纸上有一封写到一半的信，落款是霜月家的最后一位主人。墨迹很新。你翻到下一页，发现同一封信又多了一行：“别让她上楼。”",
+            "choices": [
+              {"text": "比对笔迹与旧文件", "check": {"stat": "KNW", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"rea": -1}},
+              {"text": "把信纸收进背包", "success": {"item_grant": ["Notebook"], "exp": 2}},
+              {"text": "把信纸放回原处，退出去", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-203", "locations": ["ManorStudy"], "mystery_only": "MY-MANOR-1", "weight": 10,
+            "body": "书架最上层有一排从未被取下的书，书脊上积着均匀的灰。你抽出一本，里面夹着一张少女的侧影照片；照片背面写着“第 17 个夏天”。",
+            "choices": [
+              {"text": "翻找同批照片", "check": {"stat": "PER", "threat": "LOW", "dc": -1}, "success": {"exp": 5, "funds": 1}, "failure": {"doom": 1}},
+              {"text": "把照片放回去", "success": {"exp": 1}},
+              {"text": "问楼下的委托人", "check": {"stat": "CHA", "threat": "SAFE", "dc": 0}, "success": {"exp": 3}, "failure": {"rea": -1}}
+            ]
+          },
+          {
+            "id": "C-204", "locations": ["ManorFoyer", "ManorStudy"], "mystery_only": "MY-MANOR-1", "weight": 8,
+            "body": "黄昏时，二楼的脚步声停了。取而代之的是有人在楼上拖动家具的声音，从走廊这头缓慢移到那头，最后停在书房正上方。",
+            "choices": [
+              {"text": "上楼查看", "check": {"stat": "DEX", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "留在门厅，等声音停下", "success": {"doom": 2}},
+              {"text": "用粉笔在楼梯口画一道线", "check": {"stat": "KNW", "threat": "SAFE", "dc": -1}, "success": {"exp": 3, "item_grant": ["Chalk"]}, "failure": {"rea": -1}}
+            ]
+          },
+          {
+            "id": "C-205", "locations": ["ManorStudy", "ManorCellar"], "mystery_only": "MY-MANOR-2", "weight": 10,
+            "body": "地窖门上的封条已经发脆，但封条下的木门却有新鲜的抓痕，从里面。你把手按上去，门后传来一声很轻的、像有人把额头抵在门板上的闷响。",
+            "choices": [
+              {"text": "用撬棍撬开封条", "check": {"stat": "STR", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "先读封条上的字", "check": {"stat": "KNW", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "退回去，找另一条路", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-206", "locations": ["ManorCellar"], "mystery_only": "MY-MANOR-2", "weight": 10,
+            "body": "地窖里摆着十七把椅子，围成一个圈。每把椅子上都放着一件折好的衣服，尺码从童装到成年人的外套。最中间那把椅子上，放着你今天穿来的同款外套。",
+            "choices": [
+              {"text": "检查中间那件外套", "check": {"stat": "PER", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6, "item_grant": ["OldCoin"]}, "failure": {"rea": -2}},
+              {"text": "数椅子与衣服是否对应", "check": {"stat": "KNW", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 2}},
+              {"text": "立刻离开地窖", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-207", "locations": ["ManorStudy", "ManorCellar"], "mystery_only": "MY-MANOR-2", "weight": 8,
+            "body": "书房的地板下有一块空响的木板。掀开后，是一段向下延伸的窄梯；梯级上落着灰，但灰里有向上走的脚印，脚尖朝着门厅。",
+            "choices": [
+              {"text": "顺着脚印往下", "check": {"stat": "DEX", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -2}},
+              {"text": "先量脚印的尺寸", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "把木板盖回去", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-208", "locations": ["ManorFoyer", "ManorCellar"], "mystery_only": "MY-MANOR-2", "weight": 6,
+            "body": "所有的钟同时响了。不是报时，是六点四十分的那一声，被拉得很长。你看见门厅的镜框位置里，有一个不属于这间屋子的影子正背对着你。",
+            "choices": [
+              {"text": "直视那个影子", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -2}, "success": {"exp": 8}, "failure": {"rea": -2, "doom": 2}},
+              {"text": "闭上眼，等钟声结束", "success": {"rea": -1}},
+              {"text": "用圣水泼向镜框", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 4, "item_grant": ["HolyWater"]}, "failure": {"doom": 1}}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "fogport",
+      "title": "雾港",
+      "summary": "海雾封港的第三天，栈桥下捞起一只写着名字的空箱子。礼拜堂的钟只在退潮时响。",
+      "era": "1920s 北方渔港",
+      "tone": "沿海邪教 · 潮汐 · 集体沉默",
+      "players": "1 人 + 1 名 NPC",
+      "scenario": {
+        "title": "雾港",
+        "world": "1927 年，北方渔港“雾见港”。连续三天的海雾让所有船停航，港口像被从地图上剪掉。栈桥下捞起一只空箱子，箱盖内侧写着七个名字，其中一个是你。",
+        "outline": "第一天：在栈桥与礼拜堂之间查清箱子的来历。第二天：退潮时进入废弃罐头厂，找到港口在雾里供奉的东西。村民不会主动害你，但他们也不会告诉你全部。",
+        "storybook": [
+          "雾见港的钟只在退潮时响；涨潮时敲钟的人会被全村人避开。",
+          "每户人家门口都挂着一只空贝壳；贝壳开口朝海。",
+          "港口的登记簿上，过去十年有十一个人“在雾里失踪”，但没有任何葬礼记录。"
+        ],
+        "directives": ["不要写血腥猎奇；恐怖来自村民的沉默与潮汐规律。", "每次调查都要出现具体声音：潮水、钟、绳索、铁皮。"],
+        "mystery_len": 3,
+        "mystery_count": 2,
+        "starting_items": ["Notebook", "Rope", "Lighter"],
+        "locations": [
+          {"id": "FogPier", "name": "雾港·栈桥", "threat": "SAFE", "home": true},
+          {"id": "FogChapel", "name": "海崖礼拜堂", "threat": "LOW", "home": false},
+          {"id": "FogCannery", "name": "废弃罐头厂", "threat": "DANGEROUS", "home": false}
+        ],
+        "mysteries": [
+          {"id": "MY-FOG-1", "name": "潮水带来的名字", "locations": ["FogPier", "FogChapel"], "free_roam": true, "boss": "Doll Nurse"},
+          {"id": "MY-FOG-2", "name": "罐头厂的三班钟", "locations": ["FogChapel", "FogCannery"], "free_roam": true, "boss": "Doll Nurse"}
+        ],
+        "old_gods": [
+          {"id": "Ath-Yolazsth", "name": "阿丝-约拉兹（潮下相）", "global_rule": "spell_costs_doom_instead_of_rea"}
+        ],
+        "cast": [
+          {"name": "Kirie", "display": "雾岛 桐惠", "age_flag": "adult", "role": "investigator"},
+          {"name": "Mizuki", "display": "浜崎 瑞希", "age_flag": "adult", "role": "investigator"}
+        ],
+        "cards": [
+          {
+            "id": "C-221", "locations": ["FogPier"], "mystery_only": "MY-FOG-1", "weight": 10,
+            "body": "空箱子被海水泡得发胀，箱盖内侧用黑漆写着七个名字。你认出其中一个，是十年前在雾里失踪的渡船工。最后一个名字的墨迹还没干。",
+            "choices": [
+              {"text": "抄下七个名字", "check": {"stat": "KNW", "threat": "SAFE", "dc": 0}, "success": {"exp": 4, "item_grant": ["Notebook"]}, "failure": {"rea": -1}},
+              {"text": "问守栈桥的老人", "check": {"stat": "CHA", "threat": "LOW", "dc": -1}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "把箱子推回海里", "success": {"doom": 2}}
+            ]
+          },
+          {
+            "id": "C-222", "locations": ["FogPier", "FogChapel"], "mystery_only": "MY-FOG-1", "weight": 10,
+            "body": "礼拜堂的门没有锁，里面却坐满了人。他们背对着你，面朝海的方向，没有一个人回头。前排留着一个空位，椅背上搭着一件还在滴水的外套。",
+            "choices": [
+              {"text": "在后排坐下", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"rea": -1}},
+              {"text": "绕到前面看他们的脸", "check": {"stat": "DEX", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"doom": 2}},
+              {"text": "退出去，记下人数", "success": {"exp": 3}}
+            ]
+          },
+          {
+            "id": "C-223", "locations": ["FogChapel"], "mystery_only": "MY-FOG-1", "weight": 9,
+            "body": "礼拜堂的钟绳从屋顶垂下来，末端系着一只空贝壳。你拉动它，钟没有响；但海面传来一声回音，像有什么东西在雾里替你敲了一下。",
+            "choices": [
+              {"text": "再拉一次", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6, "item_grant": ["HolyWater"]}, "failure": {"doom": 2, "rea": -1}},
+              {"text": "割断钟绳", "check": {"stat": "STR", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"sta": -1}},
+              {"text": "把贝壳收进口袋", "success": {"item_grant": ["OldCoin"], "exp": 2}}
+            ]
+          },
+          {
+            "id": "C-224", "locations": ["FogPier", "FogChapel"], "mystery_only": "MY-FOG-1", "weight": 8,
+            "body": "退潮后，栈桥下露出一排木桩，每根木桩上都刻着一个名字。你数到第七根时，发现刻痕还很新，木屑没有完全被水冲走。",
+            "choices": [
+              {"text": "对照箱子上的名字", "check": {"stat": "KNW", "threat": "SAFE", "dc": -1}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "用手摸刻痕的深度", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"rea": -1}},
+              {"text": "在第八根木桩上做记号", "success": {"item_grant": ["Chalk"], "exp": 2}}
+            ]
+          },
+          {
+            "id": "C-225", "locations": ["FogChapel", "FogCannery"], "mystery_only": "MY-FOG-2", "weight": 10,
+            "body": "罐头厂的大门被从里面用铁链锁住。铁链上挂着三只铃铛，一只生锈、一只发黑、一只还是新的。你靠近时，新的那只自己响了一声。",
+            "choices": [
+              {"text": "从侧窗翻进去", "check": {"stat": "DEX", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "用撬棍撬锁", "check": {"stat": "STR", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "先观察铃铛的挂法", "check": {"stat": "PER", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"rea": -1}}
+            ]
+          },
+          {
+            "id": "C-226", "locations": ["FogCannery"], "mystery_only": "MY-FOG-2", "weight": 10,
+            "body": "车间里的传送带还在转，上面整齐地摆着空罐头。每个罐头的标签都印着同一个日期，今天的日期。传送带尽头是一扇通往地下冷库的门。",
+            "choices": [
+              {"text": "取下最前面的罐头", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6, "item_grant": ["TrailRations"]}, "failure": {"doom": 2}},
+              {"text": "沿传送带走向冷库", "check": {"stat": "DEX", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "关掉传送带", "check": {"stat": "STR", "threat": "LOW", "dc": -1}, "success": {"exp": 4}, "failure": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-227", "locations": ["FogCannery"], "mystery_only": "MY-FOG-2", "weight": 9,
+            "body": "冷库的门开着一条缝，里面没有冷气，只有潮水声。你把手电照进去，看见地面上积着一层薄薄的海水，水面下有许多双脚印，全部朝向同一个方向。",
+            "choices": [
+              {"text": "跟着脚印走", "check": {"stat": "PER", "threat": "DANGEROUS", "dc": -2}, "success": {"exp": 8}, "failure": {"rea": -2}},
+              {"text": "只把手电伸进去照", "check": {"stat": "KNW", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "关上门，退出去", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-228", "locations": ["FogPier", "FogChapel", "FogCannery"], "mystery_only": "MY-FOG-2", "weight": 7,
+            "body": "雾里传来钟声，但这次是从海面传来的。你看见港口所有门口的空贝壳同时转向，开口朝着你。远处，有什么东西正沿着退潮后的滩涂慢慢站起来。",
+            "choices": [
+              {"text": "跑向礼拜堂", "check": {"stat": "DEX", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"sta": -2}},
+              {"text": "站在原地，数它的动作", "check": {"stat": "KNW", "threat": "DOOMED", "dc": -2}, "success": {"exp": 8}, "failure": {"doom": 3, "rea": -2}},
+              {"text": "把圣水倒进最近的海水", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 4, "item_grant": ["HolyWater"]}, "failure": {"doom": 2}}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "station",
+      "title": "极地观测站",
+      "summary": "暴风雪切断补给的第七天，无线电开始收到一段不属于任何人的求救。冰层下还有第二座站。",
+      "era": "1980s 南极",
+      "tone": "封闭空间 · 失联 · 寒冷与低语",
+      "players": "1 人 + 1 名 NPC",
+      "scenario": {
+        "title": "极地观测站",
+        "world": "1983 年，南极“白噪站”。暴风雪已经持续七天，补给飞机无法降落。站里的无线电在凌晨两点收到一段求救信号，呼号属于十年前撤销的另一座观测站。",
+        "outline": "第一天：在宿舱与无线电室之间确认信号的来源。第二天：循着冰层下的旧管道，找到被雪埋住的第二座站。站里没有怪物在追你，只有越来越近的同一段求救。",
+        "storybook": [
+          "白噪站的无线电只在凌晨两点收到信号；其余时间只有静电。",
+          "站里的温度计全部比实际温度低 6 度。",
+          "冰层下有旧管道，图纸上标注为“废弃”，但管道里仍有热风。"
+        ],
+        "directives": ["保持低温、低照度、低声音的叙述。", "不要解释所有异常；让玩家自己判断哪些是幻觉。"],
+        "mystery_len": 3,
+        "mystery_count": 2,
+        "starting_items": ["Flashlight", "Notebook", "TrailRations"],
+        "locations": [
+          {"id": "StationBunk", "name": "白噪站·宿舱", "threat": "SAFE", "home": true},
+          {"id": "StationRadio", "name": "白噪站·无线电室", "threat": "LOW", "home": false},
+          {"id": "StationIce", "name": "冰层下的旧站", "threat": "DOOMED", "home": false}
+        ],
+        "mysteries": [
+          {"id": "MY-STATION-1", "name": "失联的第七天", "locations": ["StationBunk", "StationRadio"], "free_roam": true, "boss": "Thin Man"},
+          {"id": "MY-STATION-2", "name": "冰层下的第二座站", "locations": ["StationRadio", "StationIce"], "free_roam": true, "boss": "Thin Man"}
+        ],
+        "old_gods": [
+          {"id": "Goizo", "name": "哥伊佐（白噪相）", "global_rule": "rest_extra_doom_2"}
+        ],
+        "cast": [
+          {"name": "Kirie", "display": "雾岛 桐惠", "age_flag": "adult", "role": "investigator"},
+          {"name": "Aiko", "display": "高桥 爱子", "age_flag": "adult", "role": "investigator"}
+        ],
+        "cards": [
+          {
+            "id": "C-241", "locations": ["StationBunk"], "mystery_only": "MY-STATION-1", "weight": 10,
+            "body": "你醒来时，宿舱的温度计指着零下 41 度，但呼出的气没有白雾。隔壁床铺是空的，被子叠得很整齐；枕头上有一小片融化的雪水。",
+            "choices": [
+              {"text": "检查隔壁床铺", "check": {"stat": "PER", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"rea": -1}},
+              {"text": "去无线电室确认时间", "success": {"exp": 2}},
+              {"text": "先把被子重新铺好", "check": {"stat": "KNW", "threat": "SAFE", "dc": -1}, "success": {"exp": 3}, "failure": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-242", "locations": ["StationBunk", "StationRadio"], "mystery_only": "MY-STATION-1", "weight": 10,
+            "body": "无线电的磁带在倒放。你听见自己的声音在说“别开门”，但那句话还没发生。磁带计数器停在 02:00，和窗外暴风雪的节奏完全一致。",
+            "choices": [
+              {"text": "按下录音键，留下证词", "check": {"stat": "KNW", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "把磁带倒回开头", "check": {"stat": "DEX", "threat": "SAFE", "dc": 0}, "success": {"exp": 3}, "failure": {"sta": -1}},
+              {"text": "拔掉电源", "success": {"doom": 2}}
+            ]
+          },
+          {
+            "id": "C-243", "locations": ["StationRadio"], "mystery_only": "MY-STATION-1", "weight": 9,
+            "body": "无线电日志上多了一页你没写过的记录： “第七天，三个人。食物够，温度正常。不要相信穿橙色外套的人。” 你低头看自己，穿的是灰色。",
+            "choices": [
+              {"text": "翻找昨天的日志", "check": {"stat": "PER", "threat": "LOW", "dc": -1}, "success": {"exp": 5, "item_grant": ["Notebook"]}, "failure": {"rea": -1}},
+              {"text": "去宿舱数人数", "check": {"stat": "KNW", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "把这一页撕下来", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-244", "locations": ["StationBunk", "StationRadio"], "mystery_only": "MY-STATION-1", "weight": 9,
+            "body": "凌晨两点，求救信号又响了。这次你听清了：那是一个女人在报坐标，坐标指向站里的无线电室，而不是冰层下。她重复了七遍同一个数字。",
+            "choices": [
+              {"text": "记下坐标并比对站内地图", "check": {"stat": "KNW", "threat": "LOW", "dc": -1}, "success": {"exp": 6}, "failure": {"doom": 1}},
+              {"text": "对着麦克风回应", "check": {"stat": "CHA", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 5}, "failure": {"rea": -2}},
+              {"text": "关掉无线电，等到天亮", "success": {"doom": 2}}
+            ]
+          },
+          {
+            "id": "C-245", "locations": ["StationRadio", "StationIce"], "mystery_only": "MY-STATION-2", "weight": 10,
+            "body": "无线电室的地板下有一段向下的旧管道，图纸上标注“废弃”。你把手贴上去，管道里有热风，带着一股旧机油和湿毛毡的味道。",
+            "choices": [
+              {"text": "顺着管道往下爬", "check": {"stat": "DEX", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "先量管道的方向", "check": {"stat": "PER", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "把入口封上", "success": {"exp": 2}}
+            ]
+          },
+          {
+            "id": "C-246", "locations": ["StationIce"], "mystery_only": "MY-STATION-2", "weight": 10,
+            "body": "旧站的走廊比白噪站长。墙上的值班表停在十年前的第七天，最后一行写着“全员撤离”。可你数了数，走廊两边的宿舍里，每一张床都铺着刚睡过的被子。",
+            "choices": [
+              {"text": "逐间查看宿舍", "check": {"stat": "PER", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6, "item_grant": ["PocketWatch"]}, "failure": {"rea": -2}},
+              {"text": "去值班室找撤离记录", "check": {"stat": "KNW", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "原路返回", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-247", "locations": ["StationIce"], "mystery_only": "MY-STATION-2", "weight": 9,
+            "body": "旧站的无线电还在工作。频率和白噪站一样，但信号更强。你按下通话键，听见自己的声音从走廊另一头传来，慢了半秒。",
+            "choices": [
+              {"text": "继续说话，听回音", "check": {"stat": "KNW", "threat": "DOOMED", "dc": -2}, "success": {"exp": 8}, "failure": {"san": -3}},
+              {"text": "切断旧站的电源", "check": {"stat": "STR", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "用笔记下回音的差异", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-248", "locations": ["StationBunk", "StationRadio", "StationIce"], "mystery_only": "MY-STATION-2", "weight": 7,
+            "body": "暴风雪突然停了。窗外没有天空，只有一片均匀的白。你听见白噪站和旧站同时响起求救信号，两个声音在同一个频率上重叠，说的是同一句话：“第七天，三个人。”",
+            "choices": [
+              {"text": "数清站里现在有几个人", "check": {"stat": "PER", "threat": "DANGEROUS", "dc": -2}, "success": {"exp": 8}, "failure": {"san": -3}},
+              {"text": "回到无线电室，发出最后一条消息", "check": {"stat": "KNW", "threat": "LOW", "dc": -1}, "success": {"exp": 6}, "failure": {"doom": 2}},
+              {"text": "什么都不做，等风暴回来", "success": {"doom": 3}}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "school",
+      "title": "夜班学园",
+      "summary": "闭校后的补习班只剩七个学生。点名册上多了一个人，而教室的第十三张桌子每晚都会换位置。",
+      "era": "现代 日本私立学园",
+      "tone": "校园怪谈 · 身份错位 · 安静的压迫",
+      "players": "1 人 + 1 名 NPC",
+      "scenario": {
+        "title": "夜班学园",
+        "world": "现代，私立星冠学园。暑期补习班在晚上开课，整栋教学楼只开放三层。你被临时聘为夜班监考；第一晚点名时，名单上有八个学生，教室里却坐着九个。",
+        "outline": "第一晚：在宿舍与教室之间确认多出来的那个人是谁。第二晚：进入封闭的旧校舍，找到十三年前被从名册上抹掉的班级。不要试图救所有人，先确认你自己还在名册上。",
+        "storybook": [
+          "补习班名册上永远有八个学生；多出来的那个不会在照片里出现。",
+          "旧校舍的第十三间教室在图纸上不存在，但走廊的门牌号会跳到 13。",
+          "每晚十一点，广播会播放一段没有曲名的钢琴曲；播放时所有钟停住。"
+        ],
+        "directives": ["保持校园日常的细节，让异常从日常里长出来。", "不要写成血腥屠杀；恐怖来自“被登记成另一个人”。"],
+        "mystery_len": 3,
+        "mystery_count": 2,
+        "starting_items": ["Notebook", "Chalk", "Flashlight"],
+        "locations": [
+          {"id": "SchoolDorm", "name": "星冠学园·宿舍", "threat": "SAFE", "home": true},
+          {"id": "SchoolClass", "name": "星冠学园·夜校教室", "threat": "LOW", "home": false},
+          {"id": "SchoolOldWing", "name": "星冠学园·旧校舍", "threat": "DANGEROUS", "home": false}
+        ],
+        "mysteries": [
+          {"id": "MY-SCHOOL-1", "name": "点名册上多了一个人", "locations": ["SchoolDorm", "SchoolClass"], "free_roam": true, "boss": "Doll Nurse"},
+          {"id": "MY-SCHOOL-2", "name": "旧校舍的第十三间教室", "locations": ["SchoolClass", "SchoolOldWing"], "free_roam": true, "boss": "Doll Nurse"}
+        ],
+        "old_gods": [
+          {"id": "Goizo", "name": "哥伊佐（镜中相）", "global_rule": "rest_extra_doom_2"}
+        ],
+        "cast": [
+          {"name": "Kirie", "display": "雾岛 桐惠", "age_flag": "adult", "role": "investigator"},
+          {"name": "Mizuki", "display": "浜崎 瑞希", "age_flag": "adult", "role": "investigator"}
+        ],
+        "cards": [
+          {
+            "id": "C-261", "locations": ["SchoolDorm"], "mystery_only": "MY-SCHOOL-1", "weight": 10,
+            "body": "宿舍的公用洗漱间里，八套牙具摆得整整齐齐，最右边却多出一只没有标签的杯子。杯底压着一张学生证，照片被水泡花了，姓名栏写着你的名字。",
+            "choices": [
+              {"text": "把学生证翻过来看", "check": {"stat": "PER", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"rea": -1}},
+              {"text": "问宿舍管理员", "check": {"stat": "CHA", "threat": "LOW", "dc": -1}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "把杯子收起来", "success": {"item_grant": ["Notebook"], "exp": 1}}
+            ]
+          },
+          {
+            "id": "C-262", "locations": ["SchoolDorm", "SchoolClass"], "mystery_only": "MY-SCHOOL-1", "weight": 10,
+            "body": "点名时，你按名册念了八个名字，八个人都答“到”。可教室后排还坐着一个穿旧制服的女生，她没有名册，也没有抬头。你念完最后一个名字，她轻轻说：“还有我。”",
+            "choices": [
+              {"text": "问她叫什么", "check": {"stat": "CHA", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"rea": -1}},
+              {"text": "对照名册上的照片", "check": {"stat": "KNW", "threat": "SAFE", "dc": -1}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "当作没听见，继续上课", "success": {"doom": 2}}
+            ]
+          },
+          {
+            "id": "C-263", "locations": ["SchoolClass"], "mystery_only": "MY-SCHOOL-1", "weight": 9,
+            "body": "黑板上写着明天要交的作业。你擦掉其中一行，粉笔灰落下的地方又慢慢浮出同一行字，字迹比你的更小、更用力：“把名字还给我。”",
+            "choices": [
+              {"text": "用粉笔在旁边写“谁的名字”", "check": {"stat": "KNW", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "擦掉整块黑板", "check": {"stat": "STR", "threat": "SAFE", "dc": 0}, "success": {"exp": 3}, "failure": {"sta": -1}},
+              {"text": "拍下黑板", "check": {"stat": "PER", "threat": "SAFE", "dc": -1}, "success": {"exp": 4, "item_grant": ["Camera"]}, "failure": {"rea": -1}}
+            ]
+          },
+          {
+            "id": "C-264", "locations": ["SchoolDorm", "SchoolClass"], "mystery_only": "MY-SCHOOL-1", "weight": 8,
+            "body": "十一点，广播响了。没有曲名的钢琴曲从走廊尽头传来，所有钟停住。你看见那个女生站在教室门口，嘴唇在动，但没有声音；她的口型在数“七”。",
+            "choices": [
+              {"text": "跟着她数", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"san": -3}},
+              {"text": "关掉广播", "check": {"stat": "DEX", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "回宿舍，锁门", "success": {"doom": 2}}
+            ]
+          },
+          {
+            "id": "C-265", "locations": ["SchoolClass", "SchoolOldWing"], "mystery_only": "MY-SCHOOL-2", "weight": 10,
+            "body": "旧校舍的走廊比白天长。门牌从 12 直接跳到 14；你退回一步，13 号门就出现在原本是墙的位置。门缝里透出灯光，还有粉笔在黑板上写字的声音。",
+            "choices": [
+              {"text": "推门进去", "check": {"stat": "DEX", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "先敲门", "check": {"stat": "CHA", "threat": "LOW", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "在门上做记号再离开", "success": {"item_grant": ["Chalk"], "exp": 2}}
+            ]
+          },
+          {
+            "id": "C-266", "locations": ["SchoolOldWing"], "mystery_only": "MY-SCHOOL-2", "weight": 10,
+            "body": "第十三间教室里摆着十三张课桌，每张桌上都有一份写完的试卷。最后一张试卷的姓名栏空着，笔迹却和你的一模一样；分数栏写着 100。",
+            "choices": [
+              {"text": "翻看其他试卷的姓名", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"rea": -2}},
+              {"text": "在自己的试卷上改写名字", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "把试卷收进背包", "success": {"item_grant": ["Notebook"], "exp": 2}}
+            ]
+          },
+          {
+            "id": "C-267", "locations": ["SchoolOldWing"], "mystery_only": "MY-SCHOOL-2", "weight": 9,
+            "body": "教室后面的储物柜里，整整齐齐叠着十三套旧校服。最上面一套的胸牌写着你的名字，尺码也和你现在穿的一样。校服口袋里有一张今晚的补习班签到表。",
+            "choices": [
+              {"text": "检查签到表上的时间", "check": {"stat": "KNW", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "把校服放回去", "success": {"exp": 2}},
+              {"text": "拿走胸牌", "check": {"stat": "DEX", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 4, "item_grant": ["OldCoin"]}, "failure": {"san": -3}}
+            ]
+          },
+          {
+            "id": "C-268", "locations": ["SchoolDorm", "SchoolClass", "SchoolOldWing"], "mystery_only": "MY-SCHOOL-2", "weight": 7,
+            "body": "钢琴曲停了。整栋楼的广播同时打开，传出教导主任的声音，念的却是十三年前那份被抹掉的班级名册。念到第七个名字时，所有教室的灯一起熄灭；再亮起时，你站在名单上那个人的位置上。",
+            "choices": [
+              {"text": "大声念出自己的名字", "check": {"stat": "CHA", "threat": "DANGEROUS", "dc": -2}, "success": {"exp": 8}, "failure": {"san": -3}},
+              {"text": "在黑板上写下“我不在名册上”", "check": {"stat": "KNW", "threat": "LOW", "dc": -1}, "success": {"exp": 6}, "failure": {"doom": 2}},
+              {"text": "闭上眼，等灯再亮", "success": {"doom": 3}}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "noir",
+      "title": "雨夜失踪案",
+      "summary": "一位爵士歌手在雨夜失踪。事务所、夜总会与后巷三点之间，所有人都在说不同的版本。",
+      "era": "1930s 都市",
+      "tone": "黑色电影 · 失踪 · 互相矛盾的证词",
+      "players": "1 人 + 1 名 NPC",
+      "scenario": {
+        "title": "雨夜失踪案",
+        "world": "1936 年，港城。爵士歌手“蓝莺”在演出结束后失踪，只留下一只高跟鞋和一盘录到一半的唱片。你受雇找人；委托人没有露面，只寄来一把事务所的钥匙。",
+        "outline": "第一夜：在事务所整理委托与唱片，去夜总会听三个版本的证词。第二夜：跟着后巷的血迹与录音，找到蓝莺最后去的地方。真相可能不是绑架，而是她主动消失。",
+        "storybook": [
+          "蓝莺每次演出都唱同一首《雨夜两点》；唱片版比现场版多出十秒空白。",
+          "夜总会的后巷通向码头；巷口的灯泡每晚坏一次。",
+          "委托人的信封上没有邮戳，只有事务所的钥匙。"
+        ],
+        "directives": ["保持黑色电影的潮湿、克制与不可靠证词。", "不要让 NPC 直接给出真相；让玩家在矛盾里自己选。"],
+        "mystery_len": 3,
+        "mystery_count": 2,
+        "starting_items": ["Notebook", "Whiskey", "Lighter"],
+        "locations": [
+          {"id": "NoirOffice", "name": "调查事务所", "threat": "SAFE", "home": true},
+          {"id": "NoirClub", "name": "蓝调夜总会", "threat": "LOW", "home": false},
+          {"id": "NoirAlley", "name": "夜总会后巷", "threat": "DANGEROUS", "home": false}
+        ],
+        "mysteries": [
+          {"id": "MY-NOIR-1", "name": "失踪的歌手", "locations": ["NoirOffice", "NoirClub"], "free_roam": true, "boss": "Thin Man"},
+          {"id": "MY-NOIR-2", "name": "后巷的第二次枪声", "locations": ["NoirClub", "NoirAlley"], "free_roam": true, "boss": "Thin Man"}
+        ],
+        "old_gods": [
+          {"id": "Ath-Yolazsth", "name": "阿丝-约拉兹（雨夜相）", "global_rule": "spell_costs_doom_instead_of_rea"}
+        ],
+        "cast": [
+          {"name": "Kirie", "display": "雾岛 桐惠", "age_flag": "adult", "role": "investigator"},
+          {"name": "Ryuichi", "display": "龙一", "age_flag": "adult", "role": "ally"}
+        ],
+        "cards": [
+          {
+            "id": "C-281", "locations": ["NoirOffice"], "mystery_only": "MY-NOIR-1", "weight": 10,
+            "body": "事务所的信封里没有委托书，只有一张蓝莺的演出照片和一把黄铜钥匙。照片背面写着：“她不是被带走的。别找错方向。” 落款处的墨水被雨晕开。",
+            "choices": [
+              {"text": "比对钥匙与事务所门锁", "check": {"stat": "KNW", "threat": "SAFE", "dc": 0}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "检查照片上的背景", "check": {"stat": "PER", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"rea": -1}},
+              {"text": "把照片收进抽屉", "success": {"exp": 1}}
+            ]
+          },
+          {
+            "id": "C-282", "locations": ["NoirOffice", "NoirClub"], "mystery_only": "MY-NOIR-1", "weight": 10,
+            "body": "夜总会的经理说蓝莺演出后从后门离开，鼓手说她上了一辆黑色轿车，酒保说她根本没离开后台。三个人都说自己最后见到她，时间却差了整整一个小时。",
+            "choices": [
+              {"text": "分别核对三个人的时间", "check": {"stat": "KNW", "threat": "LOW", "dc": -1}, "success": {"exp": 6}, "failure": {"doom": 1}},
+              {"text": "观察谁在说谎", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"rea": -1}},
+              {"text": "先付钱买一杯酒", "success": {"funds": -1, "exp": 2}}
+            ]
+          },
+          {
+            "id": "C-283", "locations": ["NoirClub"], "mystery_only": "MY-NOIR-1", "weight": 9,
+            "body": "后台的化妆镜上留着一行口红写的字：“两点，码头。” 镜子里你的身后站着一个人，但回头时走廊是空的。唱片机还在转，播放的正是那首《雨夜两点》。",
+            "choices": [
+              {"text": "听完唱片", "check": {"stat": "PER", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"san": -3}},
+              {"text": "检查唱片上的划痕", "check": {"stat": "KNW", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "关掉唱片机", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-284", "locations": ["NoirOffice", "NoirClub"], "mystery_only": "MY-NOIR-1", "weight": 8,
+            "body": "你回到事务所时，门缝下多了一张今晚的船票，目的地是海对面的自由港。船票背面用铅笔写着一个地址，字迹和照片背面一模一样。",
+            "choices": [
+              {"text": "立刻去地址", "check": {"stat": "DEX", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "先查船票的售票记录", "check": {"stat": "KNW", "threat": "SAFE", "dc": -1}, "success": {"exp": 4}, "failure": {"doom": 1}},
+              {"text": "把船票放进外套内袋", "success": {"item_grant": ["OldCoin"], "exp": 2}}
+            ]
+          },
+          {
+            "id": "C-285", "locations": ["NoirClub", "NoirAlley"], "mystery_only": "MY-NOIR-2", "weight": 10,
+            "body": "后巷的灯泡又坏了。你踩着积水往里走，看见墙边有一道拖拽的痕迹，尽头是一扇半开的铁门。门后传来唱片跳针的声音，一遍又一遍地重复同一小节。",
+            "choices": [
+              {"text": "推门进去", "check": {"stat": "DEX", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"sta": -1}},
+              {"text": "先检查拖拽痕迹", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "回夜总会叫帮手", "success": {"exp": 2}}
+            ]
+          },
+          {
+            "id": "C-286", "locations": ["NoirAlley"], "mystery_only": "MY-NOIR-2", "weight": 10,
+            "body": "铁门后是一间小录音室，墙上贴满了蓝莺的演出海报。录音机里只有一段十秒的空白，和一声很轻的关门声。桌上放着一只高跟鞋，鞋跟里塞着一卷底片。",
+            "choices": [
+              {"text": "取出底片对着灯看", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6, "item_grant": ["Camera"]}, "failure": {"san": -3}},
+              {"text": "听那段空白", "check": {"stat": "PER", "threat": "LOW", "dc": 0}, "success": {"exp": 5}, "failure": {"rea": -1}},
+              {"text": "把高跟鞋放回原位", "success": {"doom": 1}}
+            ]
+          },
+          {
+            "id": "C-287", "locations": ["NoirAlley"], "mystery_only": "MY-NOIR-2", "weight": 9,
+            "body": "巷口的雨突然停了。你听见码头方向传来一声枪响，接着是第二声，和第一声一模一样。墙上的影子比你先转身。",
+            "choices": [
+              {"text": "朝枪声跑过去", "check": {"stat": "DEX", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"sta": -2}},
+              {"text": "贴在墙边观察", "check": {"stat": "PER", "threat": "DOOMED", "dc": -2}, "success": {"exp": 8}, "failure": {"san": -3}},
+              {"text": "退回事务所", "success": {"doom": 2}}
+            ]
+          },
+          {
+            "id": "C-288", "locations": ["NoirOffice", "NoirClub", "NoirAlley"], "mystery_only": "MY-NOIR-2", "weight": 7,
+            "body": "委托人终于打来电话。他没有问蓝莺的下落，只问：“你找到那卷底片了吗？” 电话背景里传来唱片跳针的声音，和你刚才在录音室听到的完全一致。",
+            "choices": [
+              {"text": "反问他蓝莺是谁", "check": {"stat": "CHA", "threat": "LOW", "dc": -1}, "success": {"exp": 5}, "failure": {"doom": 1}},
+              {"text": "假装没找到", "check": {"stat": "KNW", "threat": "DANGEROUS", "dc": -1}, "success": {"exp": 6}, "failure": {"rea": -2}},
+              {"text": "挂断电话", "success": {"doom": 2}}
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

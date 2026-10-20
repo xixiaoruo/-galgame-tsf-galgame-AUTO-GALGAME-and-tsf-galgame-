@@ -13,6 +13,12 @@ from app.coc import provenance as P
 from app.coc import state as ST
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 #: A8 的禁词（结算前不得告诉玩家要考哪个属性）
 FORBIDDEN = ("STR", "DEX", "PER", "KNW", "CHA", "检定")
 

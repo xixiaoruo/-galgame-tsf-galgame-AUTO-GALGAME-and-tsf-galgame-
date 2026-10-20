@@ -45,12 +45,16 @@ TSF_NUDGE_MAX: int = 1
 
 #: **明确不在**白名单里的键 —— 这些由确定性层独占（用于测试与审计输出）
 DETERMINISTIC_ONLY_KEYS: tuple[str, ...] = (
-    "doom", "sta", "rea", "sta_max", "rea_max",
+    "doom", "sta", "rea", "san", "sta_max", "rea_max", "san_max",
     "tags_grant", "tags_remove", "flag_set", "ending",
 )
 
+#: **玩家动作键**（t63）：由受保护端点代表玩家的显式操作发出，**不在 LLM 白名单里**。
+#: 「装备/卸下」是**玩家的选择**，模型无权替玩家决定（与 tags/flag/ending 同理）。
+PLAYER_ACTION_KEYS: tuple[str, ...] = ("equip", "unequip")
+
 #: 权威数值字段（`apply_delta` 是唯一写入者）
-STATE_NUMERIC_FIELDS: tuple[str, ...] = ("doom", "sta", "rea", "exp", "funds")
+STATE_NUMERIC_FIELDS: tuple[str, ...] = ("doom", "sta", "rea", "san", "exp", "funds")
 
 #: **引擎信任层**允许的键全集（= LLM 白名单 ∪ 确定性层独占键 ∪ 状态上限字段）。
 #: 只有 `apply_delta(trust="engine")` / `apply_delta_engine()` 能用后者。
@@ -59,7 +63,7 @@ STATE_NUMERIC_FIELDS: tuple[str, ...] = ("doom", "sta", "rea", "exp", "funds")
 #: —— 这是本测试第一次跑就抓到的（"未知键在两种信任层下都被拒"有一条红）。
 ENGINE_ALLOWED_KEYS: tuple[str, ...] = tuple(sorted(
     set(LLM_DELTA_WHITELIST) | set(DETERMINISTIC_ONLY_KEYS)
-    | {"stat", "sta_max", "rea_max"}
+    | set(PLAYER_ACTION_KEYS) | {"stat", "sta_max", "rea_max", "san_max"}
 ))
 
 
@@ -264,7 +268,7 @@ def clamp_turn_delta(delta: Any, cfg: dict) -> dict:
     b1, b2 = _budgets(cfg)
     out: dict[str, Any] = {}
     for key, raw in delta.items():
-        if key in ("doom", "sta", "rea"):
+        if key in ("doom", "sta", "rea", "san"):
             v = _as_int(raw)
             if v is None:
                 continue
@@ -281,6 +285,12 @@ def clamp_turn_delta(delta: Any, cfg: dict) -> dict:
             if v is None:
                 continue
             out[key] = max(-TSF_NUDGE_MAX, min(TSF_NUDGE_MAX, v))
+        elif key in PLAYER_ACTION_KEYS:
+            # t63：玩家动作（装备/卸下）**原样透传** —— 它不是数值，不该被 ±预算钳制；
+            # 合法性（背包里有没有、槽位对不对）由 `state.equip_item` 判定并在
+            # `apply_delta` 里落账/丢弃。放在这里是为了让 `clamp_turn_delta`
+            # 的 else 分支不再把它们当"未知键"处理（形状仍与其它非数值键一致）。
+            out[key] = raw
         elif key == "stat":
             if not isinstance(raw, dict):
                 continue
@@ -342,6 +352,15 @@ def invariants(state: dict, cfg: dict) -> list[str]:
             state[key] = f
             notes.append(f"{key} 地板钳到 {f}（death_mode={state.get('death_mode')}）")
 
+    # ④b SAN 0~san_max（1.9.19）。旧档缺 san 时不写，避免迁移逻辑被覆盖。
+    if isinstance(state.get("san"), (int, float)):
+        cap_san = int(state.get("san_max", 99) or 99)
+        v = int(state["san"])
+        nv = max(0, min(cap_san, v))
+        if nv != v:
+            state["san"] = nv
+            notes.append(f"san 钳到 0~{cap_san}")
+
     # ⑤ exp / funds 非负且有合理上限（§2.2 EXP 兼作货币，可为 0）
     if int(state.get("exp", 0)) < 0:
         state["exp"] = 0
@@ -390,7 +409,7 @@ def apply_delta(state: dict, delta: Any, cfg: dict, *,
                 continue
             state[key] = int(state.get(key, 0)) + v
             applied[key] = v
-        elif key in ("sta_max", "rea_max"):
+        elif key in ("sta_max", "rea_max", "san_max"):
             # 体力/理智**上限**（伤势·诅咒会削减，见 MECHANICS.md §2.3）。
             # 加这个分支是被测试逼出来的：先前 `sta_max` 在 DETERMINISTIC_ONLY_KEYS 里
             # 声明为"确定性层专属"，却既没进引擎白名单、也没有落账分支 ——
@@ -441,6 +460,21 @@ def apply_delta(state: dict, delta: Any, cfg: dict, *,
                         applied.setdefault("item_take", []).append(iid)
                     else:
                         dropped.append(f"item_take:{iid}(不在背包)")
+        elif key in ("equip", "unequip"):
+            # t63：装备 / 卸下。**不是数值变更**，但要走唯一写入点才会被 `persist`
+            # 落盘并触发不变式 —— 所以接在这里，而不是让端点直接改 state。
+            # 委托给 `coc.state` 的 equip_item/unequip_item（那里校验背包与槽位）。
+            from . import state as _st_mod
+            if key == "equip":
+                res_eq = _st_mod.equip_item(state, str(raw or ""))
+            else:
+                res_eq = _st_mod.unequip_item(state, str(raw or ""))
+            if res_eq.get("ok"):
+                applied.setdefault(str(key), []).append(
+                    {"item": res_eq.get("item"), "slot": res_eq.get("slot"),
+                     "replaced": res_eq.get("replaced")})
+            else:
+                dropped.append(f"{key}:{raw}({res_eq.get('reason')})")
         elif key == "tags_grant":
             tags = state.setdefault("tags", [])
             for tg in (raw if isinstance(raw, (list, tuple)) else [raw]):

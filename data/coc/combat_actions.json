@@ -1,0 +1,349 @@
+{
+  "_meta": {
+    "schema": 1,
+    "generated_from": "D:\\dsh创造\\woth-research\\MECHANICS.md",
+    "design": "D:\\dsh创造\\coc-mode\\COC-DESIGN.md §2.6 / §4.2 / §6.1",
+    "map": "D:\\dsh创造\\coc-mode\\MECHANISM-MAP.md M-50…M-61 / S-04",
+    "rule": "本文件是 CoC 战斗**动作层**的唯一数据来源。每个动作都必须带 \"_source\"（非空）与 \"_unverified\"（bool），校验在 app/coc/content.py::combat_actions()。",
+    "enforced_by": "app/coc/tests/test_combat.py::test_action_table_provenance"
+  },
+  "_source": "MECHANICS.md §5.2 战斗动作全表（Offensive 8 / Support 6 / Defensive 4 / Spiritual 4 行）+ §5.3 动作耗时与缩放表 + §5.4 幽灵例外 + §5.6 设计建议。",
+  "_unverified": true,
+  "_note": "① 文件名：本任务给定的落点是 combat_actions.json；MECHANISM-MAP.md / COC-DESIGN.md §4.2 把它写作 actions.json。**只保留一个真源**，故用本文件名，差异记在报告 COC-COMBAT.md §7。② 数值标注约定：_source 里凡写「上游给出」= MECHANICS.md 逐字给出的数字；写「本项目推断」= 上游未给、按 §5.3 已有档位（80/100/120/160）推导，**不声称是上游数值**。③ base_time 档位的推导：§5.3 只逐字给出 Steak Knife 普攻 80 / 强攻 120 / Brace 160 / Dodge 160 / Combat Skill 100 / Listen·Shoot 120 共 6 个数字；其余动作取同档，并在各自 _source 里写明「本项目推断」。④ §5.2 的分组行数相加为 8+6+4+4=22，与 COC-DESIGN §4.2 的「20 个」不一致（文档自身算术差），本表按 22 行落盘并把 Clap/Bow 拆成两条以实现 5 步驱魔。",
+  "hit": {
+    "base_hit_default": {
+      "value": 80,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Kick 基础命中 80%」作为武器基线命中；上游未逐件给出武器固有命中，取该值系本项目推断（COC-DESIGN §2.6「武器固有命中=基础值+属性修正」未给基础值）"
+    },
+    "stat_coef": {
+      "value": 1,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.3「命中率 = { 武器对应属性 } + { 10% × 你的等级 } − { 敌人强度 }」——属性以数值直接相加，即系数 1；上游未给系数，取 1 系本项目推断"
+    },
+    "roll_min": {
+      "value": 1,
+      "_unverified": true,
+      "_source": "§5.3 的命中是百分比 ⇒ 掷骰域取 1~100。上游未给战斗掷骰域（§4.2 的 1~12 是**调查检定**的域），故本域系本项目推断"
+    },
+    "roll_max": {
+      "value": 100,
+      "_unverified": true,
+      "_source": "同上（§5.3 命中率是百分比）"
+    },
+    "kick_uses_fixed_hit": {
+      "value": true,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Kick 基础命中 80%，命中率不受敌人 PWR 影响」+ tuning.json combat.hit_unarmed_no_scale（不随等级变化）"
+    }
+  },
+  "time": {
+    "min_cost": {
+      "value": 1,
+      "_unverified": true,
+      "_source": "§5.3「所有计算都向玩家有利的方向取整」⇒ 耗时下限取 1，防负数/零耗时动作被无限编排（本项目为该取整规则设的下界）"
+    },
+    "round_down": {
+      "value": true,
+      "_unverified": true,
+      "_source": "§5.3「所有计算都向玩家有利的方向取整」——耗时向下取整对玩家有利（同样预算能多排一个动作）"
+    }
+  },
+  "speed_mods": {
+    "_source": "MECHANICS.md §5.3「通用速度修正来源：吸烟、特权（Fast Swimmer / Adrenaline / Fame）、盟友加成、部分物品（Karukosa Mask）」+「多个通用修正相乘（例：Aiko 的固有加成 0.9 × Fast Swimmer 0.85 = 0.76）」。",
+    "_note": "**只登记上游逐字给出倍率的两个来源**；吸烟 / Adrenaline / Fame / 盟友加成 / Karukosa Mask 上游未给倍率，故不登记（不臆造）。默认无来源命中 ⇒ 乘数 1.0 ⇒ 本机制默认完全惰性，只在数据/状态授权时生效。",
+    "Aiko": {
+      "value": 0.9,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.3「Aiko 的固有加成 0.9」"
+    },
+    "perk:FastSwimmer": {
+      "value": 0.85,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.3「Fast Swimmer 0.85」；本例中源写作特权（perk），故键名前缀 perk:"
+    }
+  },
+  "enemy_counter": {
+    "mode": {
+      "value": "per_action",
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.1「玩家编排一串动作 → LAUNCH SEQUENCE → 系统结算 → 敌人对玩家造成伤害」+ §5.1「每回合 200 时间单位（双方共用一个回合时钟）」。取 per_action（每个玩家动作之后敌人反击一次）的理由：① §5.2 的 Dodge/Brace 都写「本回合」生效，只有动作按序即时生效时它们才是策略选择；② 与旧 resolve_combat 的「每轮一次伤害」在**基础攻击**下总量等价（1 动作 = 1 次命中，命中 1 次 = 受 1 次伤害），故不改变既有平衡。"
+    },
+    "damage_formula": {
+      "value": "enemy.damage + difficulty.enemy_dmg + extra_dmg",
+      "_unverified": true,
+      "_source": "沿用既有 app/coc/loop.py::resolve_combat 第 370 行的公式（t48 电路），未改动任何一项；难度修正来自 tuning.json difficulty.<档>.enemy_dmg（MECHANICS.md §2.4）"
+    }
+  },
+  "exorcism": {
+    "steps": {
+      "value": 5,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.4「需要正确的 5 步「拍手/鞠躬」序列」/ §10.2 #14"
+    },
+    "tokens": {
+      "value": ["clap", "bow"],
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2 Spiritual「Clap / Bow —— 往队列里加入一次拍手/鞠躬」"
+    },
+    "exp_reward": {
+      "value": 15,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.4「成功额外给 15 EXP」"
+    },
+    "hint_steps": {
+      "value": 2,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.4「校园天台上的女孩会告诉你前两步」（本模式只登记该提示的步数，提示文本由叙述层产出）"
+    },
+    "max_steps_per_turn": {
+      "value": 5,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.4「每次提交 5 步会告诉你**有几步正确**」——即一次提交恰好 5 步；若不足 5 步则本回合不判分（本项目按该原文实现）"
+    }
+  },
+  "weapons": {
+    "_source": "MECHANICS.md §5.2「Strong Attack：武器伤害 +50%，向下取整（Steak Knife 3→4，Fire Axe 6→9）」——由此**反推**两把武器的普攻伤害：Steak Knife 3、Fire Axe 6。",
+    "_note": "只登记伤害。武器的 `stat`（DEX/STR）**不在这里**，而是从 data/coc/items.json 读（任务书：攻击应走已装备武器的 stat ⇒ items.json 是 stat 的唯一真源）；两者冲突时以 items.json 为准。items.json 未登记的武器 ⇒ 拒绝使用并给出可读理由。",
+    "SteakKnife": {
+      "dmg": 3,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Steak Knife 3→4」（3×1.5=4.5→向下取整 4）反推普攻伤害 3；stat=DEX 见 items.json §4.3"
+    },
+    "FireAxe": {
+      "dmg": 6,
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Fire Axe 6→9」（6×1.5=9）反推普攻伤害 6；stat=STR 见 items.json §4.3"
+    },
+    "Crowbar": {
+      "dmg": 4,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 商店/搜刮扩充武器；伤害量级介于 Steak Knife(3) 与 Fire Axe(6) 之间，stat=STR 见 items.json"
+    },
+    "Revolver": {
+      "dmg": 6,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 商店/搜刮扩充武器；与 Fire Axe 同伤害，但走 DEX 且单手，价格更高、稀有度 rare。stat=DEX 见 items.json"
+    }
+  },
+  "actions": [
+    {
+      "id": "Kick", "name": "踢击", "group": "offensive", "mvp": true,
+      "base_time": 80, "scale_stat": null, "scale_coef": 0,
+      "hit": "fixed_kick", "dmg": {"kind": "flat", "value": 2},
+      "requires": {}, "effects": {},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Kick：基础攻击；无武器时的唯一攻击。基础伤害 2，基础命中 80%。命中率不受敌人 PWR 影响」；基础耗时 80 = §5.3「Steak Knife 普攻 80」同档（上游未给 Kick 耗时，本项目推断）"
+    },
+    {
+      "id": "AttackWeapon", "name": "武器普攻", "group": "offensive", "mvp": true,
+      "base_time": 80, "scale_stat": "weapon", "scale_coef": -3,
+      "hit": "weapon", "dmg": {"kind": "weapon", "mult": 1.0},
+      "requires": {"weapon": true}, "effects": {},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Attack with Your Weapon：用装备武器的普攻」；耗时与缩放逐字来自 §5.3「Steak Knife 普攻：基础耗时 80，缩放 −3 × Stat」"
+    },
+    {
+      "id": "StrongAttack", "name": "强攻", "group": "offensive", "mvp": true,
+      "base_time": 120, "scale_stat": "weapon", "scale_coef": -4,
+      "hit": "weapon", "dmg": {"kind": "weapon", "mult": 1.5, "round": "floor"},
+      "requires": {"weapon": true}, "effects": {},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Strong Attack：武器伤害 +50%，向下取整（Steak Knife 3→4，Fire Axe 6→9）」；耗时与缩放逐字来自 §5.3「Steak Knife 强攻：基础耗时 120，缩放 −4 × Stat」"
+    },
+    {
+      "id": "PrepareAttack", "name": "准备攻击", "group": "offensive", "mvp": false,
+      "base_time": 60, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"next_attack_autohit": true, "carry_over_if_last": true},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Prepare Your Attack：让下一次攻击必中（命中率 +100%）；若它是队列最后一步，可延续到下一回合」；基础耗时 60 上游未给，取「半档」系本项目推断"
+    },
+    {
+      "id": "FireWeapon", "name": "开枪", "group": "offensive", "mvp": false,
+      "base_time": 120, "scale_stat": "PER", "scale_coef": -5,
+      "hit": "weapon", "dmg": {"kind": "firearm_second"},
+      "requires": {"weapon_kind": "firearm"}, "effects": {"ammo": -1},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Fire Weapon：用枪械的第二伤害值，消耗 1 发子弹」；耗时/缩放逐字来自 §5.3「Listen / Shoot：基础耗时 120，缩放 −5 × PER」。**本模式的 items.json 里没有任何枪械**，故该动作在 MVP 数据下永远因缺前置被拒（数据先写好，v2 直接放开）"
+    },
+    {
+      "id": "OrderAllies", "name": "命令盟友攻击", "group": "offensive", "mvp": false,
+      "base_time": 100, "scale_stat": "CHA", "scale_coef": -5,
+      "hit": "fixed_kick", "dmg": {"kind": "allies", "per_ally": 2, "low_roll_delta": -2},
+      "requires": {"ally": true}, "effects": {},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Order Your Allies to Attack：基础 80% 命中，受等级与敌人强度影响；速度随 CHA 提升；平均伤害 = 盟友数 × 2；有小概率比平均值少 2 点」。耗时 100 上游未给（本项目推断，与 Combat Skill 的 §5.3 100 同档）；缩放 −5 系本项目推断（§5.3「会缩放的动作」清单**未列** Order Allies，但 §5.2 明说速度随 CHA ⇒ 采用 §5.2 的说法并标注清单冲突）"
+    },
+    {
+      "id": "BoostHit", "name": "蓄力命中", "group": "offensive", "mvp": false,
+      "base_time": 60, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"next_attack_hit_bonus": 10, "stackable": true},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Boost Hit：下一次攻击 +10% 命中，可叠加」；基础耗时 60 上游未给（本项目推断）"
+    },
+    {
+      "id": "Bite", "name": "咬击", "group": "offensive", "mvp": false,
+      "base_time": 80, "scale_stat": null, "scale_coef": 0,
+      "hit": "fixed_kick", "dmg": {"kind": "flat", "value": 3},
+      "requires": {"flag": "grow_teeth"}, "effects": {},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Bite：仅在 Grow Teeth 法术生效时出现，等同 Kick 但伤害 3」；耗时 80 = Kick 同档（上游未给，本项目推断）"
+    },
+    {
+      "id": "CameraFlash", "name": "闪光灯", "group": "support", "mvp": false,
+      "base_time": 100, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {"item": "Camera"}, "effects": {"enemy_power_delta": -10, "grants_dodge_once": true},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Camera Flash：需装备 Camera；敌人 PWR −10，并获得一次类似 Dodge 的闪避机会」；基础耗时 100 上游未给（本项目推断，与 Combat Skill 同档）"
+    },
+    {
+      "id": "FindWeapon", "name": "找趁手的东西", "group": "support", "mvp": false,
+      "base_time": 120, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"grants_random": ["Branch", "BrokenBottle"], "with_flag_bonus": {"flag": "perk:FastHands", "extra": ["Brick", "EmptyBottle"]}},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Look for an Improvised Weapon：获得 Branch 或 Broken Bottle；有 Fast Hands 特权时额外获得 Brick 或 Empty Bottle」；基础耗时 120 上游未给（本项目推断，与 Strong Attack / Shoot 同档）"
+    },
+    {
+      "id": "AssessSituation", "name": "观察局势", "group": "support", "mvp": true,
+      "base_time": 60, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"reveals": ["type", "skills", "weakness", "desc"]},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Assess the Situation：显示敌人的类型、特殊技能、弱点与描述（即「情报」是有代价的一个动作）」；基础耗时 60 上游未给（本项目推断）。进 MVP 的理由见 COC-DESIGN §6.1「它是 §2.10 手法 2 的载体，成本一个枚举」"
+    },
+    {
+      "id": "AllyDistract", "name": "让盟友引开它", "group": "support", "mvp": false,
+      "base_time": 100, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {"ally": true}, "effects": {"success_pct": 70, "on_success": "speed_up", "on_fail": "ally_death"},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Ask your Ally to Distract the Enemy：需有盟友；70% 成功率使你的动作变快；失败则盟友死亡」；基础耗时 100 上游未给（本项目推断）"
+    },
+    {
+      "id": "CombatSkill", "name": "战斗技巧", "group": "support", "mvp": false,
+      "base_time": 100, "scale_stat": "KNW", "scale_coef": -5,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"exp_cost": 5, "this_action_hit_bonus": 10},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Combat Skill：消耗 5 EXP，本条命中率 +10%（wiki 注明此动作有 bug，100% 也可能 miss）」；耗时/缩放逐字来自 §5.3「Combat Skill：基础耗时 100，缩放 −5 × KNW」。**不复刻该 bug**（MECHANISM-MAP S-02：本模式要可验证的确定性，不追求行为保真）"
+    },
+    {
+      "id": "DesperateStruggle", "name": "垂死挣扎", "group": "support", "mvp": false,
+      "base_time": 100, "scale_stat": null, "scale_coef": 0,
+      "hit": "weapon", "dmg": {"kind": "weapon", "mult": 2.0, "round": "floor"},
+      "requires": {"sta_or_rea_at_most": 3}, "effects": {"once_per_combat": true, "damage_mult": 2.0, "excludes": ["FireWeapon"]},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Desperate Struggle：需 STA 或 REA ≤3；每场战斗限一次；攻击伤害翻倍（在其它修正之前计算，不作用于 Fire Weapon）」；基础耗时 100 上游未给（本项目推断）"
+    },
+    {
+      "id": "RunAway", "name": "逃跑", "group": "defensive", "mvp": true,
+      "base_time": 100, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"ends_combat": true, "doom_cost_key": "combat.escape_doom", "vetoes": ["boss", "SwollenJoint", "Cthac-Atorasu"]},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Run Away：结束战斗。Boss 战、中了 Swollen Joint 伤势、或古神为 Cthac-Atorasu 时无法逃跑」；+5% DOOM 来自 tuning.json combat.escape_doom（§5.2）。基础耗时 100 上游未给（本项目推断）"
+    },
+    {
+      "id": "Meditate", "name": "冥想", "group": "defensive", "mvp": true,
+      "base_time": 100, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"sta": -2, "rea": 1},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Meditate：牺牲 2 STA 换 1 REA」；基础耗时 100 上游未给（本项目推断）"
+    },
+    {
+      "id": "Dodge", "name": "闪避", "group": "defensive", "mvp": true,
+      "base_time": 160, "scale_stat": "DEX", "scale_coef": -10,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"enemy_miss_pct": 50, "scope": "turn", "stackable": false},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Dodge：本回合敌人攻击 50% miss；多次 Dodge 不叠加」；耗时/缩放逐字来自 §5.3「Dodge：基础耗时 160，缩放 −10 × DEX」"
+    },
+    {
+      "id": "Brace", "name": "格挡", "group": "defensive", "mvp": true,
+      "base_time": 160, "scale_stat": "STR", "scale_coef": -5,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"enemy_damage_mult": 0.5, "round": "floor", "scope": "turn", "stackable": false},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Brace：本回合敌人伤害减半（向下取整）；多次不叠加」；耗时/缩放逐字来自 §5.3「Brace：基础耗时 160，缩放 −5 × STR」"
+    },
+    {
+      "id": "Clap", "name": "拍手", "group": "spiritual", "mvp": true,
+      "base_time": 40, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"exorcism_token": "clap"},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2 Spiritual「Clap / Bow：往队列里加入一次拍手/鞠躬；5 个的正确组合可驱魔」+ §5.4「每次提交 5 步」。耗时 40 的**推导**：§5.4 要求一次提交 5 步，而 §5.1 的回合预算是 200 ⇒ 5 步必须 ≤200 ⇒ 每步 ≤40；上游未给该值，40 是满足原文约束的上界（本项目推断）。拆成 clap/bow 两条是为了表达「5 步序列」（§4.2 把该行写作一条）"
+    },
+    {
+      "id": "Bow", "name": "鞠躬", "group": "spiritual", "mvp": true,
+      "base_time": 40, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"exorcism_token": "bow"},
+      "_unverified": true,
+      "_source": "同 Clap：MECHANICS.md §5.2「Clap / Bow」+ §5.4「5 步」；耗时 40 由「5 步 ≤ 200」推导（本项目推断）"
+    },
+    {
+      "id": "Pray", "name": "祈祷", "group": "spiritual", "mvp": true,
+      "base_time": 100, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {}, "effects": {"rea": -2, "sta": 1},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Pray：牺牲 2 REA 换 1 STA」；基础耗时 100 上游未给（本项目推断）"
+    },
+    {
+      "id": "LeaveOffering", "name": "留下供品", "group": "spiritual", "mvp": false,
+      "base_time": 120, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "stat", "stat": "KNW"},
+      "requires": {"facing_incorporeal": true}, "effects": {"funds_cost": 1},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Leave an Offering：仅对幽灵可用；伤害 = 角色 KNW，消耗 1 FND」；基础耗时 120 上游未给（本项目推断，与 Strong Attack / Shoot 同档）"
+    },
+    {
+      "id": "SeverTies", "name": "斩断它与人世的联系", "group": "spiritual", "mvp": false,
+      "base_time": 120, "scale_stat": null, "scale_coef": 0,
+      "hit": "weapon", "dmg": {"kind": "sever_ties", "weapon_div": 2, "knw_per": 4, "round": "floor"},
+      "requires": {"facing_incorporeal": true, "weapon": true}, "effects": {},
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.2「Sever their ties to our world：仅对幽灵可用；伤害 = 武器伤害 / 2（向下取整） + 每 4 点 KNW 加 1」；基础耗时 120 上游未给（本项目推断）"
+    },
+    {
+      "id": "UseItem", "name": "使用物品", "group": "support", "mvp": false,
+      "base_time": 120, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {"consumable": true}, "effects": {"uses_consumable": true, "cures": "item.cures"},
+      "_unverified": true,
+      "_source": "【本项目新增】上游 §5.2 的动作表**没有**独立的「使用物品」条目，但任务书要求覆盖「使用物品」。取材：MECHANICS.md §2.3「Bandage 治 Minor / Medical Kit 治 Major」+ §4.3 物品以装备/消耗为主；基础耗时 120 系本项目推断。**偏离项**，见报告 COC-COMBAT.md §7"
+    },
+    {
+      "id": "Reload", "name": "装填/换武器", "group": "support", "mvp": false,
+      "base_time": 120, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "none"},
+      "requires": {"weapon": true}, "effects": {"ready_weapon": true},
+      "_unverified": true,
+      "_source": "【本项目新增】上游 §5.2 只提到 Fire Weapon「消耗 1 发子弹」，**没有**独立装填动作；本条目为覆盖任务书要求的「装填或换武器」输入面而设。取材：MECHANICS.md §5.2 Fire Weapon 的弹药消耗 + §5.3 的耗时档；基础耗时 120 系本项目推断。**偏离项**，见报告 COC-COMBAT.md §7"
+    },
+    {
+      "id": "CastSpell", "name": "施法", "group": "spiritual", "mvp": false,
+      "base_time": 0, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "spell"},
+      "requires": {}, "effects": {}, "free": true, "resolvable": false,
+      "damage_channel": "spell",
+      "_unverified": true,
+      "_source": "MECHANICS.md §5.1「施法与投掷物品不占用动作队列、不消耗时间单位，一回合可无限次」+ §5.6 设计建议「把『法术不占队列』当作核心平衡杠杆保留」+ §5.4「所有进攻性法术与投掷物品同样有效（对幽灵）」。**数据位**：本模式的 MVP 没有任何法术内容，故 base_time=0 / resolvable=false，提交它只会记一条「没有可用的法术」的账本。**不臆造法术伤害**"
+    },
+    {
+      "id": "ThrowItem", "name": "投掷物品", "group": "offensive", "mvp": false,
+      "base_time": 0, "scale_stat": null, "scale_coef": 0,
+      "hit": null, "dmg": {"kind": "thrown"},
+      "requires": {}, "effects": {}, "free": true, "resolvable": false,
+      "damage_channel": "thrown",
+      "_unverified": true,
+      "_source": "同 CastSpell：MECHANICS.md §5.1「投掷物品不占用动作队列、不消耗时间单位」+ §5.4「所有进攻性法术与投掷物品同样有效」。数据位，MVP 无投掷物内容 ⇒ resolvable=false"
+    }
+  ]
+}

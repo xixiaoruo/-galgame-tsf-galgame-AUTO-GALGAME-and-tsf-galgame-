@@ -1,6 +1,6 @@
 """隔离测试剧本：验证「游戏生图客户端 × 本机 ComfyUI」全链路。
 
-不写任何配置/存档，只连 http://127.0.0.1:8000 出图：
+不写任何配置/存档，只连 http://127.0.0.1:8188 出图：
   A) 主角立绘：生成 → 质检 → AI 抠图（rembg）→ 成品复检
   B) 场景背景：生成 → 质检
 产物：D:\\TSF_Galgame\\测试样本\\comfy_*_raw.png / *_cut.png / bg.png
@@ -15,7 +15,7 @@ from PIL import Image
 from app.game import _final_check_issue
 from app.image import (ImageClient, _bg_check, process_portrait_async)
 
-CFG = {"provider": "comfyui", "base_url": "http://127.0.0.1:8000",
+CFG = {"provider": "comfyui", "base_url": "http://127.0.0.1:8188",
        "comfy_checkpoint": "Qpipi.com_zukiAnimeILL_v50.safetensors",
        "sd_sampler": "euler", "sd_scheduler": "normal",
        "sd_steps": 24, "sd_cfg": 5.5, "vram_mode": "mid",

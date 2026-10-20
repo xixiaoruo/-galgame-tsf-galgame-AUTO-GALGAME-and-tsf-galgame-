@@ -21,6 +21,8 @@
     "sync_webui": true,
     "auto_sdxl_styles": true,
     "cutout_mode": "auto",
+    "style_preset": "none",
+    "style_custom": "",
     "model_presets": true,
     "wai_adapt": true,
     "stage_style": "auto",
@@ -38,7 +40,11 @@
     "tsf_stage_matcher": true,
     "hi_res": false,
     "uniform_keyword_en": "",
-    "uniform_keyword_neg": ""
+    "uniform_keyword_neg": "",
+    "_comment_18": "1.8.0 绘画线路优化：gen_cache=同提示词/种子成品复用（省电省时间）；eco_mode=节能模式（重试减半、关 HR、跃迁不打标）；gen_cache_mb=缓存上限",
+    "gen_cache": true,
+    "gen_cache_mb": 384,
+    "eco_mode": false
   },
   "game": {
     "emotions": [

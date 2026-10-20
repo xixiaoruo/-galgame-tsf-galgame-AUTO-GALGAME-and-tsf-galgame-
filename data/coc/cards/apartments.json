@@ -18,13 +18,18 @@
      "check": {
       "stat": "KNW",
       "threat": "SAFE",
-      "dc": 0
+      "dc": -1
      },
      "success": {
       "exp": 6
      },
      "failure": {
       "rea": -2
+     },
+     "requirements": {
+      "stat_min": {
+       "PER": 6
+      }
      }
     },
     {
@@ -132,7 +137,7 @@
      "check": {
       "stat": "STR",
       "threat": "SAFE",
-      "dc": 0
+      "dc": -2
      },
      "success": {
       "item_grant": [
@@ -142,6 +147,11 @@
      },
      "failure": {
       "sta": -2
+     },
+     "requirements": {
+      "stat_min": {
+       "STR": 7
+      }
      }
     },
     {

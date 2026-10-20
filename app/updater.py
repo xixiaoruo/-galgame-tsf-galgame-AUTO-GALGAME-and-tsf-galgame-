@@ -11,6 +11,7 @@
 import json
 import logging
 import re
+import stat
 import time
 import zipfile
 from pathlib import Path
@@ -60,6 +61,28 @@ def system_proxy() -> str:
     except Exception:
         pass
     return ""
+
+
+def _safe_zip_member_path(base: Path, member: zipfile.ZipInfo) -> Path:
+    """校验更新包成员并返回其包内目标路径。
+
+    只允许解析后仍位于 staging 根内的普通文件/目录；拒绝绝对路径、父目录
+    穿越、Windows 盘符和 Unix 符号链接，避免 Zip Slip 或解压后留下可逃逸链接。
+    """
+    name = str(member.filename or "")
+    if (not name or name.startswith(("/", "\\"))
+            or ".." in Path(name).parts
+            or re.match(r"^[A-Za-z]:", name)):
+        raise ValueError(f"压缩包内含非法路径：{name}")
+    mode = (member.external_attr >> 16) & 0o170000
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"压缩包内含不允许的符号链接：{name}")
+    target = (base / name).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"压缩包内含越界路径：{name}") from exc
+    return target
 
 
 def current_version() -> str:
@@ -155,13 +178,7 @@ def download_and_stage() -> dict:
         with zipfile.ZipFile(tmp) as z:
             base = STAGING.resolve()
             for member in z.infolist():
-                name = member.filename
-                # 防 Zip Slip：拒绝绝对路径、盘符与 .. 越界条目
-                if (name.startswith(("/", "\\")) or ".." in Path(name).parts
-                        or re.match(r"^[A-Za-z]:", name)):
-                    raise ValueError(f"压缩包内含非法路径：{name}")
-                if not str((base / name).resolve()).startswith(str(base)):
-                    raise ValueError(f"压缩包内含越界路径：{name}")
+                _safe_zip_member_path(base, member)
             z.extractall(STAGING)
         # 包内若是单层目录，把内容提到 staging 根，方便脚本整体覆盖
         kids = [p for p in STAGING.iterdir()]

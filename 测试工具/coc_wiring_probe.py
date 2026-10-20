@@ -41,6 +41,9 @@ import atexit as _atexit              # noqa: E402
 
 _TEMP_DATA = _tempfile.mkdtemp(prefix="coc-wiring-probe-")
 os.environ["TSF_DATA_DIR"] = _TEMP_DATA
+# 显式创建隔离配置，阻断 config.py 回退读取项目根 config.json（可能含真实 Key）。
+with open(os.path.join(_TEMP_DATA, "config.json"), "w", encoding="utf-8") as _f:
+    _f.write("{}")
 _atexit.register(_shutil.rmtree, _TEMP_DATA, True)
 
 from app.coc import loop as _loop              # noqa: E402

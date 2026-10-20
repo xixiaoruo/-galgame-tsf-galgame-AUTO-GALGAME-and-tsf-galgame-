@@ -66,6 +66,94 @@ def enemies() -> dict:
     return data.get("enemies", data)
 
 
+# ------------------------------------------------------------- 战斗动作层（t62）
+
+#: 战斗动作表里必须带溯源元数据的两种节点
+_CA_REQUIRED = ("_source", "_unverified")
+
+
+def _require_meta(node: Any, at: str) -> None:
+    """校验一个节点带 `_source`（非空 str）与 `_unverified`（bool）。
+
+    与 `provenance.validate_provenance` 是**同一条铁律的两种形状**：那里走 tuning.json 的
+    嵌套 dict，这里走 `combat_actions.json` 的 dict/list 混排。为什么不复用：
+    `validate_provenance` 见到 list 会直接判「结构非法」，而动作表天然是 list。
+    """
+    if not isinstance(node, dict):
+        raise ContentError(f"combat_actions.json: {at} 期望 dict，实际 {type(node).__name__}")
+    for key in _CA_REQUIRED:
+        if key not in node:
+            raise ContentError(
+                f"combat_actions.json: {at} 缺 {key!r}；"
+                f"COC-DESIGN §0.2 要求所有数值带 _source 与 _unverified"
+            )
+    src = node["_source"]
+    if not isinstance(src, str) or not src.strip():
+        raise ContentError(f"combat_actions.json: {at}._source 必须是非空字符串（现在 {src!r}）")
+    unv = node["_unverified"]
+    if not isinstance(unv, bool):
+        raise ContentError(
+            f"combat_actions.json: {at}._unverified 必须是 bool（现在 {unv!r}）；"
+            f"字符串 'true' / 0 / 1 都不算已标注"
+        )
+
+
+def combat_actions_doc() -> dict:
+    """读**并逐节点校验** `data/coc/combat_actions.json`（缺来源即加载失败）。"""
+    data = _load(paths.COMBAT_ACTIONS_PATH, "战斗动作表")
+    if not isinstance(data, dict):
+        raise ContentError("combat_actions.json 结构非法：期望 dict")
+    _require_meta(data, "$")
+    for group in ("hit", "time", "enemy_counter", "exorcism"):
+        node = data.get(group)
+        if not isinstance(node, dict):
+            raise ContentError(f"combat_actions.json: 缺少分组 {group!r}")
+        for k, v in node.items():
+            if str(k).startswith("_"):
+                continue
+            _require_meta(v, f"{group}.{k}")
+    weapons = data.get("weapons")
+    if not isinstance(weapons, dict):
+        raise ContentError("combat_actions.json: 缺少 weapons 分组")
+    for wid, w in weapons.items():
+        if str(wid).startswith("_"):
+            continue
+        _require_meta(w, f"weapons.{wid}")
+    acts = data.get("actions")
+    if not isinstance(acts, list) or not acts:
+        raise ContentError("combat_actions.json: actions 必须是非空 list")
+    seen: set[str] = set()
+    for i, a in enumerate(acts):
+        _require_meta(a, f"actions[{i}]")
+        aid = a.get("id")
+        if not isinstance(aid, str) or not aid:
+            raise ContentError(f"combat_actions.json: actions[{i}].id 必须是非空字符串")
+        if aid in seen:
+            raise ContentError(f"combat_actions.json: 动作 id 重复 {aid!r}")
+        seen.add(aid)
+    return data
+
+
+def combat_actions() -> list[dict]:
+    """战斗动作表（list，顺序即数据表顺序；运行期按 id 建索引）。"""
+    return list(combat_actions_doc()["actions"])
+
+
+def combat_field(dotted: str) -> Any:
+    """取动作表里的一个非动作字段（点号路径），如 `combat_field("exorcism.steps")`。
+
+    与 `provenance.t` 同形（自动脱 `value` 外壳），但作用于 `combat_actions.json`。
+    """
+    node: Any = combat_actions_doc()
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise KeyError(f"combat_actions.json 里没有路径 {dotted!r}（在 {part!r} 处断了）")
+        node = node[part]
+    if isinstance(node, dict) and "value" in node:
+        return node["value"]
+    return node
+
+
 def old_gods() -> list[dict]:
     data = _load(paths.OLD_GODS_PATH, "古神表")
     return _unwrap(data, "old_gods")

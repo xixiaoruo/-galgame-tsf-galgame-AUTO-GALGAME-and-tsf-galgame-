@@ -18,6 +18,12 @@ from app.coc import sanitize as S
 from app.coc import state as ST
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def test_whitelist_has_no_numeric_fields(s: TestSuite) -> None:
     cfg = P.load_tuning()
@@ -395,24 +401,49 @@ def test_trust_layer_is_structural(s: TestSuite) -> None:
     # 为什么需要这条：`Run.apply` 的默认是 engine（引擎结算用），而叙事层拿到的是
     # **模型原值**。若叙事层不显式索取 llm 信任层，就会**静默继承 engine 权限**——
     # 这正好是 D2 那条"防线只在解析层"的同类漏洞，只是发生在调用方一侧。
+    #
+    # ⚠️ t63 修正：原先扫的是 session.py 里**所有** `.apply()` 调用，于是
+    # `equip_action`（t63 新增的**玩家动作**，合法地用 trust="engine"）让这条误红。
+    # 正确做法是**按函数分别断言** —— 既保留原bug的检测力，又不把
+    # "玩家动作"和"模型原值"混成一类。信任层的意义正是让这种区分可见。
     with open(_os.path.join(coc_dir, "session.py"), encoding="utf-8") as fh:
         sess_src = fh.read()
     sess_tree = ast.parse(sess_src)
-    trusts = []
-    for node in ast.walk(sess_tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "apply"):
-            kw = {k.arg: k for k in node.keywords}
-            t_node = kw.get("trust")
-            trusts.append(t_node.value.value
-                          if isinstance(t_node, ast.keyword)
-                          and isinstance(t_node.value, ast.Constant) else None)
+
+    def _apply_trusts(fn_name: str) -> list:
+        """某个函数体内所有 `.apply()` 的 trust 实参。"""
+        out = []
+        for node in ast.walk(sess_tree):
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == fn_name):
+                continue
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "apply"):
+                    kw = {k.arg: k for k in sub.keywords}
+                    t_node = kw.get("trust")
+                    out.append(t_node.value.value
+                               if isinstance(t_node, ast.keyword)
+                               and isinstance(t_node.value, ast.Constant) else None)
+        return out
+
+    narrate_trusts = _apply_trusts("_narrate")
     s.expect(
         "`session._narrate` 把 LLM 提案交给 `run.apply` 时显式 `trust=\"llm\"`",
-        bool(trusts) and all(x == "llm" for x in trusts),
-        detail=f"session.py 里 .apply() 调用的 trust 实参 = {trusts}（应全为 'llm'）",
+        bool(narrate_trusts) and all(x == "llm" for x in narrate_trusts),
+        detail=f"_narrate 里 .apply() 的 trust 实参 = {narrate_trusts}（应全为 'llm'）",
         counterexample="反例：写成 `run.apply(turn['coc_delta'], reason='llm_proposal')`（不传 trust）→ "
                        "继承 engine 默认 → 模型原值一旦漏过解析层就获得引擎权限 → 本断言变红",
+    )
+    # 对照：玩家动作（t63 的装备）走 engine —— 与模型原值**分属两层**，
+    # 这个区分本身就是要被断言的事实，否则"信任层"会退化成一句注释。
+    equip_trusts = _apply_trusts("equip_action")
+    s.expect(
+        "★ `session.equip_action`（玩家动作）走 `trust=\"engine\"`，与模型原值分属两层",
+        bool(equip_trusts) and all(x == "engine" for x in equip_trusts),
+        detail=f"equip_action 里 .apply() 的 trust 实参 = {equip_trusts}",
+        counterexample="反例：equip_action 改用默认值(engine) 或不传 → 本断言红（意图不明显）；"
+                       "若它误用 trust=\"llm\" → 装备动作会被 llm 白名单拒掉 → 装备永远失败 → 红",
     )
 
 

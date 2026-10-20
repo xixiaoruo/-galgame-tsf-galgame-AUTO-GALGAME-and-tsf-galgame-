@@ -48,6 +48,14 @@ MODULES = [
     "test_numeric_edge",
     # t54：CoC 内的 TSF 子系统（机制型）—— 单调/可复现/旧档/边界/白名单/可观察性
     "test_coc_tsf",
+    # t63：dc 梯度 / 属性门槛（fail-closed）/ 物品栏 / 武器判定
+    "test_stats_items",
+    # t71：TSF×CoC 融合模式下的物品/装备/背包机制（属性修正进命中 / 服装演化 / 背包可用性）
+    "test_tsf_items",
+    # t73：自定义剧本 —— 世界观真正决定地点/谜团/古神/事件卡（含零影响与存档往返）
+    "test_scenario",
+    # t62：战斗 —— 200 时间单位 / ≤8 动作队列、武器属性检定、incorporeal、驱魔、可复现、账本
+    "test_combat",
 ]
 
 

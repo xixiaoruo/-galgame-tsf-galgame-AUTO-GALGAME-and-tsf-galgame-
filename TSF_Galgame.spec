@@ -12,6 +12,18 @@
 # `ROOT/data/coc` 的 ⇒ **必须显式打进包**，落到 `_internal/data/coc/**`
 # （onedir 下 `app.coc.paths.__file__` 解析到 `_internal/app/coc/paths.py`，其 ROOT 即 `_internal`）。
 # 不打包的后果是启动/进入 CoC 时抛 `TuningMissingError`（有意为之的明确失败，不是静默兜底）。
+# 1.8.0 硬依赖：本机 window_host 的 QtWebEngine 窗口后端 = PySide6。
+# 缺它时 PyInstaller 仍能构建，但产物只剩 Edge 回退链（实测无地址栏校验失败 →
+# 用户双击无窗口）。宁可在构建期明确失败，也不要产出"能打包但打不开"的 exe。
+# 本机用法：创建 .build-venv 装 PySide6 后用
+#   $env:PYTHONPATH='D:\TSF_Galgame\.build-venv\Lib\site-packages'
+#   python -m PyInstaller --noconfirm TSF_Galgame.spec
+import importlib.util as _ilu
+if _ilu.find_spec('PySide6') is None:
+    raise SystemExit(
+        '[spec] 未找到 PySide6：窗口版必须带 QtWebEngine 后端。'
+        '请先 pyenv_install PySide6 并设置 PYTHONPATH（见 交接上下文.md 1.8.0 构建说明）。')
+
 import pathlib as _pl
 _coc_root = _pl.Path('data/coc')
 _coc_datas = []
@@ -35,7 +47,13 @@ a = Analysis(
                    'rembg.bg', 'rembg.session_factory',
                    # 阶段 4 P2：windowed + 原生窗口的保底收集（防 PyInstaller 升级误裁）
                    'server', 'webview', 'webview.platforms.winforms',
-                   'clr', 'clr_loader'],
+                   'clr', 'clr_loader',
+                   # 1.8.0：本机实际窗口后端 = PySide6/QtWebEngine（window_host 第二级首选）。
+                   # 构建机需可 import PySide6（用 .build-venv 的 site-packages 经 PYTHONPATH 注入）；
+                   # 其余 webview/cr 缺失只产生 warning，不影响 Qt 路径。
+                   'PySide6', 'PySide6.QtCore', 'PySide6.QtGui',
+                   'PySide6.QtWidgets', 'PySide6.QtNetwork',
+                   'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets'],
     hookspath=[],
     hooksconfig={'collect_all': ['rembg', 'onnxruntime', 'webview', 'pythonnet']},
     runtime_hooks=[],

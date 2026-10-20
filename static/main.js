@@ -31,6 +31,13 @@ const S = {
   tsf: null,           // 状态面板数据
   vn: null,            // 普通模式状态数据
   coc: null,           // CoC 模式状态数据（P18-A：DOOM / 双血条 / 属性 / 标签）
+  cocPresets: [],      // 1.9.19：CoC 剧本预设清单
+  shop: null,          // 1.9.19：当前固定商店视图
+  shopId: "",          // 1.9.19：当前选中的商店 id
+  aiData: null,        // 1.9.20：AI 控制台（请求 / 思考 / 原始输出 / 对话 / 导演指令）
+  aiEntryId: null,     // 1.9.20：当前查看的调用记录
+  aiTab: "think",      // 1.9.20：think / edit / direct
+  aiDirective: "",     // 1.9.20：当前导演指令
   charStats: null,     // 每个角色一套数值（两种模式共用）
   statWho: null,       // 状态面板当前查看的角色
   charPrev: {},        // 上一幕各角色数值（算 ▲▼）
@@ -68,7 +75,13 @@ window.addEventListener("error", (e) => {
 
 function toast(msg, ms = 3200) {
   const el = $("toast");
+  if (!el) return;
   el.textContent = msg;
+  // 1.8.0：按语义标记语气（成功/错误），UI2 皮肤据此换图标与描边
+  const text = String(msg || "");
+  el.dataset.tone = /失败|错误|出错|无法|不可用|拒绝/.test(text)
+    ? "error"
+    : (/已|完成|就绪|保存成功|✓/.test(text) ? "ok" : "info");
   el.classList.remove("hidden");
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.add("hidden"), ms);
@@ -91,6 +104,9 @@ async function api(path, opts = {}) {
   }
   try {
     const resp = await fetch(path, {
+      // 存档/读档/资产状态都是动态数据：QtWebEngine 与部分浏览器会对 GET
+      // 做启发式缓存，导致「刚存的档在列表里看不到」。统一禁用 HTTP 缓存。
+      cache: "no-store",
       headers,
       signal: ctl.signal,
       ...rest,
@@ -132,35 +148,446 @@ function bindUiPart01() {
   on("prot-extra", "input", refreshAnchorPreview);
 }
 
-/* ---------- 开始界面：NPC 卡片 ---------- */
+/* ---------- 开始界面：NPC 卡片（1.9.0：身份 / 背景 / AI 谱写 / 随机） ---------- */
+
+const CHAR_CARD_LIMIT = 4;
+
+function traitsText(raw) {
+  const arr = Array.isArray(raw) ? raw : String(raw || "").split(/[,，、;；/]+/);
+  return arr.map((x) => String(x).trim()).filter(Boolean).join("、");
+}
 
 function addCharCard(data = {}) {
   const list = $("char-list");
+  if (!list) return null;
+  if (list.querySelectorAll(".char-card").length >= CHAR_CARD_LIMIT) {
+    toast(`最多 ${CHAR_CARD_LIMIT} 位其他角色（可在游戏内由 AI 继续引入）`);
+    return null;
+  }
   const card = document.createElement("div");
   card.className = "char-card";
   card.innerHTML = `
     <div class="char-card-head">
       <input class="text-input char-name" placeholder="角色名" maxlength="12" value="${escapeHtml(data.name || "")}">
-      <button class="btn ghost btn-del">✕ 删除</button>
+      <input class="text-input char-role" placeholder="身份 / 与主角的关系（如：同班同学）" maxlength="20" value="${escapeHtml(data.role || "")}">
+      <span class="char-tools">
+        <button class="btn ghost mini btn-char-ai" type="button" title="用 AI 根据世界观、外貌与性格自动谱写角色背景">✨ 背景</button>
+        <button class="btn ghost mini btn-char-tune" type="button" title="用 AI 微调这张角色卡（不会改写固定字段）">✨ 微调</button>
+        <button class="btn ghost mini btn-char-lib" type="button" title="从角色库选一张卡填入这张角色卡（保留立绘复用）">📚</button>
+        <button class="btn ghost mini btn-char-random" type="button" title="随机生成一位角色（本地，不消耗 API）">🎲</button>
+        <button class="btn ghost mini btn-del" type="button">✕</button>
+      </span>
     </div>
-    <div class="char-field">
-      <small>外貌描述（供立绘生成：发色发型、瞳色、服装、气质）</small>
-      <textarea class="text-input char-appearance" rows="2" maxlength="300">${escapeHtml(data.appearance || "")}</textarea>
+    <div class="char-grid">
+      <div class="char-field">
+        <small>外貌描述（发色发型、瞳色、服装、气质）</small>
+        <textarea class="text-input char-appearance" rows="2" maxlength="300">${escapeHtml(data.appearance || "")}</textarea>
+      </div>
+      <div class="char-field">
+        <small>性格 / 说话风格</small>
+        <textarea class="text-input char-personality" rows="2" maxlength="200">${escapeHtml(data.personality || "")}</textarea>
+      </div>
     </div>
+    <div class="char-profile">
+      <label>年龄<input class="text-input char-age" type="number" min="18" max="80" placeholder="22" value="${data.age || ""}"></label>
+      <label>身高(cm)<input class="text-input char-height" type="number" min="130" max="220" placeholder="164" value="${data.height_cm || ""}"></label>
+      <label>体型<input class="text-input char-body" maxlength="30" placeholder="纤细高挑 / 娇小柔软" value="${escapeHtml(data.body_type || "")}"></label>
+      <label>三围<input class="text-input char-measure" maxlength="40" placeholder="B86 / W58 / H88" value="${escapeHtml(data.measurements || "")}"></label>
+      <label>生日<input class="text-input char-birthday" maxlength="20" placeholder="5月12日" value="${escapeHtml(data.birthday || "")}"></label>
+    </div>
+    <div class="char-grid">
+      <div class="char-field">
+        <small>性格标签（逗号分隔，最多 8 个）</small>
+        <input class="text-input char-traits" maxlength="120" placeholder="慢热、嘴硬心软、观察力强" value="${escapeHtml(traitsText(data.traits))}">
+      </div>
+      <div class="char-field">
+        <small>说话风格</small>
+        <input class="text-input char-speech" maxlength="100" placeholder="语速偏慢，措辞礼貌" value="${escapeHtml(data.speech_style || "")}">
+      </div>
+    </div>
+    <div class="char-grid">
+      <div class="char-field"><small>喜欢</small><input class="text-input char-likes" maxlength="100" placeholder="旧书、雨天、热牛奶" value="${escapeHtml(data.likes || "")}"></div>
+      <div class="char-field"><small>厌恶</small><input class="text-input char-dislikes" maxlength="100" placeholder="吵闹的人群、被催促" value="${escapeHtml(data.dislikes || "")}"></div>
+    </div>
+    <label class="char-lock">
+      <input type="checkbox" class="char-lock-personality" ${data.personality_locked ? "checked" : ""}>
+      🔒 固定性格与说话风格（AI 微调 / 后续剧情不会改写）
+    </label>
+    <label class="char-lock">
+      <input type="checkbox" class="char-lock-profile">
+      🔒 固定详细人设（年龄 / 身高 / 体型 / 三围 / 生日）
+    </label>
     <div class="char-field">
-      <small>性格 / 说话风格</small>
-      <textarea class="text-input char-personality" rows="2" maxlength="200">${escapeHtml(data.personality || "")}</textarea>
+      <small>角色背景（出身 / 与主角的因缘 / 可被剧情利用的钩子）
+        <span class="char-bg-status">${data.background ? "✓ 已有背景" : "可点「✨ 背景」自动谱写"}</span>
+      </small>
+      <textarea class="text-input char-background" rows="3" maxlength="400">${escapeHtml(data.background || "")}</textarea>
     </div>`;
-  card.querySelector(".btn-del").addEventListener("click", () => card.remove());
+  card.querySelector(".btn-del").addEventListener("click", () => {
+    card.remove();
+    updateCharCount();
+    if (window.UI2 && UI2.updateReadiness) UI2.updateReadiness();
+  });
+  card.querySelector(".btn-char-ai").addEventListener("click", () => aiCharBackground(card));
+  card.querySelector(".btn-char-tune").addEventListener("click", () => openFineTune(card));
+  card.querySelector(".btn-char-random").addEventListener("click", () => randomizeCharCard(card));
+  card.querySelector(".btn-char-lib").addEventListener("click", () => {
+    if (typeof openLibPicker === "function") openLibPicker("card", card);
+    else toast("角色库尚未就绪");
+  });
+  card.querySelector(".char-background").addEventListener("input", () => {
+    const st = card.querySelector(".char-bg-status");
+    st.textContent = card.querySelector(".char-background").value.trim()
+      ? "✓ 已有背景" : "可点「✨ 背景」自动谱写";
+  });
   list.appendChild(card);
+  updateCharCount();
+  if (window.UI2 && UI2.updateReadiness) UI2.updateReadiness();
+  return card;
+}
+
+function updateCharCount() {
+  const list = $("char-list");
+  if (!list) return;
+  const n = list.querySelectorAll(".char-card").length;
+  const btn = $("btn-add-char");
+  if (btn) {
+    btn.disabled = n >= CHAR_CARD_LIMIT;
+    btn.textContent = n >= CHAR_CARD_LIMIT ? `已满 ${CHAR_CARD_LIMIT} 位` : "＋ 添加角色";
+  }
+}
+
+function charTraits(card) {
+  return String(card.querySelector(".char-traits")?.value || "")
+    .split(/[,，、;；/]+/).map((x) => x.trim()).filter(Boolean).slice(0, 8);
+}
+
+function charInt(card, sel) {
+  const n = parseInt(card.querySelector(sel)?.value || "0", 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
 function collectNPCs() {
-  return [...document.querySelectorAll(".char-card")].map((c) => ({
-    name: c.querySelector(".char-name").value.trim(),
-    appearance: c.querySelector(".char-appearance").value.trim(),
-    personality: c.querySelector(".char-personality").value.trim(),
-  })).filter((c) => c.name);
+  return [...document.querySelectorAll(".char-card")].map((c) => {
+    const plock = !!c.querySelector(".char-lock-personality")?.checked;
+    const flock = !!c.querySelector(".char-lock-profile")?.checked;
+    const locks = [];
+    if (plock) locks.push("personality", "traits", "speech_style");
+    if (flock) locks.push("age", "height_cm", "body_type", "measurements", "birthday");
+    return {
+      name: c.querySelector(".char-name").value.trim(),
+      role: c.querySelector(".char-role") ? c.querySelector(".char-role").value.trim() : "",
+      appearance: c.querySelector(".char-appearance").value.trim(),
+      personality: c.querySelector(".char-personality").value.trim(),
+      traits: charTraits(c),
+      age: charInt(c, ".char-age"),
+      height_cm: charInt(c, ".char-height"),
+      body_type: c.querySelector(".char-body")?.value.trim() || "",
+      measurements: c.querySelector(".char-measure")?.value.trim() || "",
+      birthday: c.querySelector(".char-birthday")?.value.trim() || "",
+      speech_style: c.querySelector(".char-speech")?.value.trim() || "",
+      likes: c.querySelector(".char-likes")?.value.trim() || "",
+      dislikes: c.querySelector(".char-dislikes")?.value.trim() || "",
+      personality_locked: plock,
+      locked_fields: locks,
+      background: c.querySelector(".char-background") ? c.querySelector(".char-background").value.trim() : "",
+    };
+  }).filter((c) => c.name).slice(0, CHAR_CARD_LIMIT);
+}
+
+function validateCharCards(protagonist) {
+  const chars = collectNPCs();
+  const seen = new Set();
+  const pname = String(protagonist || "").trim();
+  for (const c of chars) {
+    if (c.name === pname) {
+      toast(`角色名「${c.name}」与主角同名，请改一个名字`);
+      return false;
+    }
+    if (seen.has(c.name)) {
+      toast(`角色名「${c.name}」重复了，请改名或删掉一张卡`);
+      return false;
+    }
+    seen.add(c.name);
+  }
+  return true;
+}
+
+function charCardContext() {
+  return {
+    title: $("inp-title") ? $("inp-title").value.trim() : "",
+    world: $("inp-world") ? $("inp-world").value.trim() : "",
+    protagonist: $("prot-name") ? ($("prot-name").value.trim() || "主角") : "主角",
+  };
+}
+
+function fillCharCard(card, data) {
+  if (!card || !data) return;
+  const set = (sel, val) => {
+    const el = card.querySelector(sel);
+    if (el) el.value = val || "";
+  };
+  set(".char-name", data.name);
+  set(".char-role", data.role);
+  set(".char-appearance", data.appearance);
+  set(".char-personality", data.personality);
+  set(".char-background", data.background);
+  set(".char-traits", traitsText(data.traits));
+  set(".char-age", data.age || "");
+  set(".char-height", data.height_cm || "");
+  set(".char-body", data.body_type);
+  set(".char-measure", data.measurements);
+  set(".char-birthday", data.birthday);
+  set(".char-speech", data.speech_style);
+  set(".char-likes", data.likes);
+  set(".char-dislikes", data.dislikes);
+  const lock = card.querySelector(".char-lock-personality");
+  if (lock) lock.checked = !!data.personality_locked;
+  const flock = card.querySelector(".char-lock-profile");
+  if (flock) {
+    const locks = new Set(data.locked_fields || []);
+    flock.checked = ["age", "height_cm", "body_type", "measurements", "birthday"]
+      .every((k) => locks.has(k));
+  }
+  const st = card.querySelector(".char-bg-status");
+  if (st) st.textContent = data.background ? "✓ 已有背景" : "可点「✨ 背景」自动谱写";
+  if (window.UI2 && UI2.updateReadiness) UI2.updateReadiness();
+}
+
+async function aiCharBackground(card) {
+  const name = card.querySelector(".char-name").value.trim();
+  if (!name) { toast("先给角色起个名字"); return; }
+  const btn = card.querySelector(".btn-char-ai");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "谱写中…";
+  try {
+    const ctx = charCardContext();
+    const data = await api("/api/characters/background", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        role: card.querySelector(".char-role").value.trim(),
+        appearance: card.querySelector(".char-appearance").value.trim(),
+        personality: card.querySelector(".char-personality").value.trim(),
+        world: ctx.world, title: ctx.title, protagonist: ctx.protagonist,
+        existing: collectNPCs().map((c) => c.name).filter((n) => n !== name),
+      }),
+    });
+    card.querySelector(".char-background").value = data.background || "";
+    card.querySelector(".char-bg-status").textContent =
+      data.source === "llm" ? "✓ AI 谱写" : "✓ 本地谱写（AI 不可用）";
+    toast(`已为「${name}」谱写背景`);
+  } catch (e) {
+    toast("自动谱写失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function randomizeCharCard(card) {
+  const btn = card.querySelector(".btn-char-random");
+  btn.disabled = true;
+  try {
+    const ctx = charCardContext();
+    const avoid = collectNPCs().map((c) => c.name).concat([ctx.protagonist]);
+    const data = await api("/api/characters/random", {
+      method: "POST",
+      body: JSON.stringify({ world: ctx.world, avoid_names: avoid }),
+    });
+    fillCharCard(card, data);
+    toast(`🎲 随机角色「${data.name}」已填入`);
+  } catch (e) {
+    toast("随机角色失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------- 角色卡：AI 自主微调 ---------- */
+
+let fineTuneCard = null;
+const FINETUNE_SUGGESTS = [
+  "身高改成 168cm", "体型更纤细", "气质更成熟", "语气更温柔",
+  "性格更主动", "加一个「怕生」标签", "说话更简短", "背景更神秘",
+];
+
+function openFineTune(card) {
+  if (!card) return;
+  fineTuneCard = card;
+  const name = card.querySelector(".char-name")?.value.trim() || "未命名角色";
+  $("finetune-target").textContent = `目标：${name} · 只改未固定字段`;
+  $("finetune-note").value = "";
+  $("finetune-hint").textContent = "";
+  const box = $("finetune-chips");
+  box.innerHTML = "";
+  FINETUNE_SUGGESTS.forEach((text) => {
+    const b = document.createElement("button");
+    b.className = "btn ghost action-btn";
+    b.type = "button";
+    b.textContent = text;
+    b.addEventListener("click", () => {
+      const n = $("finetune-note");
+      n.value = (n.value ? n.value + "；" : "") + text;
+    });
+    box.appendChild(b);
+  });
+  $("modal-finetune").classList.remove("hidden");
+  setTimeout(() => $("finetune-note").focus(), 30);
+}
+
+async function applyFineTune() {
+  if (!fineTuneCard) return;
+  const instruction = $("finetune-note").value.trim();
+  if (!instruction) { toast("请写一条微调要求"); return; }
+  const name = fineTuneCard.querySelector(".char-name")?.value.trim() || "";
+  const cardData = collectNPCs().find((c) => c.name === name);
+  if (!cardData) { toast("角色卡内容为空"); return; }
+  const btn = $("btn-finetune-go");
+  btn.disabled = true;
+  btn.textContent = "微调中…";
+  $("finetune-hint").textContent = "AI 正在保留固定字段并改写其余内容…";
+  try {
+    const ctx = charCardContext();
+    const r = await api("/api/characters/fine-tune", {
+      method: "POST", timeoutMs: 60000,
+      body: JSON.stringify({
+        card: cardData, instruction,
+        world: ctx.world, title: ctx.title, protagonist: ctx.protagonist,
+      }),
+    });
+    if (!r.character) throw new Error("返回角色卡为空");
+    fillCharCard(fineTuneCard, r.character);
+    $("finetune-hint").textContent = r.source === "llm"
+      ? "✓ AI 微调完成（固定字段已保留）"
+      : "✓ 已应用本地微调（AI 不可用）";
+    toast(`已微调「${r.character.name || cardData.name}」`);
+    setTimeout(() => $("modal-finetune").classList.add("hidden"), 450);
+  } catch (e) {
+    $("finetune-hint").textContent = "微调失败：" + e.message;
+    toast("微调失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✨ 应用微调";
+  }
+}
+
+function bindFineTuneUi() {
+  const close = () => $("modal-finetune").classList.add("hidden");
+  $("btn-finetune-cancel").addEventListener("click", close);
+  $("btn-finetune-go").addEventListener("click", applyFineTune);
+  $("modal-finetune").addEventListener("click", (e) => {
+    if (e.target === $("modal-finetune")) close();
+  });
+}
+
+/* ---------- 随机数 / 骰子（含 CoC 检定） ---------- */
+
+const rngHistory = [];
+
+function rngPush(html, label) {
+  rngHistory.unshift({ html, label: label || "" });
+  if (rngHistory.length > 20) rngHistory.length = 20;
+  const box = $("rng-history");
+  if (!box) return;
+  box.innerHTML = rngHistory.map((x) =>
+    `<div class="rng-history-row">${x.html}</div>`).join("");
+}
+
+function rngShowResult(html) {
+  const el = $("rng-result");
+  if (el) el.innerHTML = html;
+}
+
+function openRng() {
+  const cocMode = S.mode === "coc" || S.mode === "coc_tsf";
+  const tab = $("rng-tab-coc");
+  if (tab) tab.classList.toggle("hidden", !cocMode);
+  if (!cocMode) switchRngTab("dice");
+  $("rng-hint").textContent = "";
+  $("rng-coc-hint").textContent = "";
+  $("modal-rng").classList.remove("hidden");
+}
+
+function switchRngTab(which) {
+  const coc = which === "coc";
+  $("rng-dice-pane").classList.toggle("hidden", coc);
+  $("rng-coc-pane").classList.toggle("hidden", !coc);
+  $("rng-tab-dice").className = "btn mini " + (coc ? "ghost" : "primary");
+  const cocMode = S.mode === "coc" || S.mode === "coc_tsf";
+  $("rng-tab-coc").className = "btn mini " + (coc ? "primary" : "ghost")
+    + (cocMode ? "" : " hidden");
+}
+
+async function rollRng() {
+  const preset = $("rng-preset").value;
+  const notation = preset || $("rng-custom").value.trim() || "1d100";
+  const label = $("rng-label").value.trim();
+  const btn = $("btn-rng-roll");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/rng/roll", {
+      method: "POST",
+      body: JSON.stringify({ notation, label }),
+    });
+    const rolls = (r.rolls || []).join(" + ");
+    const mod = r.modifier ? ` ${r.modifier > 0 ? "+" : ""}${r.modifier}` : "";
+    const html = `<b>🎲 ${escapeHtml(r.notation)}</b> → <b>${r.total}</b>`
+      + `<span class="rng-detail">（${escapeHtml(rolls)}${mod}${label ? " · " + escapeHtml(label) : ""}）</span>`;
+    rngShowResult(html);
+    rngPush(html, label);
+    $("rng-hint").textContent = "✓ 已掷骰";
+  } catch (e) {
+    $("rng-hint").textContent = "掷骰失败：" + e.message;
+    toast("掷骰失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function rollCocCheck() {
+  if (!S.sid) { toast("先进入 CoC 对局"); return; }
+  const btn = $("btn-rng-coc");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/rng/coc-check", {
+      method: "POST",
+      body: JSON.stringify({
+        sid: S.sid, stat: $("rng-coc-stat").value,
+        threat: $("rng-coc-threat").value,
+      }),
+    });
+    const ok = r.success ? "✅ 成功" : "❌ 失败";
+    const html = `<b>${ok}</b> · ${escapeHtml(r.stat)} ${r.stat_value}`
+      + ` vs d12 ${r.roll} <span class="rng-detail">（${escapeHtml(r.reason || "")}）</span>`;
+    rngShowResult(html);
+    rngPush(html, "CoC 检定");
+    $("rng-coc-hint").textContent = ok;
+  } catch (e) {
+    $("rng-coc-hint").textContent = "检定失败：" + e.message;
+    toast("检定失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function bindRngUi() {
+  $("btn-rng").addEventListener("click", openRng);
+  $("btn-rng-close").addEventListener("click", () => $("modal-rng").classList.add("hidden"));
+  $("modal-rng").addEventListener("click", (e) => {
+    if (e.target === $("modal-rng")) $("modal-rng").classList.add("hidden");
+  });
+  $("rng-tab-dice").addEventListener("click", () => switchRngTab("dice"));
+  $("rng-tab-coc").addEventListener("click", () => switchRngTab("coc"));
+  $("rng-preset").addEventListener("change", () => {
+    const custom = $("rng-custom");
+    if ($("rng-preset").value) custom.value = "";
+    custom.disabled = !!$("rng-preset").value;
+  });
+  $("btn-rng-roll").addEventListener("click", rollRng);
+  $("btn-rng-coc").addEventListener("click", rollCocCheck);
+  $("rng-custom").disabled = !!$("rng-preset").value;
 }
 
 /* ---------- 开始界面：故事书 ---------- */
@@ -218,6 +645,9 @@ function bindUiPart02() {
     $("inp-outline").value = "";
     toast("大纲已清空（剧情将自由发挥）");
   });
+
+  bindFineTuneUi();
+  bindRngUi();
 
   $("btn-outline").addEventListener("click", async () => {
     const btn = $("btn-outline");
@@ -321,6 +751,31 @@ function collectDirectives() {
     ...setupDirectives.customs.map((c) => ({ id: "", text: c.text, enabled: true })),
   ];
 }
+
+/* t73：**自定义剧本**（可选）。玩家在 `#inp-scenario` 里粘一份 JSON，
+   就能真正决定 CoC 系模式的地点/谜团/古神/事件卡（而不只是叙述措辞）。
+
+   形状见 `app/coc/scenario.py`；这里只做"是不是合法 JSON 对象"的**前端初筛**，
+   真正的 schema 校验（threat 合法性、缺 id 等）由后端 `scenario.normalize` 负责 ——
+   后端会回 400 并带上具体原因，前端**不重复实现**一套校验（两套必然漂移）。
+   留空 ⇒ 返回 {} ⇒ 后端按"无剧本"处理（零影响）。 */
+function collectScenario() {
+  const el = $("inp-scenario");
+  if (!el) return {};
+  const raw = String(el.value || "").trim();
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      toast("剧本必须是 JSON 对象（{ … }）", 4000);
+      return {};
+    }
+    return obj;
+  } catch (e) {
+    toast("剧本 JSON 解析失败：" + String(e.message || e).slice(0, 80), 5000);
+    return {};
+  }
+}
 // —— UI 绑定段 bindUiPart04（t37：自模块顶层收敛至此，内容逐字未改）——
 function bindUiPart04() {
 
@@ -347,16 +802,26 @@ function bindUiPart04() {
     if (!isCocMode && !world) {
       toast("请先填写世界观/剧情设定，或点「随机生成设定」"); return;
     }
+    const pname = $("prot-name").value.trim() || "主角";
+    if (!isCocMode && !validateCharCards(pname)) return;
     const cocSel = (id, dflt) => { const el = $(id); return el ? el.value : dflt; };
     const payload = {
       mode: S.mode,
       title: $("inp-title").value.trim(),
-      world: isCocMode ? (world || "盐川町") : world,
+      // t73：**不要把玩家填的世界观丢掉**。原来写成 `isCocMode ? (world || "盐川町") : world`，
+      // 效果是 CoC 系模式下"填了也白填"（引擎当时也确实不读它，是双重失效）。
+      // 现在引擎会把 world/outline/lorebook/directives 组装成"纯文本剧本"并注入 prompt，
+      // 所以这里**原样透传**；留空时才交给后端回落（后端 `_scenario_of` 只在有内容时才建剧本）。
+      world: world,
+      // t73：结构化剧本（可选）。玩家/作者可传入 {locations,mysteries,old_gods,cards,...}
+      // 来真正决定内容；留空 = 用随包内容（零影响）。
+      scenario: collectScenario(),
+      scenario_id: isCocMode ? collectCocScenarioId() : "",
       characters: isCocMode ? [] : collectNPCs(),
       protagonist: isCocMode
         ? { name: cocSel("coc-character", "Kirie"), anchor: "" }
         : {
-            name: $("prot-name").value.trim() || "主角",
+            name: pname,
             anchor: S.mode === "vn" ? $("vn-anchor").value.trim() : buildAnchor(),
           },
       // CoC 开局参数（服务端 app/coc/session.py::start 读取）
@@ -374,7 +839,15 @@ function bindUiPart04() {
       allow_forced: $("inp-forced").checked && $("inp-r18").checked
         && $("inp-rating").value === "18",
       library_imports: window.__libImports || [],
+      stage_count: Number(S.stageCount) || 0,
       tsf_target: collectTsfTarget(),
+      // 1.9.0：制服字段此前只存进设定档案、**没进开局 payload**，导致
+      // 玩家填的本局制服在真正开局时从未生效（只剩场景自动映射）。
+      uniform_en: $("uniform-en") ? $("uniform-en").value.trim() : "",
+      uniform_neg: $("uniform-neg") ? $("uniform-neg").value.trim() : "",
+      uniform_name: ($("uniform-en") && ($("uniform-en").value.trim()
+        || ($("uniform-neg") && $("uniform-neg").value.trim())))
+        ? ($("uniform-name") ? $("uniform-name").textContent.trim() : "") : "",
     };
     const btn = $("btn-start");
     btn.disabled = true;
@@ -443,6 +916,16 @@ function setSetupMode(mode, silent) {
   const isVn = S.mode === "vn";
   const isCoc = S.mode === "coc" || S.mode === "coc_tsf";
   const isCocTsf = S.mode === "coc_tsf";
+  // 1.9.20：模式简介固定在模式按钮下方；CoC 介绍不再只藏在设置框提示里。
+  const intro = $("mode-intro");
+  if (intro) {
+    intro.textContent = {
+      tsf: "TSF Galgame：普通剧情 + 性别同化率 / 六段转变立绘。",
+      vn: "普通 Galgame：日常情感与关系推进；不推进 TSF 转变。",
+      coc: "CoC 跑团：DOOM / STA / REA / SAN、d12 检定、固定商店与剧本预设；纯文字，不生成立绘。",
+      coc_tsf: "CoC×TSF：CoC 调查跑团 + TSF 转变进度与阶段立绘。",
+    }[S.mode] || "";
+  }
   const vnBox = $("vn-anchor-box");
   if (vnBox) vnBox.classList.toggle("hidden", !isVn);
   const cocBox = $("coc-setup-box");
@@ -475,12 +958,14 @@ function setSetupMode(mode, silent) {
       : (isCocTsf
         ? "CoC×TSF：CoC 跑团 + TSF 转变进度/阶段立绘（第四个独立模式）"
         : (isCoc
-          ? "CoC 跑团：DOOM 倒计时 / 双血条 / 属性检定（第三个独立模式）"
+          ? "CoC 跑团：DOOM / STA / REA / SAN、物品与商店、剧本预设（第三模式）"
           : "TSF 模式：性别转换数值演进（同化/体质/沉溺…）")), 2600);
   }
   renderStatEditor();
   // P18-A：CoC 的开局下拉（古神/调查员）按需懒加载一次
   if (isCoc) populateCocSelects();
+  // 1.8.0：UI2 同步模式摘要 / 版本（未加载时静默跳过）
+  if (window.UI2) UI2.onModeChanged();
 }
 
 /** P18-A（t51）：把 CoC 的可选古神/调查员填进下拉（只填一次）。 */
@@ -498,10 +983,49 @@ async function populateCocSelects() {
       const o = document.createElement("option");
       o.value = id; o.textContent = id; ch.appendChild(o);
     });
+    // 1.9.19：剧本预设（default 已在 HTML 里，其余按服务端清单填）
+    S.cocPresets = Array.isArray(cfgv.scenarios) ? cfgv.scenarios : [];
+    const sp = $("coc-scenario-preset");
+    if (sp) {
+      const seen = new Set(Array.from(sp.options).map((o) => o.value));
+      S.cocPresets.forEach((sc) => {
+        if (!sc || !sc.id || seen.has(sc.id)) return;
+        const o = document.createElement("option");
+        o.value = sc.id;
+        o.textContent = (sc.title || sc.id)
+          + (sc.era ? ` · ${sc.era}` : "");
+        sp.appendChild(o);
+      });
+      sp.addEventListener("change", updateCocScenarioDesc);
+    }
+    updateCocScenarioDesc();
     og.dataset.filled = "1";
   } catch (e) {
     og.dataset.filled = "1";   // 失败不重试，保持默认值可用
   }
+}
+
+/* 1.9.19：剧本预设的说明文字（不含 Keeper-only 内容，只给题材/时长/人数）。 */
+function updateCocScenarioDesc() {
+  const sp = $("coc-scenario-preset");
+  const box = $("coc-scenario-desc");
+  if (!sp || !box) return;
+  const id = sp.value || "default";
+  const sc = (S.cocPresets || []).find((x) => x.id === id);
+  if (!sc) {
+    box.textContent = "选择剧本会替换地点、谜团、古神、事件卡与叙述基调；数值规则不变。";
+    return;
+  }
+  const bits = [sc.summary, sc.tone, sc.players,
+    (sc.locations ? `${sc.locations} 个地点` : ""),
+    (sc.mystery_len ? `单章 ${sc.mystery_len} 次调查` : "")].filter(Boolean);
+  box.textContent = bits.join(" · ") || "数值规则不变。";
+}
+
+/* 1.9.19：开局时把选中的剧本预设 id 带给服务端；自定义 JSON 会覆盖预设同名段。 */
+function collectCocScenarioId() {
+  const el = $("coc-scenario-preset");
+  return el ? String(el.value || "default") : "default";
 }
 // —— UI 绑定段 bindUiPart06（t37：自模块顶层收敛至此，内容逐字未改）——
 function bindUiPart06() {
@@ -646,8 +1170,62 @@ function bindUiPart08() {
 
 /* ---------- 设置弹窗 ---------- */
 
+/* F1-U1（t65）：画风预设的联动提示。
+   数据来源全部是后端（`GET /api/config` 的 style_presets/style_preset/style_custom）：
+   **哪个预设要提示开像素开关，由该预设的 `hint.pixel_art` 决定**，前端不硬编码 id。
+   ⚠️ 这里**只显示提示**：绝不写 `image.pixel_art`（那是另一个开关，t61 明确"只提示不自动开"）。 */
+function updateStyleHint() {
+  const box = $("cfg-style-hint");
+  const sel = $("cfg-style-preset");
+  if (!box || !sel) return;
+  const pid = sel.value || "none";
+  const list = (S.stylePresets && Array.isArray(S.stylePresets)) ? S.stylePresets : [];
+  const cur = list.find((p) => p && p.id === pid) || null;
+  const parts = [];
+  if (pid !== "none") {
+    parts.push("已选画风会在「下一幕 / 重新生成立绘」时生效；已有立绘不会自动改变。");
+  }
+  if (cur && cur.hint && cur.hint.pixel_art) {
+    parts.push("像素风提示：本预设只改提示词；真正的块状像素化由下面的「像素化立绘」开关"
+      + "（image.pixel_art）控制，两者一起开才有完整像素观感。");
+  }
+  box.textContent = parts.join(" ");
+  box.classList.toggle("hidden", parts.length === 0);
+  updatePixelHint();
+}
+
+/* t68：**像素化开关**（image.pixel_art）的联动提示。
+   它不用 style_presets 的 hint —— 那个 hint 是"这个预设建议开像素"，与本开关自身的状态
+   是两回事。这里只在"选了像素风预设但没开像素化"时提醒，避免用户漏开半边。 */
+function updatePixelHint() {
+  const box = $("cfg-pixel-hint");
+  const cb = $("cfg-pixel-art");
+  const sel = $("cfg-style-preset");
+  if (!box || !cb) return;
+  const on = !!cb.checked;
+  const pid = (sel && sel.value) || "none";
+  const parts = [];
+  if (on) {
+    parts.push("已开启：生成图会被量化成硬色块，并由 image-rendering: pixelated 放大成真像素。");
+  }
+  if (!on && pid === "pixel_art") {
+    parts.push("你选了「像素风」预设但没开这个开关 —— 那只改了提示词，图仍是平滑的。"
+      + "要真正的像素块请勾选它。");
+  }
+  box.textContent = parts.join(" ");
+  box.classList.toggle("hidden", parts.length === 0);
+}
+
 function openSettings() {
-  api("/api/config").then(async ({ config, model_detected, llm_mock }) => {
+  // 先开弹窗，再异步填值：SD/Comfy 探测再慢也不会让按钮「点下去几秒没反应」。
+  $("modal-settings").classList.remove("hidden");
+  $("settings-hint").textContent = "读取配置…";
+  // 配置还没填完时禁止保存，避免用户手快用空字段覆盖 config.json。
+  const saveBtn = $("btn-settings-save");
+  if (saveBtn) saveBtn.disabled = true;
+  api("/api/config").then(async ({ config, model_detected, llm_mock,
+                                  style_presets, style_preset, style_custom,
+                                  style_custom_max }) => {
     $("cfg-llm-url").value = config.llm.base_url || "";
     // Key 不回显（掩码会误导"已配置"）：留空 + 状态提示
     $("cfg-llm-key").value = "";
@@ -668,15 +1246,48 @@ function openSettings() {
     $("cfg-cutout-mode").value = config.image.cutout_mode || "ai";
     $("cfg-portrait-update").value = (config.game || {}).portrait_update || "stage";
     $("cfg-style-mode").value = (config.game || {}).style_mode || "default";
+    // F1-U1（t65）：画风预设下拉 —— 选项/当前值/上限**全部来自后端**（前端零硬编码）
+    const styleSel = $("cfg-style-preset");
+    if (styleSel) {
+      S.stylePresets = Array.isArray(style_presets) ? style_presets : [];
+      styleSel.innerHTML = "";
+      S.stylePresets.forEach((p) => {
+        if (!p || !p.id) return;
+        const o = document.createElement("option");
+        o.value = String(p.id);
+        o.textContent = String(p.name || p.id);
+        if (p.hint && p.hint.pixel_art) o.dataset.pixelHint = "1";
+        styleSel.appendChild(o);
+      });
+      if (!S.stylePresets.length) {     // 后端异常时也要可用：至少保留 none
+        const o = document.createElement("option");
+        o.value = "none"; o.textContent = "无风格（默认，与旧行为一致）";
+        styleSel.appendChild(o);
+      }
+      styleSel.value = String(style_preset || "none");
+      if (!styleSel.value) styleSel.value = "none";
+    }
+    const customEl = $("cfg-style-custom");
+    if (customEl) {
+      customEl.value = String(style_custom || "");
+      if (style_custom_max) customEl.maxLength = Number(style_custom_max) || 300;
+    }
+    updateStyleHint();
     if ($("cfg-inject-outline")) $("cfg-inject-outline").checked = (config.game || {}).inject_outline !== false;
     $("cfg-vram-mode").value = config.image.vram_mode || "mid";
     if ($("cfg-wai-adapt")) $("cfg-wai-adapt").checked = config.image.wai_adapt !== false;
+    // t68：像素化开关（image.pixel_art，默认关 ⇒ 严格 !!）
+    if ($("cfg-pixel-art")) $("cfg-pixel-art").checked = !!config.image.pixel_art;
     if ($("cfg-tsf-explicit")) $("cfg-tsf-explicit").checked = !!config.image.tsf_explicit;
     if ($("cfg-tsf-plan-llm")) $("cfg-tsf-plan-llm").checked = config.image.tsf_plan_llm !== false;
     if ($("cfg-stage-style")) $("cfg-stage-style").value = config.image.stage_style || "auto";
     if ($("cfg-portrait-quality")) $("cfg-portrait-quality").value = config.image.portrait_quality || "mid";
     if ($("cfg-bg-quality")) $("cfg-bg-quality").value = config.image.background_quality || "mid";
     if ($("cfg-cg-quality")) $("cfg-cg-quality").value = config.image.cg_quality || "mid";
+    // 1.8.0 绘画线路优化：成品缓存 / 节能 / 缓存上限
+    if ($("cfg-gen-cache")) $("cfg-gen-cache").checked = config.image.gen_cache !== false;
+    if ($("cfg-eco-mode")) $("cfg-eco-mode").checked = !!config.image.eco_mode;
+    if ($("cfg-gen-cache-mb")) $("cfg-gen-cache-mb").value = config.image.gen_cache_mb || 384;
     const mi = $("cfg-model-info");
     if (model_detected) {
       mi.innerHTML = "🧠 检测到模型：" + escapeHtml(
@@ -698,9 +1309,14 @@ function openSettings() {
       } catch { /* 无会话则保持默认 */ }
     }
     $("settings-hint").textContent = "";
+    if (saveBtn) saveBtn.disabled = false;
     loadInjects();
-    $("modal-settings").classList.remove("hidden");
-  }).catch((e) => toast("读取配置失败：" + e.message));
+  }).catch((e) => {
+    $("settings-hint").textContent = "读取配置失败：" + e.message;
+    // 读不到配置就保持禁用保存：避免用旧/空字段覆盖 config.json
+    if (saveBtn) saveBtn.disabled = true;
+    toast("读取配置失败：" + e.message);
+  });
 }
 // —— UI 绑定段 bindUiPart09（t37：自模块顶层收敛至此，内容逐字未改）——
 function bindUiPart09() {
@@ -724,6 +1340,14 @@ function bindUiPart10() {
   if ($("cfg-img-provider")) {
     $("cfg-img-provider").addEventListener("change", () =>
       toggleComfyRow($("cfg-img-provider").value));
+  }
+  // F1-U1（t65）：画风下拉的联动提示（只提示，不改任何开关）
+  if ($("cfg-style-preset")) {
+    $("cfg-style-preset").addEventListener("change", updateStyleHint);
+  }
+  // t68：像素化开关的联动提示（用户手动勾选/取消时刷新文案）
+  if ($("cfg-pixel-art")) {
+    $("cfg-pixel-art").addEventListener("change", updatePixelHint);
   }
 
   $("btn-comfy-scan").addEventListener("click", async () => {
@@ -801,6 +1425,8 @@ function bindUiPart10() {
         cutout_mode: $("cfg-cutout-mode").value,
         vram_mode: $("cfg-vram-mode").value,
         wai_adapt: $("cfg-wai-adapt") ? $("cfg-wai-adapt").checked : true,
+        // t68：像素化立绘（image.pixel_art，默认关）
+        pixel_art: $("cfg-pixel-art") ? $("cfg-pixel-art").checked : false,
         tsf_explicit: $("cfg-tsf-explicit") ? $("cfg-tsf-explicit").checked : false,
         tsf_plan_llm: $("cfg-tsf-plan-llm") ? $("cfg-tsf-plan-llm").checked : true,
         stage_style: $("cfg-stage-style") ? $("cfg-stage-style").value : "auto",
@@ -808,6 +1434,12 @@ function bindUiPart10() {
         background_quality: $("cfg-bg-quality").value,
         cg_quality: $("cfg-cg-quality").value,
         pink_rim: true,
+        // 1.8.0 线路优化（缺失控件时保留默认，不覆盖后端既有值）
+        gen_cache: $("cfg-gen-cache") ? $("cfg-gen-cache").checked : true,
+        eco_mode: $("cfg-eco-mode") ? $("cfg-eco-mode").checked : false,
+        gen_cache_mb: $("cfg-gen-cache-mb")
+          ? Math.max(64, Math.min(4096, parseInt($("cfg-gen-cache-mb").value, 10) || 384))
+          : 384,
       },
       game: {
         portrait_update: $("cfg-portrait-update").value,
@@ -815,8 +1447,15 @@ function bindUiPart10() {
         inject_outline: $("cfg-inject-outline").checked,
       },
     };
+    // F1-U1（t65）：画风两项（仅当控件存在时才随包发出 —— 兼容未同步更新 index.html 的旧副本）
+    if ($("cfg-style-preset")) config.image.style_preset = $("cfg-style-preset").value;
+    if ($("cfg-style-custom")) config.image.style_custom = $("cfg-style-custom").value.trim();
     try {
-      await api("/api/config", { method: "POST", body: JSON.stringify({ config }) });
+      const saved = await api("/api/config", { method: "POST", body: JSON.stringify({ config }) });
+      // 后端会把 style_custom 清洗/截断后回传：写回控件，避免"界面显示 300+ 字但其实只存了 300"
+      if (saved && $("cfg-style-custom") && typeof saved.style_custom === "string") {
+        $("cfg-style-custom").value = saved.style_custom;
+      }
       if (S.sid && $("inp-rating-game")) {
         try {
           await api(`/api/game/${S.sid}/policy`, {
@@ -1014,6 +1653,12 @@ function enterGame(state, { instant }) {
   // 停掉之后由各路径原有的 startPolling() 按需重新启动（读档后页面照常刷新）。
   Sched.stopAll();
   S.sid = state.sid;
+  // 读档/切局必须把活动 sid 一起落 localStorage。旧版游戏内「读档」只
+  // 调 playTurn，S.sid 仍指向旧对局，下一幕会写到旧档（表现=存档乱跳、
+  // 读档后继续推剧情又回到另一局）。这里统一覆盖所有进入对局的路径。
+  try {
+    if (state.sid) localStorage.setItem("galgame_sid", state.sid);
+  } catch { /* localStorage 不可用时忽略 */ }
   S.title = state.title;
   S.mode = state.mode || "tsf";
   S.mock = state.mock || { llm: true, image: true };
@@ -1030,6 +1675,7 @@ function enterGame(state, { instant }) {
   S.vn = state.vn || null;
   S.coc = state.coc || null;
   S.cocTsf = state.coc_tsf || null;      // C×T4（t56）：第四模式的 TSF 视图（服务端 t54 接口取值）
+  S.aiDirective = state.ai_directive || "";   // 1.9.20
   S.charStats = state.char_stats || null;
   S.charPrev = {};
   S.tsfPrev = null;
@@ -1059,6 +1705,8 @@ function enterGame(state, { instant }) {
   }
   playTurn(state, { instant });
   startPolling();
+  // 1.8.0：进入对局后刷新六段轨道 / 绘画状态 / 版本
+  if (window.UI2) UI2.onEnterGame();
 }
 
 /* 站位表：按同屏角色数分配横向站位（主角第一位，NPC 依次）。
@@ -1283,6 +1931,31 @@ function renderStatRows(box, states, prev, append) {
   });
 }
 
+function renderBond(boxId, who) {
+  const box = $(boxId);
+  if (!box) return;
+  if (!who || !who.bond) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  const b = who.bond;
+  const note = who.emotion_note && who.emotion_note.text
+    ? `<div class="bond-note" title="最近一次情感变化">💭 ${escapeHtml(who.emotion_note.text)}</div>`
+    : "";
+  const next = (b.next_at === null || b.next_at === undefined)
+    ? "已达最高阶段"
+    : `距下一阶段 ${Math.max(0, b.next_at - b.score)} 点好感`;
+  box.classList.remove("hidden");
+  box.innerHTML = `
+    <div class="bond-head">
+      <span class="bond-stage">❣ 关系 · ${escapeHtml(b.label)}</span>
+      <span class="bond-hint">${escapeHtml(b.hint)}</span>
+    </div>
+    <div class="bond-meta">好感 ${b.score}/100 · ${escapeHtml(next)}</div>
+    ${note}`;
+}
+
 function renderStatsPanels() {
   if (S.mode === "vn") renderVnPanel();
   else if (S.mode === "coc" || S.mode === "coc_tsf") renderCocPanel();   // C×T4（t56）
@@ -1308,7 +1981,7 @@ function renderCocPanel() {
     bars.innerHTML = "";
     const rows = [
       { name: "体力 STA", value: c.sta, max: c.sta_max },
-      { name: "理智 REA", value: c.rea, max: c.rea_max },
+      { name: "意志 REA", value: c.rea, max: c.rea_max },
     ];
     rows.forEach((r) => {
       const max = Math.max(1, Number(r.max) || 1);
@@ -1321,10 +1994,21 @@ function renderCocPanel() {
       bars.appendChild(row);
     });
   }
+  renderCocSan(c);
   const stats = $("coc-stats");
   if (stats && c.stats) {
-    stats.innerHTML = "属性：" + Object.keys(c.stats)
-      .map((k) => `${k} ${c.stats[k]}`).join("　");
+    // t72：原来只输出一行裸值（`属性：STR 5 DEX 5 …`），夹在 DOOM 与标签之间几乎看不见，
+    // 玩家会以为"这模式没有属性"。改成**带中文名的条目**（自身角色卡不属信息遮蔽 ——
+    // 遮蔽②指的是"不预告下次检定考哪个属性"，见 COC-DESIGN §2.10；禁止属性名的是
+    // **LLM 的 hint 文本**，§4.3）。
+    const NAMES = { STR: "力量", DEX: "敏捷", PER: "感知", KNW: "知识", CHA: "魅力" };
+    stats.innerHTML = `<div class="coc-stat-head">属性</div>` + Object.keys(c.stats)
+      .map((k) => {
+        const v = c.stats[k];
+        const nm = NAMES[k] || k;
+        return `<span class="coc-stat"><b>${escapeHtml(nm)}</b>`
+          + `<i>${escapeHtml(k)}</i><em>${escapeHtml(String(v))}</em></span>`;
+      }).join("");
   }
   const tags = $("coc-tags");
   if (tags && c.tag_counts) {
@@ -1336,6 +2020,65 @@ function renderCocPanel() {
     extra.innerHTML = c.extra.map((d) => `${d.name} ${d.value}`).join("　");
   }
   renderCocTsfBox();
+  renderCocInventory();
+}
+
+/* ---------- 1.9.19：SAN 理智面板 ----------
+   与 REA 分开显示：REA 是意志耐久，SAN 是经典 CoC 的理智值（0–99）。
+   状态文案与 bout 全部来自服务端 `coc.san_state`，前端不自己判定阈值。 */
+function renderCocSan(c) {
+  const box = $("coc-san-box");
+  if (!box) return;
+  if (c.san === undefined || c.san === null) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  const san = Number(c.san) || 0;
+  const cap = Number(c.san_max) || 99;
+  const pct = Math.max(0, Math.min(100, (san / Math.max(1, cap)) * 100));
+  const val = $("coc-san-val");
+  if (val) val.textContent = `${san} / ${cap}`;
+  const bar = $("coc-san-bar");
+  if (bar) bar.style.width = `${pct}%`;
+  const st = $("coc-san-state");
+  if (st) {
+    const s = c.san_state || {};
+    st.textContent = s.label || "SAN 稳定";
+    st.className = "model-info" + (s.state === "bout" || s.state === "fragile"
+      ? " coc-san-danger" : "");
+  }
+}
+
+/* 1.9.19：一次 SAN 检定。结果由服务端定稿；前端只显示并刷新整段 coc 面板。 */
+async function cocSanCheck() {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  const btn = $("btn-coc-san-check");
+  const hint = $("coc-san-msg");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/san-check`, {
+      method: "POST",
+      body: JSON.stringify({
+        loss: ($("coc-san-loss") || {}).value || "0/1d6",
+        difficulty: ($("coc-san-diff") || {}).value || "regular",
+        reason: "manual",
+      }),
+    });
+    if (r && r.coc) {
+      S.coc = r.coc.coc || r.coc;
+      S.cocTsf = r.coc.coc_tsf || S.cocTsf;
+    }
+    renderCocPanel();
+    const text = r.text || `1D100=${r.roll} / 目标 ${r.target}`;
+    if (hint) hint.textContent = text;
+    toast(r.success ? "SAN 检定成功" : "SAN 检定失败", 2600);
+  } catch (e) {
+    if (hint) hint.textContent = "SAN 检定失败：" + e.message;
+    toast("SAN 检定失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ---------- C×T4（t56）：CoC×TSF 的进度块 ----------
@@ -1372,7 +2115,329 @@ function renderCocTsfBox() {
   }
 }
 
-/* ---------- TSF 状态面板（主角：转变数值 + 自己的四项；其他角色：各自四项）---------- */
+/* ---------- U2（t66）：物品栏渲染 ----------
+   数据源：/api/game/{sid} 的 `coc.inventory`（t63 暴露；契约见 COC-STATS-ITEMS.md §9）。
+   本函数**只渲染**、不推断：物品的 kind / stat / equip_slot / usable 全部来自后端，
+   前端不维护第二份映射表（唯一真源在 data/coc/items.json）。
+
+   为什么"走 DEX/STR"必须显式显示：T↔检查的联动入口就是武器属性 ——
+   玩家不看到"这把刀走 DEX"，就无法理解"换武器 ⇒ 换检定属性"（t62 的联动）。 */
+
+const COC_KIND_CN = {
+  weapon: "武器", equipment: "装备", consumable: "消耗品", usable: "可用",
+  unknown: "未登记",
+};
+
+function cocKindCN(kind) {
+  return COC_KIND_CN[kind] || String(kind || "");
+}
+
+/* 物品的一句人话摘要：武器给"走 DEX"，消耗品给治疗目标，装备给可装备槽位。 */
+function cocItemHint(it) {
+  const parts = [cocKindCN(it.kind)];
+  if (it.kind === "weapon" && it.stat) parts.push(`走 ${it.stat}`);
+  if (it.equip_slot) {
+    const slots = (S.coc && S.coc.inventory && S.coc.inventory.slots) || {};
+    parts.push(`可装备到 ${slots[it.equip_slot] || it.equip_slot}`);
+  }
+  if (it.hand === "two") parts.push("双手");
+  if (it.cures === "minor") parts.push("治轻伤");
+  if (it.cures === "major") parts.push("治重伤");
+  return parts.join(" · ");
+}
+
+function renderCocInventory() {
+  const box = $("coc-inventory");
+  if (!box) return;
+  const inv = (S.coc && S.coc.inventory) || null;
+  if (!inv) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+
+  const count = $("coc-inv-count");
+  if (count) {
+    count.textContent = String((inv.counts && inv.counts.backpack) || 0);
+  }
+
+  // ---- 三个装备槽（契约 id：coc-inv-equip-R / -C / -B）----
+  const slots = inv.slots || {};
+  const eq = inv.equipped || {};
+  const byId = {};
+  (inv.backpack || []).forEach((x) => { byId[x.id] = x; });
+  const order = ["R", "C", "B"].filter((k) => k in slots)
+    .concat(Object.keys(slots).filter((k) => ["R", "C", "B"].indexOf(k) < 0));
+  order.forEach((k) => {
+    const box2 = $("coc-inv-equip-" + k);
+    if (!box2) return;
+    const cur = eq[k];
+    const label = escapeHtml(String(slots[k] || k));
+    if (!cur) { box2.innerHTML = `${label}：<i>空</i>`; return; }
+    const meta = byId[cur.id] || cur;
+    const stat = meta.stat ? `（走 ${escapeHtml(String(meta.stat))}）` : "";
+    const iid = escapeHtml(String(cur.id));
+    // 槽位里的卸下按钮用 `coc-inv-unequip-slot-<K>`（不与背包里按物品 id 命名的
+    // 契约按钮 `coc-inv-unequip-<itemId>` 撞 id —— 闸门会查重复 id）
+    box2.innerHTML = `${label}：<b>${escapeHtml(String(cur.name || cur.id))}</b>${stat}`
+      + ` <button id="coc-inv-unequip-slot-${escapeHtml(k)}"`
+      + ` class="btn mini ghost coc-inv-act" data-action="unequip"`
+      + ` data-slot="${escapeHtml(k)}">卸下</button>`;
+  });
+
+  // ---- 当前武器（判定属性的一眼可见入口） ----
+  const w = $("coc-inv-weapon");
+  if (w) {
+    w.textContent = inv.weapon
+      ? `⚔ 当前武器：${inv.weapon.name}（${inv.weapon.stat} 检定）`
+      : "⚔ 当前未装备武器";
+  }
+
+  // ---- t71（TSF×CoC 融合）：身体变化对物品/装备的影响（衣物档 + 属性修正） ----
+  const tsfBox = $("coc-inv-tsf");
+  if (tsfBox) {
+    // 数据可能在 coc.inventory.tsf_mech，也可能在 coc.panel.tsf_mech（两处都读，取有值的）
+    const mech = (inv && inv.tsf_mech)
+      || ((S.coc && S.coc.panel && S.coc.panel.tsf_mech) || null);
+    if (!mech || !mech.tier) {
+      tsfBox.textContent = "";
+      tsfBox.classList.add("hidden");
+    } else {
+      const sh = mech.shifts || {};
+      const parts = [];
+      Object.keys(sh).forEach((k) => {
+        const v = Number(sh[k]) || 0;
+        if (v !== 0) parts.push(`${k} ${v > 0 ? "+" : ""}${v}`);
+      });
+      const wd = mech.wardrobe || {};
+      let txt = `🧬 转变第 ${mech.tier} 档`;
+      if (wd.label) txt += ` · ${wd.label}`;
+      if (parts.length) txt += `　（属性 ${parts.join("　")}）`;
+      const pen = Number(mech.use_penalty) || 0;
+      if (pen > 0) txt += `　使用类操作 +${pen}`;
+      tsfBox.textContent = txt;
+      tsfBox.classList.remove("hidden");
+    }
+  }
+
+  // ---- 背包条目 ----
+  const list = $("coc-inv-list");
+  if (list) {
+    const bag = inv.backpack || [];
+    if (!bag.length) {
+      // t72：空背包要说清"为什么空"与"东西从哪来"，否则玩家会以为这模式根本没物品系统。
+      list.innerHTML = `<div class="model-info coc-inv-empty">`
+        + `背包是空的 —— 调查地点、触发事件卡、搜刮与购买都会把物品放进这里。`
+        + `拿到后可直接装备（武器走 R 槽、护符走 C 槽、衣物走 B 槽）。`
+        + `</div>`;
+    } else {
+      list.innerHTML = bag.map((it) => {
+        const name = escapeHtml(String(it.name || it.id));
+        const hint = escapeHtml(cocItemHint(it));
+        const eq = it.equipped ? " · 已装备" : "";
+        const iid = escapeHtml(String(it.id));
+        // t71（TSF×CoC 融合）：身体变化会让旧装备**不合身/握不住**。
+        // 后端已把 `wearable` / `block_reason` / `use_penalty` 放进每件物品的视图里，
+        // 这里要把它们变成玩家看得懂的东西 —— 否则"为什么装不上"只能靠猜。
+        const blocked = it.wearable === false && it.block_reason;
+        const reasonTxt = blocked ? cocReasonCN(it.block_reason) : "";
+        const pen = Number(it.use_penalty) || 0;
+        // 不可装备 ⇒ **不渲染装备按钮**（避免玩家点了才发现被拒）；
+        // 已装备的仍给"卸下"（卸下永远允许）。
+        let btn = "";
+        if (it.equipped && it.equip_slot) {
+          btn = `<button id="coc-inv-unequip-${iid}" class="btn mini ghost coc-inv-act"`
+            + ` data-action="unequip" data-slot="${escapeHtml(String(it.equip_slot))}">卸下</button>`;
+        } else if (it.equip_slot && !blocked) {
+          btn = `<button id="coc-inv-equip-${iid}" class="btn mini ghost coc-inv-act"`
+            + ` data-action="equip" data-item="${iid}">装备</button>`;
+        }
+        // 1.9.19：可用品（绷带/镇静剂/日记…）在前端就能直接使用；具体效果由服务端结算
+        if (it.usable) {
+          btn += `<button id="coc-inv-use-${iid}" class="btn mini ghost coc-inv-act"`
+            + ` data-action="use" data-item="${iid}">使用</button>`;
+        }
+        const tag = blocked
+          ? `<small class="coc-inv-blocked">⚠ ${escapeHtml(reasonTxt)}</small>`
+          : (pen > 0
+            ? `<small class="coc-inv-penalty">使用需额外耗时 +${pen}</small>`
+            : "");
+        return `<div class="coc-inv-item${blocked ? " coc-inv-unfit" : ""}"><span>${name}</span>`
+          + `<small class="model-info">${hint}${eq}</small>${tag}${btn}</div>`;
+      }).join("");
+    }
+  }
+
+  // ---- 仓库（结构已在视图里；当前没有任何动作会往里放东西，如实显示） ----
+  const sto = $("coc-inv-storage");
+  if (sto) {
+    const st = inv.storage || [];
+    sto.innerHTML = st.length
+      ? `<div class="model-info">仓库：${st.map((x) => escapeHtml(String(x.name || x.id))).join("　")}</div>`
+      : "";
+  }
+}
+
+/* 装备 / 卸下：走**受保护端点** POST /api/game/{sid}/coc/equip。
+   为什么必须走端点而不是直接改内存里的 S.coc：
+     · `equip`/`unequip` 是 `sanitize.PLAYER_ACTION_KEYS` 里的**玩家动作**，
+       只有服务端经 `Run.apply`（唯一写点）落账才会持久化并跑不变式；
+     · 前端自己改一份视图 = 造出第二条真相，读档就露。
+   失败时**必须展示后端给的 reason**（"为什么点不动"要可读，不能静默）。 */
+const COC_REASON_CN = {
+  not_in_backpack: "不在背包里",
+  not_equippable: "这件物品不能装备",
+  unregistered: "未登记的物品",
+  slot_empty: "该槽位本来就空着",
+  unknown_action: "未知操作",
+  no_effect: "没有发生变化",
+  ok: "已生效",
+  // t71（TSF×CoC 融合）：转变导致的不可用，原因要说清是"身体变了"而不是"物品坏了"
+  tsf_slot_unfit: "身体变化后已不合身，无法继续穿戴（需要更合身的衣物）",
+  tsf_hand_unfit: "身体变化后已无法有效使用（体格与握持半径变了）",
+  // 1.9.19：物品使用
+  not_usable: "这件物品不能直接使用",
+  not_usable_equipment: "装备类物品请用「装备」按钮",
+  no_matching_injury: "没有对应类型的伤势",
+  no_effect: "现在派不上用场",
+  use_failed: "使用没有生效（物品仍在背包里）",
+  // 1.9.19：固定商店
+  unknown_shop: "未知商店",
+  not_in_stock: "这件商品已经不在货架上",
+  insufficient_funds: "资金不足",
+  grant_failed: "物品没有进入背包",
+  take_failed: "物品没有从背包移除",
+  already_owned: "背包里已经有这件物品",
+};
+
+function cocReasonCN(reason) {
+  // 端点失败时 `reason` 的形态是 `<action>:<arg>(<code>)`（多个用 `;` 连接，来自引擎的
+  // `dropped`），例如 `equip:NoSuchThing(not_in_backpack)`、`unequip:C(slot_empty)`；
+  // 引擎内层函数则给**裸 code**（`not_in_backpack`）。两种都要能翻译，否则玩家会看到
+  // 原始英文码 —— 这是实测发现的一处真缺陷（窄匹配）。故：先取最后一对括号里的内容当 code。
+  const raw = String(reason || "").trim();
+  if (!raw) return "操作未成功";
+  const codeOf = (one) => {
+    const s = String(one || "").trim();
+    const m = s.match(/\(([^()]*)\)\s*$/);
+    return m ? m[1].trim() : s;
+  };
+  const tr = (c) => {
+    const code = codeOf(c);
+    if (COC_REASON_CN[code]) return COC_REASON_CN[code];
+    if (code.startsWith("stat_below:")) {
+      return "属性不足（" + code.slice("stat_below:".length) + "）";
+    }
+    if (code.startsWith("weapon_")) return "需要先装备武器";
+    if (code.indexOf(":") > 0) {           // 异常形态 `Name:msg` → 只显示消息体
+      const tail = code.slice(code.indexOf(":") + 1).trim();
+      if (tail) return tail;
+    }
+    return code || "操作未成功";
+  };
+  const parts = raw.split(";").map(tr).filter(Boolean);
+  return parts.length ? parts.join("；") : "操作未成功";
+}
+
+function cocInvMsg(text) {
+  const el = $("coc-inv-msg");
+  if (el) el.textContent = String(text || "");
+}
+
+async function cocInventoryAct(action, payload, btn) {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  if (btn) btn.disabled = true;
+  // 动作**前**的视图：用于反查"换装顶掉的是谁"（后端若没回 replaced 时的兜底）
+  const invBefore = (S.coc && S.coc.inventory) || {};
+  const eqBefore = invBefore.equipped || {};
+  const itemId = (payload && payload.item) || "";
+  const metaBefore = ((invBefore.backpack || []).find((x) => x.id === itemId)) || null;
+  const slotKey = (payload && payload.slot) || (metaBefore && metaBefore.equip_slot) || "";
+  const wasEquipped = slotKey ? (eqBefore[slotKey] || null) : null;
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/equip`, {
+      method: "POST",
+      body: JSON.stringify(Object.assign({ action }, payload || {})),
+    });
+    // 回填视图：**顶层 `inventory`** 是端点从 `equip_item` 直接带出来的**新鲜**视图，
+    // 是唯一权威来源；`coc.inventory` 是整段 coc 面板里的同一份数据
+    // （两个出口都应可用，但以顶层为准 —— 实测顶层一定是最新的）。
+    if (r && r.inventory) {
+      S.coc = Object.assign({}, S.coc || {}, { inventory: r.inventory });
+    } else if (r && r.coc && r.coc.inventory) {
+      S.coc = r.coc;
+    }
+    renderCocInventory();
+    if (r && r.ok) {
+      const what = action === "equip" ? "已装备" : "已卸下";
+      // 契约 §9.2：换装时后端会给 `replaced`。**优先用它**；若这条路径没带
+      // （历史版本 API 层未透传，t66 已在 server.py 补上），就从"动作前的视图"反查。
+      let replacedFrom = "";
+      let replaced = (r && r.replaced === undefined) ? null : (r && r.replaced);
+      if (replaced) replacedFrom = "后端字段";
+      const nowId = (r && r.item) || itemId;
+      if (!replaced && wasEquipped && wasEquipped.id !== nowId) {
+        replaced = wasEquipped.name || wasEquipped.id;
+        replacedFrom = "视图反查";
+      }
+      const who = (r && r.item) || payload.item || payload.slot || "";
+      const msg = action === "equip" && replaced
+        ? `${what}：${who}（替换下 ${replaced}）`
+        : `${what}：${who}`;
+      toast(msg);
+      cocInvMsg("✓ " + msg + (replaced ? ` · 来源=${replacedFrom}` : ""));
+    } else {
+      const reason = (r && r.reason) || "";
+      const msg = `操作未生效：${cocReasonCN(reason)}${reason ? `（${reason}）` : ""}`;
+      toast(msg);
+      cocInvMsg("✗ " + msg);
+    }
+    document.dispatchEvent(new CustomEvent(
+      action === "equip" ? "coc:inventory-equip" : "coc:inventory-unequip",
+      { detail: { item: (r && r.item) || payload.item || "",
+                  slot: (r && r.slot) || payload.slot || "",
+                  ok: !!(r && r.ok),
+                  reason: (r && r.reason) || "" } }));
+    document.dispatchEvent(new CustomEvent("coc:inventory-refresh",
+      { detail: { inventory: (S.coc && S.coc.inventory) || null } }));
+  } catch (e) {
+    // 网络/404/403 等也要有可读反馈（不能静默无反应）
+    toast("操作失败：" + e.message);
+    cocInvMsg("✗ 操作失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* 1.9.19：使用背包物品（绷带/医疗包/镇静剂/日记…）。服务端负责消耗与效果。 */
+async function cocUseItem(itemId, btn) {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  if (!itemId) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/use-item`, {
+      method: "POST",
+      body: JSON.stringify({ item: itemId }),
+    });
+    if (r && r.coc) {
+      S.coc = r.coc.coc || r.coc;
+      S.cocTsf = r.coc.coc_tsf || S.cocTsf;
+    } else if (r && r.inventory && S.coc) {
+      S.coc = Object.assign({}, S.coc, { inventory: r.inventory });
+    }
+    renderCocPanel();
+    if (r && r.ok) {
+      toast(r.text || "已使用");
+      cocInvMsg("✓ " + (r.text || "已使用"));
+    } else {
+      const why = cocReasonCN(r.reason || "");
+      toast("使用未生效：" + why);
+      cocInvMsg("✗ " + (r.text || why || "使用未生效"));
+    }
+  } catch (e) {
+    toast("使用失败：" + e.message);
+    cocInvMsg("✗ 使用失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function renderTsfPanel() {
   const tsfData = S.tsf;
@@ -1399,6 +2464,7 @@ function renderTsfPanel() {
   const bars = $("tsf-bars");
   if (!isProt) {                  // 其他角色：只显示 TA 自己的一套数值
     renderStatRows(bars, who.states, prev[who.name]);
+    renderBond("tsf-bond", who);
     return;
   }
   $("tsf-identity-text").textContent = tsfData.identity;
@@ -1416,6 +2482,7 @@ function renderTsfPanel() {
     bars.appendChild(hr);
     renderStatRows(bars, who.states, prev[who.name], true);
   }
+  renderBond("tsf-bond", who);
 }
 
 /* ---------- 普通模式面板（每个角色各自的心情 / 好感 / 性敏感 / 高潮度）---------- */
@@ -1426,10 +2493,12 @@ function renderVnPanel() {
   const who = selectedChar();
   if (who) {
     renderStatRows(box, who.states, (S.charPrev || {})[who.name]);
+    renderBond("vn-bond", who);
     return;
   }
   // 兼容旧服务端（没有 char_stats 时退回单一数值集）
   renderStatRows(box, (S.vn && S.vn.states) || []);
+  renderBond("vn-bond", null);
 }
 // —— UI 绑定段 bindUiPart16（t37：自模块顶层收敛至此，内容逐字未改）——
 function bindUiPart16() {
@@ -1607,6 +2676,7 @@ function playTurn(state, { instant }) {
   S.tsf = state.tsf;
   S.vn = state.vn;
   S.coc = state.coc || null;
+  S.aiDirective = state.ai_directive || S.aiDirective || "";
   // C×T4（t56）：每轮都用服务端新值刷新 TSF 视图（缺字段时保留旧值，避免面板闪空）
   if (state.coc_tsf) S.cocTsf = state.coc_tsf;
   if (state.assets) S.assets = state.assets;
@@ -1627,6 +2697,12 @@ function playTurn(state, { instant }) {
   if (state.char_stats) {
     S.charPrev = prevChars;
     S.charStats = state.char_stats;
+  }
+  // 1.9.0：关系里程碑只在正常推进时提示；读档/静默刷新不刷屏
+  if (!instant && Array.isArray(state.bond_up)) {
+    state.bond_up.slice(0, 3).forEach((ev) => {
+      toast(`💗 与「${ev.name}」的关系进入「${ev.label}」`, 3800);
+    });
   }
   renderStatsPanels();
   // 角色池随轮次更新（AI 引入的新角色立绘才能显示）
@@ -1676,6 +2752,8 @@ function playTurn(state, { instant }) {
   if (state.cg_active && !state.cg_saved) {
     saveCg("bridge", "");
   }
+  // 1.8.0：六段轨道与顶栏「绘画状态」随每幕刷新
+  if (window.UI2) UI2.onTurn();
 }
 
 function showDialogLine(instant) {
@@ -1698,6 +2776,7 @@ function typeText(el, text, instant) {
     el.textContent = text;
     S.typing = false;
     $("next-hint").classList.remove("hidden");
+    if (window.UI2) UI2.onTypingDone();
     return;
   }
   el.textContent = "";
@@ -1711,6 +2790,7 @@ function typeText(el, text, instant) {
     } else {
       S.typing = false;
       $("next-hint").classList.remove("hidden");
+      if (window.UI2) UI2.onTypingDone();
     }
   };
   step();
@@ -1776,8 +2856,45 @@ async function speakPhrase(text) {
 }
 
 function showChoices() {
+  if (window.UI2) UI2.cancelAuto();   // 出现选项：自动播放必须停（否则会跳过选择）
   $("next-hint").classList.add("hidden");
   const wrap = $("choices-wrap");
+  // 1.9.1：选项拖动防误触。鼠标从 A 拖到 B 时，浏览器默认会把整排文字
+  // 选成选区（看起来所有选项都亮），并且 mouseup 不再触发 click。
+  // 这里只做「拖动中抑制 hover 尾迹」；文本选择由 CSS user-select:none 关掉。
+  if (!wrap.dataset.dragBound) {
+    wrap.dataset.dragBound = "1";
+    const clearHot = () => {
+      wrap.querySelectorAll(".choice-btn.hot").forEach((b) => b.classList.remove("hot"));
+    };
+    const endDrag = () => {
+      wrap.classList.remove("dragging");
+      clearHot();
+    };
+    // QtWebEngine 的 :hover 在部分机器上会「粘住」上一条选项（移开也不消失），
+    // 因此不再依赖 CSS :hover，而用 JS 的 .hot 类做单点高亮，pointerleave 必清。
+    wrap.addEventListener("pointermove", (e) => {
+      const btn = e.target && e.target.closest
+        ? e.target.closest(".choice-btn") : null;
+      wrap.querySelectorAll(".choice-btn").forEach((b) => {
+        b.classList.toggle("hot", b === btn);
+      });
+    });
+    wrap.addEventListener("pointerdown", (e) => {
+      const btn = e.target && e.target.closest
+        ? e.target.closest(".choice-btn") : null;
+      if (btn) {
+        wrap.classList.add("dragging");
+        wrap.querySelectorAll(".choice-btn").forEach((b) => {
+          b.classList.toggle("hot", b === btn);
+        });
+      }
+    });
+    wrap.addEventListener("pointerup", endDrag);
+    wrap.addEventListener("pointercancel", endDrag);
+    wrap.addEventListener("pointerleave", endDrag);
+    wrap.addEventListener("dragstart", (e) => e.preventDefault());
+  }
   wrap.innerHTML = "";
   S.turn.choices.forEach((c, idx) => {
     const btn = document.createElement("button");
@@ -2162,7 +3279,9 @@ function applySpriteHeight(img) {
 
 function setSpriteImage(div, url) {
   const img = div.querySelector("img");
-  if (img.dataset.url === url) return;
+  // 同一 URL 已成功显示才跳过；若之前加载失败/没挂上 .show，允许重试，
+  // 否则「已生成但舞台没换」会一直卡在旧图。
+  if (img.dataset.url === url && img.classList.contains("show")) return;
   img.dataset.url = url;
   img.onload = () => {
     applySpriteHeight(img);
@@ -2193,19 +3312,61 @@ function applyBackground() {
     img.onload = () => {
       // 过期任务：切换期间背景又变了，直接丢弃（防止旧背景顶掉新背景）
       if (seq !== bgSeq) { img.remove(); return; }
+      // F1（t60）：**交叉淡入** —— 新图淡入期间旧图必须留着；新图完全可见后才移除旧图。
+      // 修的是什么（实测定位，不是猜测）：原实现里 `old.classList.remove("show")` 之后，
+      // 紧跟的"清理从未显示过的旧图"会把**刚刚被摘掉 .show 的旧图在同一帧 remove()**，
+      // 于是那句 `setTimeout(() => old.remove(), 1100)` 形同虚设 —— 旧图立刻消失，
+      // 而新图还要 1s 才淡入到 1 ⇒ 这 1s 里 `#bg-layer` 只剩渐变底色透出，
+      // 亮图→暗底→亮图 = 用户报的「加载下一幕黑白闪烁」。
+      // 采样证据（headless Edge + CDP，rAF 逐帧 + MutationObserver）：
+      //   修前 6 次换背景 → 6 个「0 张完全可见背景图」窗口，各 ~950ms，remove 6；
+      //   修后同法 → 0 个窗口（详见 FLICKER-PIXEL-FIX.md）。
       img.classList.add("show");
-      layer.querySelectorAll("img.show").forEach((old) => {
-        if (old === img) return;
-        old.classList.remove("show");
-        setTimeout(() => old.remove(), 1100);
+      const outgoing = [...layer.querySelectorAll("img.show")].filter((o) => o !== img);
+      outgoing.forEach((old) => {
+        old.classList.add("bg-out");   // 标记"待移除"：不让下面的清理提前摘掉它
+        let dropped = false;
+        const drop = () => { if (!dropped) { dropped = true; old.remove(); } };
+        // 新图 opacity→1 的过渡一结束就移除旧图；transitionend 不触发时（标签页隐藏等）超时兜底
+        img.addEventListener("transitionend", drop, { once: true });
+        setTimeout(drop, 1400);
       });
-      // 清理从未显示过的旧图（加载中被顶掉），避免元素堆积
-      layer.querySelectorAll("img").forEach((stale) => {
-        if (stale !== img && !stale.classList.contains("show")) stale.remove();
+      // 只清理**从未显示过**的陈旧图（加载中被顶掉的那种）；待移除的旧图保留到淡入完成
+      layer.querySelectorAll("img:not(.show):not(.bg-out)").forEach((stale) => {
+        if (stale !== img) stale.remove();
       });
     };
     layer.appendChild(img);
   }
+}
+
+/* 轮询补 CG：进入该幕时 CG 可能还在生成（cg_url 为空），生成完成后
+   playTurn 不会再跑，这里按 /assets 返回的 cg_url 把图补进全屏层。 */
+function applyCgFromPoll(data) {
+  if (!data || !data.cg_active || !data.cg_url) return;
+  const layer = document.getElementById("cg-layer");
+  if (!layer) return;
+  layer.classList.remove("hidden");
+  let img = layer.querySelector("img");
+  if (!img) {
+    img = document.createElement("img");
+    img.onload = () => img.classList.add("show");
+    layer.insertBefore(img, layer.firstChild);
+  }
+  if (img.getAttribute("src") !== data.cg_url) {
+    img.classList.remove("show");
+    img.src = data.cg_url;
+  }
+  if (!layer.querySelector(".cg-title")) {
+    const title = document.createElement("div");
+    title.className = "cg-title";
+    title.textContent = data.cg_title || "CG";
+    layer.appendChild(title);
+  }
+  layer.dataset.key = data.cg_key || "";
+  S.cgActive = true;
+  const sprites = document.getElementById("sprite-layer");
+  if (sprites) sprites.style.visibility = "hidden";
 }
 
 /* ---------- 资源轮询与生成提示 ---------- */
@@ -2216,9 +3377,17 @@ function hasPending() {
 }
 
 function updateGenBanner() {
-  const pendingPortraits = Object.values((S.assets && S.assets.portraits) || {})
-    .some((p) => p.status === "pending");
-  $("gen-banner").classList.toggle("hidden", !pendingPortraits);
+  const pendingList = Object.values((S.assets && S.assets.portraits) || {})
+    .filter((p) => p.status === "pending");
+  const banner = $("gen-banner");
+  banner.classList.toggle("hidden", !pendingList.length);
+  const txt = $("gen-banner-text");
+  if (txt && pendingList.length) {
+    // 1.8.0：给出「还有几张 + 当前在画谁」的可读进度，而不是一句固定文案
+    const label = (pendingList[0] && pendingList[0].label) || "";
+    txt.textContent = `🎨 正在绘制 ${pendingList.length} 张立绘${label ? " · " + label : ""}…`;
+  }
+  if (window.UI2) UI2.syncArtStatus();
 }
 
 function startPolling() {
@@ -2234,8 +3403,10 @@ function startPolling() {
         const line = S.turn && S.turn.dialogue[S.lineIdx];
         if (line) updateSprites(line.character, line.emotion);
         applyBackground();
+        applyCgFromPoll(data);
         const still = hasPending();
         updateGenBanner();
+        if (window.UI2) UI2.syncArtStatus();
         if (!still) stopPolling();
       } catch { /* 会话失效等，静默 */ }
     });
@@ -3028,7 +4199,7 @@ async function refreshSlotList() {
   const list = $("slot-list");
   list.innerHTML = "";
   try {
-    const data = await api(`/api/slots`);
+    const data = await api(`/api/slots?t=${Date.now()}`);
     if (!data.slots.length) {
       list.innerHTML = '<p class="hint-line">暂无存档</p>';
       return;
@@ -3046,9 +4217,9 @@ async function refreshSlotList() {
           const state = await api(`/api/slots/${s.slot_id}/load`,
             { method: "POST" });
           $("modal-slots").classList.add("hidden");
-          S.assets = state.assets;
-          S.bgMap = state.bg_map || S.bgMap;
-          playTurn(state, { instant: true });
+          // 必须走 enterGame，而不能只 playTurn：后者不会更新 S.sid /
+          // localStorage / 轮询与状态面板，下一幕会发到旧 sid（乱跳存档）。
+          enterGame(state, { instant: true });
           toast("已读取存档");
         } catch (e) {
           toast("读档失败：" + e.message);
@@ -3106,7 +4277,7 @@ function bindUiPart35() {
       });
       $("slot-name").value = "";
       $("slots-hint").textContent = `✓ 已存档（${r.name}）`;
-      refreshSlotList();
+      await refreshSlotList();
     } catch (e) {
       toast("存档失败：" + e.message);
     }
@@ -3185,6 +4356,10 @@ function fillSetupForm(st) {
   $("inp-catchphrases").value = (st.catchphrases || []).join(String.fromCharCode(10));
   if ($("uniform-en")) $("uniform-en").value = st.uniform_en || "";
   if ($("uniform-neg")) $("uniform-neg").value = st.uniform_neg || "";
+  if ($("uniform-name")) {
+    $("uniform-name").textContent = st.uniform_name
+      || (st.uniform_en ? "自定义制服" : "未启用预设");
+  }
   // 1.7.33 主角最终变化样式（开局面板）恢复
   const tsfTarget = st.tsf_target || {};
   if ($("tsf-target-build")) $("tsf-target-build").value = tsfTarget.build || "";
@@ -3425,6 +4600,9 @@ function collectAllSetup() {
     stat_config: collectStatConfig(),
     uniform_en: $("uniform-en").value.trim(),
     uniform_neg: $("uniform-neg").value.trim(),
+    uniform_name: ($("uniform-en").value.trim() || $("uniform-neg").value.trim())
+      ? ($("uniform-name") ? $("uniform-name").textContent.trim() : "") : "",
+    stage_count: Number(S.stageCount) || 0,
     tsf_target: collectTsfTarget(),
   };
 }
@@ -3509,7 +4687,7 @@ async function refreshSetupSlotList() {
   const list = $("slot-list-setup");
   if (!list) return;
   try {
-    const data = await api("/api/slots");
+    const data = await api(`/api/slots?t=${Date.now()}`);
     list.innerHTML = "";
     if (!data.slots.length) {
       list.innerHTML = '<p class="hint-line">暂无存档（游戏内顶栏「💾 存档」可创建）</p>';
@@ -3565,6 +4743,7 @@ async function refreshSetupSlotList() {
 /* ---------- 角色库：开局选择/导入复用 ---------- */
 
 let libPickTarget = "prot";
+let libPickCard = null;   // 1.9.0：目标为某张角色卡（per-card 📚）时回填这张卡
 window.__libImports = [];
 
 function rememberLibImport(roleName, name, dir) {
@@ -3574,11 +4753,14 @@ function rememberLibImport(roleName, name, dir) {
   arr.push({ name, role: roleName, dir: dir || "" });
 }
 
-async function openLibPicker(target) {
+async function openLibPicker(target, card = null) {
   libPickTarget = target;
+  libPickCard = card || null;
   $("libpick-hint").textContent = target === "prot"
     ? "选中后自动填入主角设定（外貌并入「外貌补充」，保证立绘一致）"
-    : "选中后自动新增一张角色卡；库内已有立绘将直接复用";
+    : (target === "card"
+      ? "选中后填入这张角色卡（名字/身份/外貌/性格/背景），已有立绘直接复用"
+      : "选中后自动新增一张角色卡；库内已有立绘将直接复用");
   try {
     const data = await api("/api/library");
     const grid = $("libpick-list");
@@ -3590,13 +4772,19 @@ async function openLibPicker(target) {
     chars.forEach((c) => {
       const card = document.createElement("div");
       card.className = "cg-item libpick-item";
+      const thumb = (c.variants || []).length
+        ? `<img src="/api/library/${encodeURIComponent(c.name)}/preview?dir=${encodeURIComponent(c.dir || "")}" alt="" loading="lazy">`
+        : '<div class="cg-thumb-empty">暂无立绘<br><small>可仅导入设定</small></div>';
       card.innerHTML = `
-        <img src="/api/library/${encodeURIComponent(c.name)}/preview?dir=${encodeURIComponent(c.dir || "")}" alt="" loading="lazy">
+        ${thumb}
         <div class="cg-caption">${escapeHtml(c.name)}
           ${c.dir && c.dir !== c.name ? `<span class="cg-type">${escapeHtml(c.dir)}</span>` : ""}
-          <span class="cg-type">${c.role === "主角" ? "主角" : "NPC"}</span>
+          <span class="cg-type">${escapeHtml(c.role || "NPC")}</span>
           <span class="cg-type">${(c.variants || []).length} 立绘</span>
+          ${c.background ? '<span class="cg-type ok">有背景</span>'
+            : '<span class="cg-type warn">背景待谱写</span>'}
           ${c.source_game ? `<span class="cg-type">来自「${escapeHtml(c.source_game)}」</span>` : ""}
+          ${c.background ? `<div class="cg-bg-preview">${escapeHtml(c.background.slice(0, 60))}…</div>` : ""}
         </div>`;
       card.addEventListener("click", async () => {
         try {
@@ -3607,8 +4795,17 @@ async function openLibPicker(target) {
             else if (a) { $("prot-extra").value = a; refreshAnchorPreview(); }
             rememberLibImport("主角", c.name, c.dir);
           } else {
-            addCharCard({ name: c.name, appearance: c.appearance || c.anchor || "",
-                          personality: c.personality || "" });
+            const payload = {
+              name: c.name, role: c.role || "",
+              appearance: c.appearance || c.anchor || "",
+              personality: c.personality || "",
+              background: c.background || "",
+            };
+            if (libPickTarget === "card" && libPickCard) {
+              fillCharCard(libPickCard, payload);
+            } else {
+              addCharCard(payload);
+            }
             rememberLibImport("NPC", c.name, c.dir);
           }
           $("modal-libpick").classList.add("hidden");
@@ -3627,6 +4824,500 @@ function bindUiPart39() {
   on("btn-lib-pick-prot", "click", () => openLibPicker("prot"));
   on("btn-lib-pick-npc", "click", () => openLibPicker("npc"));
   on("btn-libpick-close", "click", () => $("modal-libpick").classList.add("hidden"));
+  on("btn-libpick-adapt", "click", () => {
+    $("modal-libpick").classList.add("hidden");
+    openLegacy();
+  });
+}
+
+/* ---------- 1.9.0：随机制服 / 旧档案找回 ---------- */
+
+let uniformPresets = [];
+
+async function loadUniformPresets() {
+  try {
+    const data = await api("/api/uniforms");
+    uniformPresets = data.presets || [];
+    const sel = $("uniform-preset-select");
+    if (!sel) return;
+    sel.innerHTML = '<option value="">从预设选择…</option>';
+    uniformPresets.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.icon || "👔"} ${p.name} · ${p.note || ""}`;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    console.warn("[tsf] 制服库加载失败：", e);
+  }
+}
+
+function applyUniformPreset(p, { toastIt = true } = {}) {
+  if (!p) return;
+  if ($("uniform-en")) $("uniform-en").value = p.en || "";
+  if ($("uniform-neg")) $("uniform-neg").value = p.neg || "";
+  if ($("uniform-name")) $("uniform-name").textContent = `${p.icon || "👔"} ${p.name}`;
+  if ($("uniform-preset-select")) $("uniform-preset-select").value = p.id || "";
+  if (toastIt) toast(`🎲 已选用制服「${p.name}」：${p.note || ""}`, 3200);
+}
+
+async function randomUniformSetup() {
+  const btn = $("btn-uniform-random");
+  if (!btn) return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "抽取中…";
+  try {
+    const scene = [
+      $("inp-world") ? $("inp-world").value : "",
+      $("inp-outline") ? $("inp-outline").value : "",
+      $("inp-title") ? $("inp-title").value : "",
+    ].join(" ").slice(0, 600);
+    const p = await api("/api/uniforms/random", {
+      method: "POST",
+      body: JSON.stringify({
+        scene,
+        exclude: $("uniform-preset-select") && $("uniform-preset-select").value
+          ? [$("uniform-preset-select").value] : [],
+      }),
+    });
+    applyUniformPreset(p);
+  } catch (e) {
+    toast("随机制服失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+function clearUniformSetup() {
+  if ($("uniform-en")) $("uniform-en").value = "";
+  if ($("uniform-neg")) $("uniform-neg").value = "";
+  if ($("uniform-name")) $("uniform-name").textContent = "未启用预设";
+  if ($("uniform-preset-select")) $("uniform-preset-select").value = "";
+}
+
+async function randomOutfit() {
+  const btn = $("btn-outfit-random");
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    const p = await api("/api/uniforms/random", {
+      method: "POST",
+      body: JSON.stringify({ scene: (S.turn && S.turn.scene) || "" }),
+    });
+    pendingOutfit = p.name;
+    $("outfit-preset").value = p.name;
+    document.querySelectorAll(".outfit-preset-btn").forEach((b) => b.classList.remove("sel"));
+    if ($("outfit-random-note")) {
+      $("outfit-random-note").textContent =
+        `🎲 ${p.icon || "👔"} ${p.name} · ${p.en}`;
+    }
+    updateOutfitHint();
+    toast(`🎲 抽到「${p.name}」，点「✔ 确定换装」生效`, 3200);
+  } catch (e) {
+    toast("随机制服失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+let legacyScanData = null;
+
+function renderLegacyScan(data) {
+  legacyScanData = data;
+  const summary = $("legacy-summary");
+  const counts = data.counts || {};
+  if (summary) {
+    summary.innerHTML =
+      `<b>可找回：</b> 设定档案 ${counts.storylines || 0} 份 · ` +
+      `旧角色卡 ${counts.roster || 0} 张 · 对局 zip ${counts.archives || 0} 个 ` +
+      `<span class="hint">（需要处理 ${counts.need_action || 0} 项）</span>`;
+  }
+  const list = $("legacy-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const rows = [];
+  (data.storylines || []).forEach((s) => {
+    rows.push(`<div class="legacy-item">
+      <span class="legacy-badge ${s.status === "exists" ? "ok" : "warn"}">${escapeHtml(s.status)}</span>
+      <b>${escapeHtml(s.title || s.name || s.file)}</b>
+      <small>${escapeHtml(s.source)} · ${s.characters} 角色 · ${escapeHtml(s.note || "")}</small></div>`);
+  });
+  (data.roster || []).forEach((r) => {
+    rows.push(`<div class="legacy-item">
+      <span class="legacy-badge warn">旧角色卡</span>
+      <b>${escapeHtml(r.name)}</b>
+      <small>${escapeHtml(r.dir)} · ${r.variants} 立绘 · 待补：${escapeHtml((r.needs || []).join(" / "))}</small></div>`);
+  });
+  (data.archives || []).forEach((a) => {
+    rows.push(`<div class="legacy-item">
+      <span class="legacy-badge ok">zip</span>
+      <b>${escapeHtml(a.title || a.file)}</b>
+      <small>${escapeHtml(a.source)} · ${escapeHtml(a.file)}</small></div>`);
+  });
+  list.innerHTML = rows.length ? rows.join("")
+    : '<p class="hint-line">没有发现可找回的旧档案（或已全部适配）。</p>';
+}
+
+async function scanLegacy() {
+  const hint = $("legacy-hint");
+  if (hint) hint.textContent = "扫描中…";
+  try {
+    const data = await api("/api/legacy/scan");
+    renderLegacyScan(data);
+    if (hint) hint.textContent = "扫描完成";
+  } catch (e) {
+    if (hint) hint.textContent = "扫描失败：" + e.message;
+    toast("旧档案扫描失败：" + e.message);
+  }
+}
+
+async function openLegacy() {
+  $("modal-legacy").classList.remove("hidden");
+  await scanLegacy();
+}
+
+async function restoreLegacy() {
+  const btn = $("btn-legacy-restore");
+  const hint = $("legacy-hint");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "找回中…";
+  if (hint) hint.textContent = "正在找回并适配，请稍候…";
+  try {
+    const result = await api("/api/legacy/restore", {
+      method: "POST",
+      body: JSON.stringify({
+        storylines: $("legacy-storylines").checked,
+        roster: $("legacy-roster").checked,
+        archives: $("legacy-archives").checked,
+        generate_backgrounds: $("legacy-bg").checked,
+      }),
+    });
+    const s = result.storylines || {};
+    const r = result.roster || {};
+    const a = result.archives || {};
+    const text = `✓ 设定档案：新建 ${s.created || 0} · 适配 ${s.adapted || 0}` +
+      `｜旧角色卡：适配 ${r.adapted || 0}（谱写背景 ${r.backgrounds || 0}）` +
+      `｜zip：导入 ${(a.imported || []).length}`;
+    if ($("legacy-result")) $("legacy-result").textContent = text;
+    if (hint) hint.textContent = "完成";
+    toast(text, 5000);
+    await scanLegacy();
+    if (typeof refreshSetupList === "function") refreshSetupList();
+  } catch (e) {
+    if (hint) hint.textContent = "找回失败：" + e.message;
+    toast("旧档案找回失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+/* ---------- 1.9.20：AI 控制台 ----------
+   数据源：GET /api/game/{sid}/ai/console
+   · entries：每次主剧情 LLM 调用的请求 / reasoning_content / 原始输出 / 用量 / 解析结果
+   · dialogue：当前幕的对话（可编辑）
+   · directive：持续注入的玩家导演指令
+   这里不伪造思考：模型没返回 reasoning_content 时，明确显示“未返回”。 */
+function aiStatusText(e) {
+  if (!e) return "";
+  if (e.status === "pending") return "生成中";
+  if (e.status === "error") return "失败";
+  return "完成";
+}
+
+async function openAiConsole() {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  $("modal-ai").classList.remove("hidden");
+  await refreshAiConsole();
+  switchAiTab("think");
+}
+
+async function refreshAiConsole() {
+  if (!S.sid) return;
+  try {
+    const r = await api(`/api/game/${S.sid}/ai/console`);
+    S.aiData = r;
+    const rows = r.entries || [];
+    if (!S.aiEntryId || !rows.some((x) => x.id === S.aiEntryId)) {
+      S.aiEntryId = rows.length ? rows[0].id : null;
+    }
+    renderAiEntries();
+    renderAiEntryDetail();
+    const dir = $("ai-directive");
+    if (dir) dir.value = r.directive || "";
+    renderAiDialogueEditor(r.dialogue || []);
+    const msg = $("ai-msg");
+    if (msg) msg.textContent = `${rows.length} 条调用记录 · ${r.mode || ""}`;
+  } catch (e) {
+    const msg = $("ai-msg");
+    if (msg) msg.textContent = "读取 AI 控制台失败：" + e.message;
+  }
+}
+
+function renderAiEntries() {
+  const box = $("ai-entry-list");
+  if (!box) return;
+  const rows = (S.aiData && S.aiData.entries) || [];
+  if (!rows.length) {
+    box.innerHTML = `<div class="model-info">还没有调用记录。<br>推进一幕或重新开局后再打开这里。</div>`;
+    return;
+  }
+  box.innerHTML = rows.map((e) => {
+    const cls = e.id === S.aiEntryId ? " on" : "";
+    const dot = e.status === "error" ? "error" : (e.status === "pending" ? "pending" : "");
+    const ms = Number(e.duration_ms) || 0;
+    return `<div class="ai-entry${cls}" data-id="${escapeHtml(String(e.id))}">`
+      + `<b><i class="ai-dot ${dot}"></i>${escapeHtml(String(e.label || "剧情"))}</b>`
+      + `<small>${escapeHtml(String(e.time || ""))} · ${escapeHtml(aiStatusText(e))}`
+      + `${ms ? ` · ${(ms / 1000).toFixed(1)}s` : ""}</small>`
+      + `<small>${escapeHtml(String(e.model || "—"))}</small></div>`;
+  }).join("");
+}
+
+function renderAiEntryDetail() {
+  const box = $("ai-entry-detail");
+  if (!box) return;
+  const e = ((S.aiData && S.aiData.entries) || []).find((x) => x.id === S.aiEntryId);
+  if (!e) {
+    box.textContent = "还没有记录。推进一幕后再打开这里。";
+    return;
+  }
+  const usage = e.usage || {};
+  const tokens = [usage.prompt_tokens, usage.completion_tokens, usage.total_tokens]
+    .filter((x) => x !== undefined && x !== null).join(" / ");
+  const msgs = (e.messages || []).map((m) => {
+    const role = String(m.role || "");
+    return `<details class="ai-msg-row ${escapeHtml(role)}">`
+      + `<summary><b>${escapeHtml(role)}</b> · ${String(m.content || "").length} 字</summary>`
+      + `<pre>${escapeHtml(String(m.content || ""))}</pre></details>`;
+  }).join("");
+  const parse = e.parse
+    ? (e.parse.ok ? "JSON 解析成功" : `JSON 解析失败：${e.parse.error || ""}`)
+    : "未记录解析状态";
+  box.innerHTML = `
+    <div><b>${escapeHtml(String(e.label || "剧情"))}</b>
+      <span class="hint">${escapeHtml(String(e.time || ""))} · ${escapeHtml(aiStatusText(e))}
+      ${e.duration_ms ? `· ${(Number(e.duration_ms) / 1000).toFixed(1)}s` : ""}</span></div>
+    <div class="model-info">模型 ${escapeHtml(String(e.model || "—"))}
+      · temperature ${e.temperature === null || e.temperature === undefined ? "—" : escapeHtml(String(e.temperature))}
+      ${e.mock ? " · 演示模式" : ""}
+      ${tokens ? ` · tokens ${escapeHtml(tokens)}` : ""}</div>
+    <h4>思考 / reasoning_content</h4>
+    ${e.reasoning
+      ? `<pre>${escapeHtml(String(e.reasoning))}</pre>`
+      : `<div class="model-info">该模型没有返回 reasoning_content；这里不伪造思考，只展示真实请求与输出。</div>`}
+    <h4>本次收到的消息（system 可能很长，默认折叠）</h4>
+    ${msgs || `<div class="model-info">无消息记录</div>`}
+    <h4>原始输出</h4>
+    ${e.raw ? `<pre>${escapeHtml(String(e.raw))}</pre>` : `<div class="model-info">无输出</div>`}
+    <h4>解析 / 错误</h4>
+    <div class="model-info">${escapeHtml(parse)}${e.error ? `<br>错误：${escapeHtml(String(e.error))}` : ""}</div>`;
+}
+
+function switchAiTab(tab) {
+  const t = ["think", "edit", "direct"].includes(tab) ? tab : "think";
+  S.aiTab = t;
+  $("ai-pane-think").classList.toggle("hidden", t !== "think");
+  $("ai-pane-edit").classList.toggle("hidden", t !== "edit");
+  $("ai-pane-direct").classList.toggle("hidden", t !== "direct");
+  $("ai-tab-think").className = "btn mini " + (t === "think" ? "primary" : "ghost");
+  $("ai-tab-edit").className = "btn mini " + (t === "edit" ? "primary" : "ghost");
+  $("ai-tab-direct").className = "btn mini " + (t === "direct" ? "primary" : "ghost");
+  if (t === "edit") renderAiDialogueEditor((S.aiData && S.aiData.dialogue) || []);
+  if (t === "direct") {
+    const dir = $("ai-directive");
+    if (dir) dir.value = (S.aiData && S.aiData.directive) || "";
+  }
+}
+
+function renderAiDialogueEditor(dialogue) {
+  const box = $("ai-dialogue-editor");
+  if (!box) return;
+  const rows = (dialogue || []).slice(0, 6);
+  if (!rows.length) rows.push({ character: "旁白", emotion: "neutral", text: "" });
+  box.innerHTML = rows.map((d) => `
+    <div class="ai-dialogue-row">
+      <input class="text-input ai-char" maxlength="20" value="${escapeHtml(String(d.character || "旁白"))}"
+        placeholder="角色">
+      <input class="text-input ai-emo" maxlength="20" value="${escapeHtml(String(d.emotion || "neutral"))}"
+        placeholder="情绪">
+      <textarea class="text-input ai-text" maxlength="800"
+        placeholder="这一行台词 / 旁白">${escapeHtml(String(d.text || ""))}</textarea>
+      <button class="btn mini ghost ai-del" type="button" title="删除这一行">✕</button>
+    </div>`).join("");
+}
+
+function aiAddDialogueLine() {
+  const box = $("ai-dialogue-editor");
+  if (!box) return;
+  const n = box.querySelectorAll(".ai-dialogue-row").length;
+  if (n >= 6) { toast("最多 6 行对话"); return; }
+  const row = document.createElement("div");
+  row.className = "ai-dialogue-row";
+  row.innerHTML = `<input class="text-input ai-char" maxlength="20" value="旁白" placeholder="角色">
+    <input class="text-input ai-emo" maxlength="20" value="neutral" placeholder="情绪">
+    <textarea class="text-input ai-text" maxlength="800" placeholder="这一行台词 / 旁白"></textarea>
+    <button class="btn mini ghost ai-del" type="button" title="删除这一行">✕</button>`;
+  box.appendChild(row);
+}
+
+function aiCollectDialogue() {
+  const out = [];
+  document.querySelectorAll("#ai-dialogue-editor .ai-dialogue-row").forEach((row) => {
+    const text = row.querySelector(".ai-text").value.trim();
+    if (!text) return;
+    out.push({
+      character: row.querySelector(".ai-char").value.trim() || "旁白",
+      emotion: row.querySelector(".ai-emo").value.trim() || "neutral",
+      text,
+    });
+  });
+  return out;
+}
+
+async function saveAiDialogue() {
+  if (!S.sid) return;
+  const dialogue = aiCollectDialogue();
+  if (!dialogue.length) { toast("至少保留一行非空对话"); return; }
+  const btn = $("btn-ai-save-dialogue");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/game/${S.sid}/ai/edit-dialogue`, {
+      method: "POST", body: JSON.stringify({ dialogue }),
+    });
+    if (r && r.state) {
+      S.turn = r.state;
+      S.lineIdx = 0;
+      $("choices-wrap").classList.add("hidden");
+      $("choices-wrap").innerHTML = "";
+      S.coc = r.state.coc || S.coc;
+      renderStatsPanels();
+      showDialogLine(true);
+    }
+    $("ai-edit-msg").textContent = "✓ 已保存；画面台词已替换。";
+    toast("对话已修改", 2600);
+    await refreshAiConsole();
+    switchAiTab("edit");
+  } catch (e) {
+    $("ai-edit-msg").textContent = "保存失败：" + e.message;
+    toast("保存对话失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveAiDirective() {
+  if (!S.sid) return;
+  const text = $("ai-directive").value.trim();
+  try {
+    const r = await api(`/api/game/${S.sid}/ai/directive`, {
+      method: "POST", body: JSON.stringify({ text }),
+    });
+    S.aiDirective = (r && r.directive) || "";
+    if (S.aiData) S.aiData.directive = S.aiDirective;
+    $("ai-direct-msg").textContent = text
+      ? "✓ 已保存；下一轮剧情生成开始生效。"
+      : "✓ 已清空；下一轮恢复默认风格。";
+    toast("导演指令已保存", 2600);
+  } catch (e) {
+    $("ai-direct-msg").textContent = "保存失败：" + e.message;
+    toast("保存导演指令失败：" + e.message);
+  }
+}
+
+async function clearAiConsole() {
+  if (!S.sid) return;
+  if (!window.confirm("清空本局的 AI 调用记录？（不影响对话与游戏进度）")) return;
+  try {
+    await api(`/api/game/${S.sid}/ai/console/clear`, { method: "POST" });
+    S.aiEntryId = null;
+    await refreshAiConsole();
+    renderAiEntryDetail();
+    toast("AI 调用记录已清空");
+  } catch (e) {
+    toast("清空失败：" + e.message);
+  }
+}
+
+function bindUiPart42() {
+  const onSafe = (id, ev, fn) => {
+    const el = $(id);
+    if (el) el.addEventListener(ev, fn);
+  };
+  onSafe("btn-uniform-random", "click", randomUniformSetup);
+  onSafe("btn-uniform-clear", "click", clearUniformSetup);
+  onSafe("uniform-preset-select", "change", () => {
+    const id = $("uniform-preset-select").value;
+    const p = uniformPresets.find((x) => x.id === id);
+    if (p) applyUniformPreset(p, { toastIt: false });
+  });
+  ["uniform-en", "uniform-neg"].forEach((id) => onSafe(id, "input", () => {
+    if ($("uniform-name") && ($("uniform-en").value || $("uniform-neg").value)) {
+      $("uniform-name").textContent = "自定义制服";
+      if ($("uniform-preset-select")) $("uniform-preset-select").value = "";
+    }
+  }));
+  onSafe("btn-outfit-random", "click", randomOutfit);
+  onSafe("btn-legacy", "click", openLegacy);
+  onSafe("btn-legacy-scan", "click", scanLegacy);
+  onSafe("btn-legacy-restore", "click", restoreLegacy);
+  onSafe("btn-legacy-close", "click", () => $("modal-legacy").classList.add("hidden"));
+
+  // 1.9.20：AI 控制台
+  onSafe("btn-ai-console", "click", openAiConsole);
+  onSafe("btn-ai-close", "click", () => $("modal-ai").classList.add("hidden"));
+  onSafe("btn-ai-close2", "click", () => $("modal-ai").classList.add("hidden"));
+  onSafe("btn-ai-refresh", "click", refreshAiConsole);
+  onSafe("btn-ai-clear", "click", clearAiConsole);
+  onSafe("ai-tab-think", "click", () => switchAiTab("think"));
+  onSafe("ai-tab-edit", "click", () => switchAiTab("edit"));
+  onSafe("ai-tab-direct", "click", () => switchAiTab("direct"));
+  onSafe("btn-ai-add-line", "click", aiAddDialogueLine);
+  onSafe("btn-ai-save-dialogue", "click", saveAiDialogue);
+  onSafe("btn-ai-save-directive", "click", saveAiDirective);
+  const aiEntries = $("ai-entry-list");
+  if (aiEntries) {
+    aiEntries.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".ai-entry");
+      if (!row) return;
+      S.aiEntryId = row.dataset.id || null;
+      renderAiEntries();
+      renderAiEntryDetail();
+    });
+  }
+  const aiEditor = $("ai-dialogue-editor");
+  if (aiEditor) {
+    aiEditor.addEventListener("click", (ev) => {
+      const del = ev.target.closest(".ai-del");
+      if (!del) return;
+      const row = del.closest(".ai-dialogue-row");
+      if (row) row.remove();
+    });
+  }
+
+  // 1.9.4：QtWebEngine 的 <select> 原生弹层关闭后可能留下上一项的选中高亮/
+  // 残影；同时鼠标点过的按钮会保留 :focus 外环。选中/点击后主动 blur 并让
+  // 弹窗轻量重绘一次，清掉焦点与原生弹层缓存。
+  document.addEventListener("change", (e) => {
+    const sel = e.target;
+    if (!sel || sel.tagName !== "SELECT") return;
+    try { sel.blur(); } catch { /* 忽略 */ }
+    const box = sel.closest(".modal-box");
+    if (box) {
+      // 不改布局，只触发一次合成重绘；下一帧恢复，避免留下 transform 层。
+      const old = box.style.transform;
+      box.style.transform = "translateZ(0)";
+      requestAnimationFrame(() => { box.style.transform = old; });
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (e.detail <= 0) return;          // 键盘触发不夺焦点
+    const btn = e.target.closest && e.target.closest("button");
+    if (btn) setTimeout(() => { try { btn.blur(); } catch { /* 忽略 */ } }, 0);
+  });
 }
 
 /* ---------- 对局归档：导出 / 导入 / 下载 / 删除 ---------- */
@@ -3753,6 +5444,226 @@ function bindUiPart40() {
   });
 }
 
+/* ---------- 1.9.19：固定商店场景 ----------
+   进入/切换/购买/重掷全部走服务端；前端只渲染服务端给的库存与价格，
+   不自己算钱、不自己生成商品（避免"前端一份、后端一份"的第二真相）。 */
+async function openShopCatalog() {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/shop`);
+    S.shopCatalog = (r && r.shops) || [];
+    if (r && r.coc) S.coc = r.coc.coc || S.coc;
+    $("modal-shop").classList.remove("hidden");
+    renderShopTabs(S.shopCatalog);
+    const first = S.shopId || (S.shopCatalog[0] && S.shopCatalog[0].id) || "general_store";
+    await openShopTab(first);
+  } catch (e) {
+    toast("商店打不开：" + e.message);
+  }
+}
+
+async function openShopTab(shopId) {
+  if (!S.sid || !shopId) return;
+  const msg = $("shop-msg");
+  if (msg) msg.textContent = "正在推门……";
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/shop/open`, {
+      method: "POST",
+      body: JSON.stringify({ shop: shopId }),
+    });
+    S.shop = r.shop || null;
+    S.shopId = shopId;
+    if (r && r.coc) S.coc = r.coc.coc || S.coc;
+    renderShopTabs(S.shopCatalog || []);
+    renderShop(r.shop, r.coc);
+    if (msg) msg.textContent = "";
+  } catch (e) {
+    if (msg) msg.textContent = "进店失败：" + e.message;
+    toast("进店失败：" + e.message);
+  }
+}
+
+function renderShopTabs(shops) {
+  const box = $("shop-tabs");
+  if (!box) return;
+  box.innerHTML = (shops || []).map((s) =>
+    `<button type="button" class="btn mini ${s.id === S.shopId ? "primary" : "ghost"} shop-tab"`
+    + ` data-shop="${escapeHtml(String(s.id))}">`
+    + `${escapeHtml(String(s.name || s.id))}</button>`).join("");
+}
+
+function renderShop(view, fullState) {
+  const desc = $("shop-desc");
+  const stock = $("shop-stock");
+  const funds = $("shop-funds");
+  if (!view) {
+    if (desc) desc.textContent = "货架是空的。";
+    if (stock) stock.innerHTML = "";
+    return;
+  }
+  if (desc) {
+    desc.innerHTML = `<div class="shop-scene">${escapeHtml(String(view.scene || ""))}</div>`
+      + `<div class="shop-owner">店主：${escapeHtml(String(view.owner || "—"))}` +
+      (view.greeting ? `　“${escapeHtml(String(view.greeting))}”` : "") + `</div>`;
+  }
+  const bag = (((fullState || {}).coc || {}).inventory || {}).backpack || [];
+  const owned = new Set(bag.map((x) => String(x.id)));
+  if (funds) funds.textContent = `持有 ${view.funds} FND · 本轮第 ${view.reroll + 1} 次进货`;
+  if (stock) {
+    stock.innerHTML = (view.stock || []).map((it) => {
+      const have = it.owned || owned.has(String(it.id));
+      const dis = have ? " disabled" : "";
+      const tag = have ? `<small class="shop-owned">已在背包</small>`
+        : `<small class="shop-desc">${escapeHtml(String(it.desc || ""))}</small>`;
+      return `<div class="shop-item${have ? " shop-item-owned" : ""}">`
+        + `<div class="shop-item-head"><b>${escapeHtml(String(it.name || it.id))}</b>`
+        + `<em>${Number(it.price) || 0} FND</em></div>`
+        + `<div class="shop-meta">${escapeHtml(String(it.rarity || "common"))}`
+        + (it.san_restore ? ` · SAN +${escapeHtml(String(it.san_restore))}` : "")
+        + (it.cures ? ` · 治${it.cures === "major" ? "重伤" : "轻伤"}` : "") + `</div>`
+        + tag
+        + `<button class="btn mini primary shop-buy" data-shop="${escapeHtml(String(view.id))}"`
+        + ` data-item="${escapeHtml(String(it.id))}"${dis}>购买</button></div>`;
+    }).join("") || `<div class="model-info">货架空了。可以重掷，或下次再来。</div>`;
+  }
+}
+
+async function shopBuy(itemId, btn) {
+  if (!S.sid || !S.shop) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/shop/buy`, {
+      method: "POST",
+      body: JSON.stringify({ shop: S.shop.id, item: itemId }),
+    });
+    if (r && r.coc) S.coc = r.coc.coc || S.coc;
+    if (r && r.shop) S.shop = r.shop;
+    renderShop(S.shop, r && r.coc);
+    const msg = $("shop-msg");
+    if (r && r.ok) {
+      if (msg) msg.textContent = `✓ 买到「${r.name || itemId}」，花费 ${r.price} FND。`;
+      toast(`已购买：${r.name || itemId}`, 2600);
+    } else {
+      const why = cocReasonCN(r.reason || "");
+      if (msg) msg.textContent = "✗ 购买未生效：" + why;
+      toast("购买未生效：" + why);
+    }
+  } catch (e) {
+    toast("购买失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function shopReroll() {
+  if (!S.sid || !S.shop) return;
+  const btn = $("btn-shop-reroll");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/shop/reroll`, {
+      method: "POST",
+      body: JSON.stringify({ shop: S.shop.id }),
+    });
+    if (r && r.coc) S.coc = r.coc.coc || S.coc;
+    if (r && r.shop) S.shop = r.shop;
+    renderShop(S.shop, r && r.coc);
+    const msg = $("shop-msg");
+    if (msg) msg.textContent = "✓ 重新进货（DOOM 已按规则增加）。";
+    toast("已重新进货", 2400);
+  } catch (e) {
+    toast("重掷失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function cocSearchLoot() {
+  if (!S.sid) return;
+  const btn = $("btn-coc-search");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/game/${S.sid}/coc/search`, {
+      method: "POST",
+      body: JSON.stringify({ location: "" }),
+    });
+    if (r && r.coc) S.coc = r.coc.coc || S.coc;
+    renderCocPanel();
+    const el = $("coc-loot-msg");
+    if (r && r.ok) {
+      toast(r.text || (r.found ? `找到 ${r.name}` : "什么也没找到"), 3200);
+      if (el) el.textContent = r.text || "";
+    } else {
+      toast("搜刮失败：" + (r.reason || "未知原因"));
+      if (el) el.textContent = "搜刮失败：" + (r.reason || "未知原因");
+    }
+  } catch (e) {
+    toast("搜刮失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* —— UI 绑定段 bindUiPart41（t66 / U2：物品栏装备与卸下）——
+   用**事件委托**挂在容器上：背包条目每次渲染都会重建，逐条 addEventListener
+   会随渲染次数泄漏监听器；委托只绑一次，且天然覆盖后加的条目。
+   绑定放进 bindUiPartNN（而非模块顶层）是为了不抬高顶层零缩进绑定棘轮。 */
+function bindUiPart41() {
+
+  const listBox = $("coc-inv-list");
+  if (listBox) {
+    listBox.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".coc-inv-act");
+      if (!btn) return;
+      ev.preventDefault();
+      // t66 修（真缺陷）：背包列表里**既有「装备」也有「卸下」按钮**，而这里原先**写死 equip**
+      // ⇒ 点"卸下"实际发出的是 {"action":"equip","item":""}（CDP fetch 记录实测：status=200
+      // 但 reason=not_in_backpack），界面与后端都不变，玩家看到的是"点了没反应"。
+      // 现在按按钮自己声明的 data-action 派发：卸下走 slot（契约 §9 的 coc-inv-unequip-<id>）。
+      const action = String(btn.dataset.action || "equip");
+      if (action === "use") {
+        cocUseItem(btn.dataset.item || "", btn);
+        return;
+      }
+      const act = (action === "unequip") ? "unequip" : "equip";
+      cocInventoryAct(act,
+        act === "unequip" ? { slot: btn.dataset.slot || "" }
+                          : { item: btn.dataset.item || "" },
+        btn);
+    });
+  }
+
+  const slotBox = $("coc-inv-slots");
+  if (slotBox) {
+    slotBox.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".coc-inv-act");
+      if (!btn) return;
+      ev.preventDefault();
+      cocInventoryAct("unequip", { slot: btn.dataset.slot || "" }, btn);
+    });
+  }
+
+  // 1.9.19：SAN / 固定商店 / 搜刮
+  on("btn-coc-san-check", "click", cocSanCheck);
+  on("btn-coc-shop", "click", openShopCatalog);
+  on("btn-coc-search", "click", cocSearchLoot);
+  on("btn-shop-close", "click", () => $("modal-shop").classList.add("hidden"));
+  on("btn-shop-reroll", "click", shopReroll);
+  const shopTabs = $("shop-tabs");
+  if (shopTabs) {
+    shopTabs.addEventListener("click", (ev) => {
+      const b = ev.target.closest(".shop-tab");
+      if (b) openShopTab(b.dataset.shop || "");
+    });
+  }
+  const shopStock = $("shop-stock");
+  if (shopStock) {
+    shopStock.addEventListener("click", (ev) => {
+      const b = ev.target.closest(".shop-buy");
+      if (b && !b.disabled) shopBuy(b.dataset.item || "", b);
+    });
+  }
+}
+
 /* ---------- 启动：恢复上次会话 ---------- */
 /* t37：显式 UI 初始化入口。
    原先 124 条 DOM 绑定零缩进散落在模块顶层，任一 id 缺失会让**后续绑定整体失效**
@@ -3769,6 +5680,7 @@ function bindUi() {
     bindUiPart26, bindUiPart27, bindUiPart28, bindUiPart29, bindUiPart30,
     bindUiPart31, bindUiPart32, bindUiPart33, bindUiPart34, bindUiPart35,
     bindUiPart36, bindUiPart37, bindUiPart38, bindUiPart39, bindUiPart40,
+    bindUiPart41, bindUiPart42,
   ];
   const failed = [];
   for (const fn of parts) {
@@ -3793,6 +5705,7 @@ function bindUi() {
   addCharCard();
   refreshMockBanner();
   loadPresetGrid();
+  loadUniformPresets();
   applyStoryFromUrl();
   ensureSetupList();
   refreshSetupSlotList();
@@ -3800,6 +5713,7 @@ function bindUi() {
   try {
     const v = await api("/api/version");
     S.version = v.version;
+    if (window.UI2) UI2.setVersion();
   } catch { /* 忽略 */ }
   try {
     const u = await api("/api/update-state");

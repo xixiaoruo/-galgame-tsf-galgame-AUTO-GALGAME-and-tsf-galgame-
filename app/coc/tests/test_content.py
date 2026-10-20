@@ -18,6 +18,12 @@ from app.coc import paths
 from app.coc import provenance as P
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ID_RE = re.compile(r"^C-\d{3,4}$")
 STAT_NAMES = {"STR", "DEX", "PER", "KNW", "CHA"}
 THREATS = {"SAFE", "LOW", "DANGEROUS", "DOOMED"}

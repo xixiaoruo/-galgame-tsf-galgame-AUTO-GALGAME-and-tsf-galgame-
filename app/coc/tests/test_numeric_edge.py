@@ -22,6 +22,12 @@ from app.coc import provenance as PR
 from app.coc import sanitize as S
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 class _BoomFloat:
     """哨兵：`float()` 时抛**非算术**异常（旧写法会漏掉这类）。"""

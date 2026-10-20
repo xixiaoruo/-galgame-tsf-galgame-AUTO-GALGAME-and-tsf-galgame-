@@ -18,7 +18,7 @@
      "check": {
       "stat": "KNW",
       "threat": "LOW",
-      "dc": 0
+      "dc": -1
      },
      "success": {
       "exp": 5
@@ -125,13 +125,18 @@
      "check": {
       "stat": "PER",
       "threat": "LOW",
-      "dc": 0
+      "dc": -1
      },
      "success": {
       "exp": 6
      },
      "failure": {
       "rea": -2
+     },
+     "requirements": {
+      "stat_min": {
+       "PER": 6
+      }
      }
     },
     {
@@ -195,7 +200,7 @@
      "check": {
       "stat": "STR",
       "threat": "LOW",
-      "dc": 0
+      "dc": -2
      },
      "success": {
       "exp": 8,
@@ -205,12 +210,42 @@
      },
      "failure": {
       "sta": -2
+     },
+     "requirements": {
+      "stat_min": {
+       "STR": 7
+      },
+      "weapon": true,
+      "weapon_any": [
+       "FireAxe"
+      ]
      }
     },
     {
      "text": "放弃，走楼梯",
      "success": {
       "doom": 1
+     }
+    },
+    {
+     "text": "用随身带的家伙撬门缝",
+     "requirements": {
+      "weapon": true
+     },
+     "check": {
+      "stat": "STR",
+      "threat": "LOW",
+      "dc": -2,
+      "weapon_stat": true
+     },
+     "success": {
+      "exp": 6,
+      "flags": {
+       "fire_door_opened": true
+      }
+     },
+     "failure": {
+      "sta": -2
      }
     }
    ],

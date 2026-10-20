@@ -11,9 +11,11 @@ import uuid
 
 import asyncio   # B-05/M-02：命令场面 CG 合成走 asyncio.to_thread（t15 授权改动）
 
+from . import characters as charm
 from . import config as cfgmod
 from . import game
 from . import prompts
+from . import scenes as scenemod
 from . import vn_prompts
 from .image import ImageClient
 from .llm import LLMClient, LLMError, MockSetup
@@ -57,10 +59,20 @@ async def random_setup() -> dict:
     llm = LLMClient(cfg)
     if llm.mock:
         return MockSetup.random()
-    return await llm.chat_json([
-        {"role": "system", "content": vn_prompts.VN_RANDOM_SETUP_SYSTEM},
-        {"role": "user", "content": "请生成一个全新的开局设定。"},
-    ], temperature=1.0)
+    try:
+        data = await llm.chat_json([
+            {"role": "system", "content": vn_prompts.VN_RANDOM_SETUP_SYSTEM},
+            {"role": "user", "content": "请生成一个全新的开局设定。"},
+        ], temperature=1.0)
+        if (not isinstance(data, dict)
+                or not str(data.get("world") or "").strip()
+                or not isinstance(data.get("characters"), list)
+                or not data.get("characters")):
+            raise LLMError("随机设定缺少 world/characters")
+        return data
+    except LLMError as e:
+        log.warning("VN random_setup 失败，回退本地随机设定：%s", e)
+        return MockSetup.random()
 
 
 def sanitize_delta(delta, keys: list[str] | None = None) -> dict:
@@ -187,6 +199,11 @@ def char_states_block(session: dict, config: list[dict] | None = None) -> str:
     lines.append("（含义：" + "；".join(f"{c['name']}={c['hint']}" for c in cfg) + "）")
     lines.append("主角的「好感」指 TA 对当前互动对象的亲近度，其余角色的「好感」"
                  "指该角色对主角的好感度。")
+    rel = relationship_block(session)
+    if rel:
+        lines.append("【关系阶段与情感记忆（称呼、距离感与主动性必须与此相符；"
+                     "关系升级要写出铺垫，不能凭空跳到恋人）】")
+        lines.append(rel)
     return "\n".join(lines)
 
 
@@ -239,15 +256,274 @@ def char_schema(session: dict) -> str:
     return ", ".join(f'"{c["key"]}": 0' for c in _char_stat_config(session))
 
 
+# ---------- 关系阶段 / 情感记忆（1.9.0）----------
+#
+# 旧版只有四个 0-100 数值：心情、好感、性敏感、高潮度。数值本身能变，
+# 但 AI 不知道「现在算什么关系」，玩家也只在面板上看到四个数字。1.9.0
+# 在不增加新数值键（不破坏旧档/自定义状态栏）的前提下补了三层：
+#   1) 关系阶段：由「好感」映射成 陌生→认识→熟悉→亲近→心动→依恋→恋人，
+#      注入提示词，要求 AI 的称呼、距离感、主动性随阶段变化；
+#   2) 情感记忆：每幕有实际变化时记一条「场景 + 原因 + 数值」，注入最近几条，
+#      让 AI 能回扣前文，而不是每幕重新认识一次；
+#   3) 缺席衰减：长期不出场的角色，心情回归平静、身体反应与好感缓慢回落，
+#      避免「放置半年还是满好感」。
+#
+# 所有派生状态都存 session（旧档首次访问时懒初始化），不改 char_states 的键。
+
+BOND_STAGES: list[tuple[int, str, str]] = [
+    (0, "陌生", "彼此还不熟，保持礼貌距离"),
+    (15, "认识", "知道名字与日常身份，会点头打招呼"),
+    (30, "熟悉", "能自然搭话，开始互相留意"),
+    (45, "亲近", "愿意分享私事，有了一些默契"),
+    (60, "心动", "目光会为对方停留，容易在意细节"),
+    (75, "依恋", "情绪被对方牵动，会主动靠近"),
+    (90, "恋人", "彼此确认了特别的地位"),
+]
+
+_MEMORY_LIMIT = 80
+_BOND_EVENT_LIMIT = 60
+
+
+def bond_stage(affection: int) -> dict:
+    """好感值 → 关系阶段（纯函数，供面板/提示词/测试共用）。"""
+    try:
+        v = max(0, min(100, int(affection)))
+    except (TypeError, ValueError):
+        v = 0
+    idx = 0
+    for i, (threshold, _label, _hint) in enumerate(BOND_STAGES):
+        if v >= threshold:
+            idx = i
+    threshold, label, hint = BOND_STAGES[idx]
+    nxt = BOND_STAGES[idx + 1][0] if idx + 1 < len(BOND_STAGES) else None
+    return {"index": idx, "label": label, "hint": hint,
+            "threshold": threshold, "next_at": nxt, "score": v}
+
+
+def _bond_store(session: dict) -> dict:
+    store = session.get("bond_stage")
+    if not isinstance(store, dict):
+        store = {}
+        session["bond_stage"] = store
+    return store
+
+
+def _emotion_notes(session: dict) -> dict:
+    notes = session.get("emotion_notes")
+    if not isinstance(notes, dict):
+        notes = {}
+        session["emotion_notes"] = notes
+    return notes
+
+
+def _emotion_memory(session: dict) -> list[dict]:
+    mem = session.get("emotion_memory")
+    if not isinstance(mem, list):
+        mem = []
+        session["emotion_memory"] = mem
+    return mem
+
+
+def _absence_store(session: dict) -> dict:
+    store = session.get("char_absence")
+    if not isinstance(store, dict):
+        store = {}
+        session["char_absence"] = store
+    return store
+
+
+def ensure_bonds(session: dict) -> dict:
+    """确保每个角色都有关系阶段记录（旧档懒迁移，不覆盖玩家进度）。"""
+    store = ensure_char_states(session)
+    bonds = _bond_store(session)
+    for name in char_names(session):
+        st = store.get(name) or {}
+        stage = bond_stage(int(st.get("affection", 0)))
+        cur = bonds.get(name)
+        if not isinstance(cur, dict):
+            bonds[name] = {"index": stage["index"], "label": stage["label"],
+                           "score": stage["score"]}
+        else:
+            # 数值被玩家/读档改动时，以当前好感重算，但保留历史最高阶段
+            cur["label"] = stage["label"]
+            cur["score"] = stage["score"]
+            cur["index"] = int(cur.get("index", stage["index"]))
+            if stage["index"] > cur["index"]:
+                cur["index"] = stage["index"]
+    return bonds
+
+
+def bond_view(session: dict, name: str) -> dict:
+    ensure_bonds(session)
+    store = ensure_char_states(session)
+    st = store.get(name) or {}
+    stage = bond_stage(int(st.get("affection", 0)))
+    cur = (_bond_store(session).get(name) or {})
+    # 面板展示「当前好感对应阶段」；历史最高阶段单独给出（不覆盖显示）
+    return dict(stage, peak_index=int(cur.get("index", stage["index"])),
+                peak_label=BOND_STAGES[min(int(cur.get("index", stage["index"])),
+                                           len(BOND_STAGES) - 1)][1])
+
+
+def emotion_note(session: dict, name: str) -> dict | None:
+    note = _emotion_notes(session).get(name)
+    return dict(note) if isinstance(note, dict) else None
+
+
+def _choice_text(session: dict) -> str:
+    try:
+        choice = session["log"][-1].get("choice") or {}
+    except (KeyError, IndexError):
+        return ""
+    return str(choice.get("text", "")).strip()[:60]
+
+
+def record_turn_emotions(session: dict, turn: dict) -> list[dict]:
+    """记录本幕情感变化 + 关系里程碑；返回本幕升级的角色列表。
+
+    必须在 states_delta 已应用、scene 已确定之后调用。
+    """
+    store = ensure_char_states(session)
+    bonds = _bond_store(session)
+    delta = turn.get("states_delta") if isinstance(turn.get("states_delta"), dict) else {}
+    scene = str(turn.get("scene", "") or "……")[:30]
+    choice = _choice_text(session)
+    prot = session["protagonist"]["name"]
+    ups: list[dict] = []
+    notes = _emotion_notes(session)
+    mem = _emotion_memory(session)
+    for name in char_names(session):
+        d = delta.get(name)
+        meaningful = {}
+        if isinstance(d, dict) and d:
+            meaningful = {k: int(v) for k, v in d.items()
+                          if k in ("mood", "affection", "arousal", "climax")
+                          and int(v) != 0}
+            if meaningful:
+                bits = []
+                for k, label in (("affection", "好感"), ("mood", "心情"),
+                                 ("arousal", "敏感"), ("climax", "高潮")):
+                    if meaningful.get(k):
+                        v = meaningful[k]
+                        bits.append(f"{label}{'+' if v > 0 else ''}{v}")
+                reason = choice or "剧情推进"
+                text = f"在「{scene}」：{reason}（{'、'.join(bits)}）"
+                note = {"text": text[:160], "scene": scene,
+                        "turn": len(session.get("log") or []) + 1,
+                        "delta": meaningful}
+                notes[name] = note
+                mem.append({"name": name, **note})
+                if len(mem) > _MEMORY_LIMIT:
+                    del mem[:len(mem) - _MEMORY_LIMIT]
+        st = store.get(name) or {}
+        cur_aff = int(st.get("affection", 0))
+        d_aff = int(meaningful.get("affection", 0)) if meaningful else 0
+        before_stage = bond_stage(cur_aff - d_aff)
+        stage = bond_stage(cur_aff)
+        old = bonds.get(name) or {}
+        old_idx = int(old.get("index", before_stage["index"]))
+        # 关系里程碑：只有「本幕跨过阈值」才算升级；历史峰值已更高时不重复
+        if stage["index"] > old_idx:
+            bonds[name] = {"index": stage["index"], "label": stage["label"],
+                           "score": stage["score"]}
+            ev = {"name": name, "label": stage["label"],
+                  "from": BOND_STAGES[old_idx][1], "turn": len(session.get("log") or []) + 1,
+                  "scene": scene, "protagonist": name == prot}
+            ups.append(ev)
+            events = session.setdefault("bond_events", [])
+            events.append(ev)
+            if len(events) > _BOND_EVENT_LIMIT:
+                del events[:len(events) - _BOND_EVENT_LIMIT]
+    if ups:
+        turn["bond_up"] = ups
+    return ups
+
+
+def apply_absence_decay(session: dict, present: list[str] | None = None,
+                        *, is_opening: bool = False) -> dict:
+    """长期不出场的角色缓慢回归：心情向 45、敏感/高潮回落、好感每 4 幕 -1。
+
+    只在非开局幕调用；主角永不衰减。返回实际衰减的角色与数值（便于测试）。
+    """
+    if is_opening or not session.get("log"):
+        return {}
+    store = ensure_char_states(session)
+    absent = _absence_store(session)
+    present = {str(x) for x in (present or [])}
+    prot = session["protagonist"]["name"]
+    changed: dict[str, dict] = {}
+    for name in char_names(session):
+        if name == prot:
+            absent.pop(name, None)
+            continue
+        if name in present:
+            absent.pop(name, None)
+            continue
+        n = int(absent.get(name, 0) or 0) + 1
+        absent[name] = n
+        st = store.get(name)
+        if not isinstance(st, dict):
+            continue
+        before = dict(st)
+        # 每 2 幕：心情向 45 靠 1，敏感 -1；每幕：高潮 -5；每 4 幕：好感 -1
+        if n % 2 == 0:
+            mood = int(st.get("mood", 45))
+            if mood > 45:
+                st["mood"] = mood - 1
+            elif mood < 45:
+                st["mood"] = mood + 1
+            if int(st.get("arousal", 0)) > 0:
+                st["arousal"] = max(0, int(st["arousal"]) - 1)
+        if int(st.get("climax", 0)) > 0:
+            st["climax"] = max(0, int(st["climax"]) - 5)
+        if n % 4 == 0 and int(st.get("affection", 0)) > 0:
+            st["affection"] = max(0, int(st["affection"]) - 1)
+        diff = {k: st[k] - before.get(k, st[k]) for k in st
+                if st[k] != before.get(k, st[k])}
+        if diff:
+            changed[name] = {"absent_turns": n, "delta": diff}
+    return changed
+
+
+def relationship_block(session: dict) -> str:
+    """关系阶段 + 最近情感记忆（注入提示词）。空会话返回空串。"""
+    names = char_names(session)
+    if not names:
+        return ""
+    ensure_bonds(session)
+    mem = _emotion_memory(session)
+    lines = []
+    for name in names:
+        b = bond_view(session, name)
+        lines.append(f"- {name}：关系 {b['label']}（好感 {b['score']}/100，"
+                     f"{b['hint']}）")
+    # 每个角色只保留最近一条记忆，避免长局提示词膨胀
+    latest = {}
+    for m in mem:
+        latest[m.get("name")] = m
+    recent = [m for m in latest.values() if m.get("text")]
+    if recent:
+        lines.append("最近的情感记忆（相关时可自然回扣，不要机械复述）：")
+        for m in recent[-6:]:
+            lines.append(f"- {m['text']}")
+    return "\n".join(lines)
+
+
 def panel_view_chars(session: dict, config: list[dict] | None = None) -> dict:
-    """前端右侧面板数据：每个角色一组数值 + 谁是主角。"""
+    """前端右侧面板数据：每个角色一组数值 + 关系阶段 + 最近情感。"""
     cfg = config if isinstance(config, list) and config else _char_stat_config(session)
     store = ensure_char_states(session)
     prot = session["protagonist"]["name"]
+    ensure_bonds(session)
     return {
         "characters": [
             {"name": name,
              "is_protagonist": name == prot,
+             "role": next((c.get("role", "") for c in
+                           ([session["protagonist"]] + (session.get("characters") or []))
+                           if c.get("name") == name), ""),
+             "bond": bond_view(session, name),
+             "emotion_note": emotion_note(session, name),
              "states": [
                  {"key": c["key"], "name": c["name"], "icon": c["icon"],
                   "value": int((store.get(name) or {}).get(c["key"], c["start"])),
@@ -333,19 +609,18 @@ def _sanitize_turn(turn: dict, emotions: list[str], characters: list[dict],
                 outfit[k] = v
 
     return {
-        "scene": str(turn.get("scene", "")).strip() or "……",
-        "background_hint": str(turn.get("background_hint", "")).strip(),
+        "scene": str(turn.get("scene", "")).strip()[:30] or "……",
+        "background_hint": str(turn.get("background_hint", "")).strip()[:200],
         "is_new_background": bool(turn.get("is_new_background")),
         "dialogue": dialogue[:6],
         "choices": choices[:4],
         "present": present,
         "new_names": list(dict.fromkeys(new_names)),
         "new_characters": [
-            {"name": str(c.get("name", "")).strip()[:12],
-             "appearance": str(c.get("appearance", "")).strip()[:300],
-             "personality": str(c.get("personality", "")).strip()[:200]}
+            charm.sanitize_character(c)
             for c in (turn.get("new_characters") or [])
-            if isinstance(c, dict) and str(c.get("name", "")).strip()
+            if isinstance(c, dict)
+            and str(charm.sanitize_character(c).get("name", "")).strip()
         ][:3],
         "outfit": outfit,
         "cg": {"active": cg_active, "title": cg_title, "prompt": cg_prompt},
@@ -393,6 +668,11 @@ def _vn_system(session: dict) -> str:
         states_schema=states_schema,
         bias_hint=bias_hint,
     )
+    # 1.9.20：玩家导演指令（持续生效；放在模板之后，避免 format 的花括号误伤）
+    _dir = str(session.get("ai_directive") or "").strip()
+    if _dir:
+        system += ("\n\n【玩家导演指令（本局持续生效，优先级高于默认风格；"
+                   "但不得违反内容分级政策）】\n" + _dir[:500])
     # API 前置注入：启用中的注入文本拼到 system prompt 最前面（全局生效）
     from . import inject as inject_mod
     return inject_mod.inject_block(system)
@@ -503,6 +783,10 @@ def _apply_turn_states(session: dict, turn: dict, mock: bool) -> None:
         delta = {n: {c["key"]: 1 for c in cfg} for n in char_names(session)}
         turn["states_delta"] = delta
     apply_char_delta(session, delta)
+    # 1.9.0 感情机制（与 TSF 同源）：缺席回归 + 情感记忆/关系里程碑
+    apply_absence_decay(session, turn.get("present") or [],
+                        is_opening=not bool(session.get("log")))
+    record_turn_emotions(session, turn)
 
 
 def _post_turn(session: dict, turn: dict) -> None:
@@ -511,21 +795,29 @@ def _post_turn(session: dict, turn: dict) -> None:
     existing = {c["name"] for c in pool}
     prot_name = session["protagonist"]["name"]
     adult = session.get("adult", False)
-    candidates = list(turn.get("new_characters", []))
+    # 1.9.0：与 TSF 同一条「只认真正在场的新角色」规则——LLM 幻觉出来的
+    # new_characters/new_names（不在 present 里）不再入池、不再白画一张立绘。
+    present = set(turn.get("present") or [])
+    candidates = [c for c in turn.get("new_characters", [])
+                  if c.get("name") in present]
     for name in turn.get("new_names", []):
-        if name not in {c["name"] for c in candidates} and name != prot_name:
+        if name in present and name not in {c["name"] for c in candidates} \
+                and name != prot_name:
             candidates.append({"name": name, "appearance": "", "personality": ""})
     for c in candidates:
+        c = charm.sanitize_character(c)
         name = c["name"]
-        if name in existing or name in ("旁白", prot_name):
+        if not name or name in existing or name in ("旁白", prot_name):
             continue
         if len(pool) >= 10:
             log.warning("vn character pool full (10), ignoring %s", name)
             continue
         appearance = c.get("appearance", "").strip() or "成年角色，着装整洁，外貌待补充"
-        pool.append({"name": name, "appearance": appearance,
-                     "personality": c.get("personality", "").strip(),
-                     "auto_added": True, "first_seen": turn.get("scene", "")})
+        entry = dict(c)
+        entry["appearance"] = appearance
+        entry["auto_added"] = True
+        entry["first_seen"] = turn.get("scene", "")
+        pool.append(entry)
         existing.add(name)
         _vn_portrait(session, name)
 
@@ -586,8 +878,11 @@ def public_state(session: dict) -> dict:
         "cg_active": bool(turn.get("cg_id")),
         "cg_id": turn.get("cg_id", ""),
         "cg_title": (turn.get("cg") or {}).get("title", ""),
+        "cg_key": ((session.get("cg_map") or {}).get(turn.get("cg_id")) or {}).get("key", ""),
         "characters_meta": [
-            {"name": c["name"], "auto_added": bool(c.get("auto_added"))}
+            {"name": c["name"], "role": c.get("role", ""),
+             "background": c.get("background", ""),
+             "auto_added": bool(c.get("auto_added"))}
             for c in session["characters"]
         ],
         "catchphrases": session.get("catchphrases", []),
@@ -609,11 +904,17 @@ def public_state(session: dict) -> dict:
         "vn": char_panel,
         "char_stats": char_panel,
         "stat_config": game.session_stat_config(session),
+        "uniform_en": session.get("uniform_en", ""),
+        "uniform_neg": session.get("uniform_neg", ""),
+        "uniform_name": session.get("uniform_name", ""),
+        "bond_up": list(turn.get("bond_up") or []),
         "assets": session["assets"],
         "bg_map": session["bg_map"],
         "cg_url": game._cg_url(session, turn),
         "turn_no": len(session["log"]),
         "mock": session["mock"],
+        # 1.9.20：AI 控制台用（导演指令；记录走独立端点）
+        "ai_directive": str(session.get("ai_directive") or ""),
     }
 
 
@@ -621,15 +922,10 @@ async def start(payload: dict) -> dict:
     world = str(payload.get("world", "")).strip()
     if not world:
         raise game.GameError("请先填写世界观/剧情设定")
-    characters = [
-        {"name": str(c.get("name", "")).strip()[:12],
-         "appearance": str(c.get("appearance", "")).strip()[:300],
-         "personality": str(c.get("personality", "")).strip()[:200]}
-        for c in (payload.get("characters") or [])
-        if str(c.get("name", "")).strip()
-    ][:4]
     prot_in = payload.get("protagonist") or {}
     pname = str(prot_in.get("name", "")).strip()[:12] or "主角"
+    characters = charm.normalize_character_list(
+        payload.get("characters") or [], limit=4, protagonist=pname)
     content_rating = str(payload.get("content_rating", "18")).strip()[:8]
     if content_rating not in ("all", "16", "18"):
         content_rating = "18"
@@ -649,6 +945,7 @@ async def start(payload: dict) -> dict:
     # 本局统一制服关键词（会话级，同局所有角色同款；留空回退全局 config）
     uniform_en = str(payload.get("uniform_en", "") or "").strip()[:200]
     uniform_neg = str(payload.get("uniform_neg", "") or "").strip()[:200]
+    uniform_name = str(payload.get("uniform_name", "") or "").strip()[:40]
     session = {
         "sid": uuid.uuid4().hex[:12],
         "mode": MODE,
@@ -676,10 +973,19 @@ async def start(payload: dict) -> dict:
         "stat_config": stat_cfg,
         "uniform_en": uniform_en,
         "uniform_neg": uniform_neg,
+        "uniform_name": uniform_name,
+        # 1.9.0：开场场景推断（制服映射在开场立绘即生效）
+        "current_scene": scenemod.guess_initial_scene(
+            world, str(payload.get("outline", "")),
+            str(payload.get("title", ""))),
+        "schema": 2,
         "states": initial_states(stat_cfg),
         "char_states": {},        # 每角色独立数值，建会话后由 ensure_char_states 填充
         "emotions": emotions,
         "summary": "",
+        # 1.9.20：AI 控制台 / 玩家导演指令
+        "ai_console": [],
+        "ai_directive": "",
         "log": [],
         "assets": {"portraits": {}, "backgrounds": {}},
         "bg_map": {},
@@ -693,7 +999,7 @@ async def start(payload: dict) -> dict:
         # 角色库导入：已有立绘直接复用（生成管线自动跳过匹配变体）
         game.inject_library_assets(session, payload.get("library_imports") or [], cfg)
         _start_all_portraits(session)
-        llm = LLMClient(cfg)
+        llm = LLMClient(cfg, session=session, label="VN 开场")
         messages = [{"role": "system", "content": _vn_system(session)},
                     {"role": "user",
                      "content": "请生成游戏的开场剧情段落（第一段 dialogue 之前可以有一两句话交代时间地点与主角的状态）。"}]
@@ -702,7 +1008,8 @@ async def start(payload: dict) -> dict:
         except LLMError as e:
             log.warning("vn LLM unavailable (%s), degraded to demo story", e)
             session["llm_degraded"] = True
-            llm = LLMClient({"llm": {"base_url": "", "api_key": ""}})
+            llm = LLMClient({"llm": {"base_url": "", "api_key": ""}},
+                            session=session, label="VN 开场（演示回退）")
             turn_raw = await llm.chat_json(messages, temperature=0.8)
         if llm.mock:
             game._mock_localize(turn_raw, pname)
@@ -723,12 +1030,13 @@ async def _next_turn(session: dict, temperature: float = 0.85) -> tuple[dict, bo
     """取出下一轮（LLM 失败降级演示剧情，游戏永不卡死）。返回 (JSON, 是否mock)。"""
     try:
         await _maybe_compress(session)
-        llm = LLMClient(cfgmod.load_config())
+        llm = LLMClient(cfgmod.load_config(), session=session, label="VN 剧情推进")
         turn_raw = await llm.chat_json(build_messages(session), temperature=temperature)
     except LLMError as e:
         log.warning("vn LLM unavailable (%s), degraded to demo", e)
         session["llm_degraded"] = True
-        llm = LLMClient({"llm": {"base_url": "", "api_key": ""}})
+        llm = LLMClient({"llm": {"base_url": "", "api_key": ""}},
+                        session=session, label="VN 剧情推进（演示回退）")
         turn_raw = await llm.chat_json(build_messages(session), temperature=temperature)
     if llm.mock:
         game._mock_localize(turn_raw, session["protagonist"]["name"])
@@ -849,7 +1157,7 @@ async def apply_command(sid: str, character: str, action: str) -> dict:
         messages.append({"role": "user", "content": command_msg})
     adult = session.get("adult", False)
     try:
-        llm = LLMClient(cfgmod.load_config())
+        llm = LLMClient(cfgmod.load_config(), session=session, label="VN 命令")
         turn_raw = await llm.chat_json(messages, temperature=0.9)
         _rename = game._clean_rename(turn_raw)
         turn = _sanitize_turn(turn_raw, session["emotions"], session["characters"],

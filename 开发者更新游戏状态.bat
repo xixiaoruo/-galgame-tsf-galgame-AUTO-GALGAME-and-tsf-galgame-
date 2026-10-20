@@ -25,7 +25,8 @@ exit /b 1
 
 :apply_staged
 echo [1/4] Stopping running game process...
-taskkill /IM TSF_Galgame.exe /F >nul 2>nul
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0启动前清理旧实例.ps1"
+if errorlevel 1 goto apply_fail
 %SystemRoot%\System32\ping.exe -n 2 127.0.0.1 >nul
 echo [2/4] Applying full update package: program + web + docs...
 set APPLY_TRIES=0
@@ -45,7 +46,8 @@ goto launch
 
 :apply_exe
 echo [1/4] Stopping running game process...
-taskkill /IM TSF_Galgame.exe /F >nul 2>nul
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0启动前清理旧实例.ps1"
+if errorlevel 1 goto apply_fail
 %SystemRoot%\System32\ping.exe -n 2 127.0.0.1 >nul
 echo [2/4] Replacing game executable...
 copy /y "%~dp0update\TSF_Galgame.exe" "%~dp0TSF_Galgame.exe" >nul
@@ -61,8 +63,8 @@ pause
 exit /b 1
 
 :launch
-echo [4/4] Starting new version...
-start "" "%~dp0TSF_Galgame.exe"
+echo [4/4] Starting current onedir version...
+call "%~dp0start.bat"
 echo.
 echo Done. Saves / CGs / config live in D:\TSF_Galgame_Data and are untouched.
 %SystemRoot%\System32\ping.exe -n 3 127.0.0.1 >nul

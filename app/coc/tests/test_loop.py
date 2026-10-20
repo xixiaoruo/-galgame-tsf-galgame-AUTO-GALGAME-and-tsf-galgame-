@@ -12,6 +12,12 @@ from app.coc import provenance as P
 from app.coc import state as ST
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def _run(cfg, **kw):
     payload = {"difficulty": "Initiate", "seed": kw.pop("seed", 42),

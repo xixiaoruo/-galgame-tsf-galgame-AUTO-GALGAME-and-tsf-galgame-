@@ -22,6 +22,22 @@ log = logging.getLogger("galgame.library")
 ROSTER_DIR = cfgmod.ROOT / "角色库"
 
 
+def roster_dir() -> Path:
+    """真实角色库目录：源码/冻结都优先项目根，其次 exe 目录。
+
+    1.9.0 修复：冻结 exe 的 ROOT=dist/TSF_Galgame，原来直接拼
+    `ROOT/角色库` → 用 dist 启动时角色库永远是空的（玩家以为角色丢了）。
+    单测仍可通过 monkeypatch `ROSTER_DIR` 覆盖（它存在时优先）。
+    """
+    if ROSTER_DIR.is_dir():
+        return ROSTER_DIR
+    for root in cfgmod.project_roots():
+        d = root / "角色库"
+        if d.is_dir():
+            return d
+    return ROSTER_DIR
+
+
 def _safe_name(name: str) -> str:
     """角色名→目录/文件名安全段：只留字母数字汉字与 `_- `，并去掉尾随空格/点
     （Windows 会吃掉尾随空格与点，可能撞名或落到别的路径段）。"""
@@ -69,6 +85,8 @@ def _read_roster_dir(d: Path) -> dict | None:
         "role": str(summary.get("role", "NPC")).strip(),
         "appearance": str(summary.get("appearance", "")).strip(),
         "personality": str(summary.get("personality", "")).strip(),
+        "background": str(summary.get("background", "")).strip(),
+        "schema": int(summary.get("schema", 1) or 1),
         "anchor": str(summary.get("anchor", "")).strip(),
         "auto_added": bool(summary.get("auto_added")),
         "source_game": str(summary.get("source_game", "")).strip(),
@@ -79,10 +97,11 @@ def _read_roster_dir(d: Path) -> dict | None:
 
 def list_roster() -> list[dict]:
     """角色库全部角色（可按需要直接填充开局表单 / 复用已有立绘）。"""
-    if not ROSTER_DIR.is_dir():
+    root = roster_dir()
+    if not root.is_dir():
         return []
     out = []
-    for d in sorted(ROSTER_DIR.iterdir()):
+    for d in sorted(root.iterdir()):
         if not d.is_dir():
             continue
         info = _read_roster_dir(d)
@@ -112,14 +131,15 @@ def _target_dir(safe: str, role_name: str, source_game: str) -> Path:
         return (str(ex.get("source_game", "")) == source_game
                 and str(ex.get("name", "")) == role_name)
 
-    d = ROSTER_DIR / safe
+    root = roster_dir()
+    d = root / safe
     if not d.exists():
         return d
     if same_source(d):
         return d
     i = 1
     while True:
-        candidate = ROSTER_DIR / f"{safe}{i:03d}"
+        candidate = root / f"{safe}{i:03d}"
         if not candidate.exists() or same_source(candidate):
             return candidate
         i += 1
@@ -134,7 +154,7 @@ def variant_path(info: dict, variant: str) -> Path | None:
     for v in info.get("variants") or []:
         if v.get("variant") == variant and v.get("file"):
             try:
-                p = safemod.safe_join(ROSTER_DIR, str(info.get("dir", "")),
+                p = safemod.safe_join(roster_dir(), str(info.get("dir", "")),
                                       str(v["file"]), what="角色库立绘")
             except ValueError as e:
                 log.warning("roster variant rejected (%s): %s",
@@ -145,9 +165,93 @@ def variant_path(info: dict, variant: str) -> Path | None:
     return None
 
 
+def write_card_html(d: Path, summary: dict) -> Path:
+    """按角色设定.json 重写角色卡.html（导出与旧卡适配共用）。
+
+    1.9.0：新增「身份 / 角色背景 / 关系」展示；旧卡适配时也会调用本函数，
+    所以旧角色卡双击打开后能看到补写的背景，而不是只有外貌和表情图。
+    """
+    name = str(summary.get("name", "") or "角色")
+    role = str(summary.get("role", "NPC") or "NPC")
+    appearance = str(summary.get("appearance", "") or summary.get("anchor", "") or "（未填写）")
+    personality = str(summary.get("personality", "") or "（未填写）")
+    background = str(summary.get("background", "") or "（尚未谱写背景：在开局页角色卡点「✨ 谱写背景」即可自动补写）")
+    traits = "、".join(str(x) for x in (summary.get("traits") or []) if str(x)) or "（未填写）"
+    age = summary.get("age") or 0
+    height = summary.get("height_cm") or 0
+    body_type = str(summary.get("body_type", "") or "（未填写）")
+    measurements = str(summary.get("measurements", "") or "（未填写）")
+    birthday = str(summary.get("birthday", "") or "（未填写）")
+    speech = str(summary.get("speech_style", "") or "（未填写）")
+    likes = str(summary.get("likes", "") or "（未填写）")
+    dislikes = str(summary.get("dislikes", "") or "（未填写）")
+    _lock_cn = {
+        "personality": "性格", "traits": "性格标签", "speech_style": "说话风格",
+        "age": "年龄", "height_cm": "身高", "body_type": "体型",
+        "measurements": "三围", "birthday": "生日", "appearance": "外貌",
+        "role": "身份", "background": "背景", "likes": "喜欢", "dislikes": "厌恶",
+    }
+    locks = "、".join(_lock_cn.get(str(x), str(x))
+                     for x in (summary.get("locked_fields") or [])) or "无"
+    source_game = str(summary.get("source_game", "") or "")
+    exported_at = str(summary.get("exported_at", "") or "")
+    variants = list(summary.get("variants") or [])
+
+    cards = []
+    for v in variants:
+        f = str(v.get("file", ""))
+        if not f:
+            continue
+        cards.append(
+            f'<figure class="card"><img src="{_html.escape(f)}" '
+            f'alt="{_html.escape(str(v.get("variant", "")))}" loading="lazy">'
+            f'<figcaption>{_html.escape(str(v.get("variant", "")))}</figcaption></figure>')
+    if not cards:
+        cards = ['<p class="empty">（该角色暂无已生成的立绘）</p>']
+    html_text = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<title>{_html.escape(name)} · 角色卡</title>
+<style>
+body{{font-family:"Microsoft YaHei",sans-serif;background:#141320;color:#eceaf6;padding:32px;max-width:1100px;margin:auto}}
+h1{{font-size:24px}} .tag{{color:#b9a8ff;font-size:13px;margin-left:8px}}
+.meta{{background:#1d1b32;border:1px solid #33324d;border-radius:12px;padding:16px;margin:14px 0;line-height:1.9}}
+.meta b{{color:#b9a8ff}} .bg{{white-space:pre-wrap}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}}
+figure{{margin:0;background:#1d1b32;border-radius:12px;padding:14px;text-align:center}}
+figure img{{max-width:100%;max-height:360px;object-fit:contain;border-radius:8px}}
+figcaption{{color:#dcd6ff;margin-top:8px;font-size:13px}}
+.empty{{color:#8a87a8}}
+a{{color:#9fe3b0}}
+</style></head><body>
+<h1>{_html.escape(name)}<span class="tag">{_html.escape(role)}{
+    " · AI 引入" if summary.get("auto_added") else ""}</span></h1>
+<div class="meta">
+<b>身份：</b>{_html.escape(role)}<br>
+<b>年龄：</b>{age or "（未填写）"}　<b>身高：</b>{f"{height} cm" if height else "（未填写）"}　<b>体型：</b>{_html.escape(body_type)}<br>
+<b>三围：</b>{_html.escape(measurements)}　<b>生日：</b>{_html.escape(birthday)}<br>
+<b>性格标签：</b>{_html.escape(traits)}<br>
+<b>性格：</b>{_html.escape(personality)}<br>
+<b>说话风格：</b>{_html.escape(speech)}<br>
+<b>喜欢：</b>{_html.escape(likes)}　<b>厌恶：</b>{_html.escape(dislikes)}<br>
+<b>固定属性：</b>{_html.escape(locks)}<br>
+<b>外貌：</b>{_html.escape(appearance)}<br>
+<b>背景：</b><span class="bg">{_html.escape(background)}</span><br>
+<b>出处：</b>{_html.escape(source_game)}（导出 {_html.escape(exported_at)}）
+</div>
+<h2>立绘差分</h2>
+<div class="grid">{''.join(cards)}</div>
+<p style="color:#8a87a8;margin-top:20px">透明底 PNG 可直接用于二次创作；
+设定数据见同目录「角色设定.json」。</p>
+</body></html>"""
+    path = d / "角色卡.html"
+    path.write_text(html_text, encoding="utf-8")
+    return path
+
+
 def export_roster(session: dict) -> dict:
     """导出会话的全部角色到角色库，返回统计。"""
-    ROSTER_DIR.mkdir(parents=True, exist_ok=True)
+    root = roster_dir()
+    root.mkdir(parents=True, exist_ok=True)
     exported = 0
     errors = []
 
@@ -169,11 +273,24 @@ def export_roster(session: dict) -> dict:
             "role": role.get("role", "NPC"),
             "appearance": role.get("appearance") or role.get("anchor", ""),
             "personality": role.get("personality", ""),
+            "background": role.get("background", ""),
+            "traits": list(role.get("traits") or []),
+            "age": int(role.get("age") or 0),
+            "height_cm": int(role.get("height_cm") or 0),
+            "body_type": role.get("body_type", ""),
+            "measurements": role.get("measurements", ""),
+            "birthday": role.get("birthday", ""),
+            "speech_style": role.get("speech_style", ""),
+            "likes": role.get("likes", ""),
+            "dislikes": role.get("dislikes", ""),
+            "personality_locked": bool(role.get("personality_locked")),
+            "locked_fields": list(role.get("locked_fields") or []),
             "anchor": role.get("anchor", ""),
             "auto_added": bool(role.get("auto_added")),
             "first_seen": role.get("first_seen", ""),
             "source_game": session.get("title", ""),
             "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "schema": 3,
             "variants": [],
         }
 
@@ -220,42 +337,8 @@ def export_roster(session: dict) -> dict:
         # （含 Windows 共享冲突退避重试）；indent=2 透传保持格式不变。
         cfgmod.atomic_write_json(d / "角色设定.json", summary, indent=2)
 
-        # ---- 3) 角色卡 HTML（本地双击即可观看） ----
-        cards = []
-        for v in summary["variants"]:
-            cards.append(
-                f'<figure class="card"><img src="{_html.escape(v["file"])}" '
-                f'alt="{_html.escape(v["variant"])}">'
-                f'<figcaption>{_html.escape(v["variant"])}</figcaption></figure>')
-        if not cards:
-            cards = ['<p class="empty">（该角色暂无已生成的立绘）</p>']
-        card_html = f"""<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8">
-<title>{_html.escape(name)} · 角色卡</title>
-<style>
-body{{font-family:"Microsoft YaHei",sans-serif;background:#141320;color:#eceaf6;padding:32px}}
-h1{{font-size:24px}} .tag{{color:#b9a8ff;font-size:13px;margin-left:8px}}
-.meta{{background:#1d1b32;border:1px solid #33324d;border-radius:12px;padding:16px;margin:14px 0;line-height:1.9}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}}
-figure{{margin:0;background:#1d1b32;border-radius:12px;padding:14px;text-align:center}}
-figure img{{max-width:100%;max-height:360px;object-fit:contain;border-radius:8px}}
-figcaption{{color:#dcd6ff;margin-top:8px;font-size:13px}}
-.empty{{color:#8a87a8}}
-a{{color:#9fe3b0}}
-</style></head><body>
-<h1>{_html.escape(name)}<span class="tag">{
-    "主角" if role.get("role") == "主角" else "NPC"}{" · AI 引入" if role.get("auto_added") else ""}</span></h1>
-<div class="meta">
-<b>外貌：</b>{_html.escape(role.get("appearance") or role.get("anchor") or "（未填写）")}<br>
-<b>性格：</b>{_html.escape(role.get("personality", "") or "（未填写）")}<br>
-<b>出处：</b>{_html.escape(session.get("title", ""))}（导出 {time.strftime("%Y-%m-%d %H:%M")}）
-</div>
-<h2>立绘差分</h2>
-<div class="grid">{''.join(cards)}</div>
-<p style="color:#8a87a8;margin-top:20px">透明底 PNG 可直接用于二次创作；
-设定数据见同目录「角色设定.json」。</p>
-</body></html>"""
-        (d / "角色卡.html").write_text(card_html, encoding="utf-8")
+        # ---- 3) 角色卡 HTML（本地双击即可观看；统一由 write_card_html 生成） ----
+        write_card_html(d, summary)
 
-    return {"ok": True, "path": str(ROSTER_DIR), "portraits": exported,
+    return {"ok": True, "path": str(root), "portraits": exported,
             "characters": len(roles), "errors": errors[:5]}

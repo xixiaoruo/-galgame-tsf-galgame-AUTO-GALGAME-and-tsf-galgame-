@@ -1,0 +1,46 @@
+{
+  "_source": "【本项目设计】1.9.19 固定商店场景。依据 MECHANICS.md §2.1/§4.3 “逛商店 +4% DOOM、重掷商店存货 +3% DOOM” 的既有规则，把商店从“Downtown 的附加动作”落成可见、可购买、库存固定的场景；商品价格与稀有度来自 items.json，不改变任何检定公式。",
+  "_note": "每个商店的 items 是**候选池**不是固定货架：每次进货由 scenario/run 的稳定种子抽取 stock_size 件，买走后在本轮不再出现；每 restock_turns 回合或手动重掷后补货。所有商店都可从 CoC 面板的「🏪 商店」进入，场景文本固定，不随 LLM 改写。",
+  "shops": [
+    {
+      "id": "general_store",
+      "name": "盐川杂货铺",
+      "owner": "佐藤婆婆",
+      "scene": "商店街尽头，一盏昏黄的灯泡挂在门楣下。玻璃柜台里摆着绷带、火柴、旧地图，还有一台多年没卖出去的相机。佐藤婆婆坐在柜台后，一边听收音机，一边把同一叠零钱数了又数。",
+      "greeting": "“要买什么？天黑之前回去比较好。”",
+      "markup": 0,
+      "tags": ["general", "medical", "investigation"],
+      "items": [
+        "Bandage", "MedicalKit", "FirstAidManual", "TrailRations",
+        "Flashlight", "Rope", "Chalk", "Lighter", "Map", "Camera",
+        "SteakKnife", "Crowbar", "Whiskey", "SmellingSalts", "Notebook"
+      ]
+    },
+    {
+      "id": "pharmacy",
+      "name": "二十四小时药房",
+      "owner": "值夜药师",
+      "scene": "药房的灯是这条街上唯一还亮着的白光。货架整齐得过分，标签全朝同一个方向。值夜药师隔着玻璃看你，像在确认你是不是来买药的人。",
+      "greeting": "“处方？没有处方的话，只能买柜台上的东西。”",
+      "markup": 1,
+      "tags": ["medical", "sanity"],
+      "items": [
+        "Bandage", "MedicalKit", "FirstAidManual", "Sedative",
+        "SmellingSalts", "Whiskey", "TrailRations"
+      ]
+    },
+    {
+      "id": "curio_shop",
+      "name": "旧书与骨董",
+      "owner": "盲眼的古书商",
+      "scene": "门面窄得只能侧身进去。屋里没有电灯，只有蜡烛；书架一直顶到天花板，最上面几层被黑布盖着。空气里有旧纸、樟脑和某种更冷的气味。",
+      "greeting": "“你带来的东西，比你想要的东西更让我感兴趣。”",
+      "markup": 2,
+      "tags": ["occult", "rare"],
+      "items": [
+        "OccultDiary", "DustyGrimoire", "GruesomeTotem", "BronzeCrucifix",
+        "HolyWater", "OldCoin", "PocketWatch", "Notebook", "Map"
+      ]
+    }
+  ]
+}

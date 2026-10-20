@@ -1,5 +1,5 @@
 """真实素材出图测试：用学院局现有立绘 + 实 SD WebUI 验证
-① 脸部 img2img 细化（表情清晰不糊） ② 换装限定区域图生图（脸不变）。
+① 脸部 img2img 细化（表情清晰不糊） ② 换装整幅 img2img（头身锚定、脸不变）。
 
 产出（供目视查看）：D:\\TSF_Galgame\\测试样本\\face_before.png / face_after.png /
 outfit_before.png / outfit_after.png。
@@ -64,14 +64,14 @@ async def main():
     (OUT / "face_after.png").write_bytes(face)
     print("face refine:", len(face), "bytes")
 
-    # ② 换装限定区域重绘：掩膜服装区，提示词换装
+    # ② 换装整幅 img2img：由生产管线负责 alpha 承接与头部锚定，避免旧掩膜方案回归
     outfit = await cl.refine_outfit(
         data,
         "anime girl, same character, same standing pose, wearing school uniform: "
         "white blouse, dark navy blazer jacket, pleated skirt, ribbon tie, "
         "knee-high socks, detailed clothing texture, crisp fabric folds", 888)
     (OUT / "outfit_after.png").write_bytes(outfit)
-    print("outfit inpaint:", len(outfit), "bytes")
+    print("outfit full-img2img:", len(outfit), "bytes")
 
     # 简单数值校验：原图/结果尺寸一致、脸区方差（清晰度代理指标）不塌
     before = Image.open(io.BytesIO(data))

@@ -8,6 +8,7 @@
 派生物（必须与真源逐字一致；由本脚本强制，不再是"三处手抄"）
     static/index.html 里 ``style.css?v=<版本>``
     static/index.html 里 ``main.js?v=<版本>``
+    static/index.html 里 ``ui2.js?v=<版本>``（1.8.0 起：UI 2.0 独立编排层）
 
 为什么要这个脚本
     版本号过去靠人工维持三处同步（见 项目档案与开发备忘.md 第 19 条、
@@ -21,14 +22,14 @@
 
 用法
     python 测试工具/check_version_sync.py                # 校验
-    python 测试工具/check_version_sync.py --fix          # 用真源重写两处 ?v=
+    python 测试工具/check_version_sync.py --fix          # 用真源重写全部 ?v=（1.8 起三处）
     python 测试工具/check_version_sync.py --root DIR     # 指定项目根
     python 测试工具/check_version_sync.py --json         # 机器可读
 
 退出码
     0  三处一致
     1  不一致（逐条列出 文件:行 与实际值）
-    2  结构问题（文件缺失 / 真源缺失 / ?v= 引用数量不是 2）
+    2  结构问题（文件缺失 / 真源缺失 / ?v= 引用数量不是 3）
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ SOURCE_PATTERN = re.compile(
 
 DERIVED_FILE = os.path.join("static", "index.html")
 DERIVED_PATTERN = re.compile(r"""\?v=(?P<v>[^"'&\s)>]+)""")
-DERIVED_EXPECTED_COUNT = 2
+DERIVED_EXPECTED_COUNT = 3   # 1.8.0：style.css + main.js + ui2.js
 
 # 版本号允许的字符集：URL 安全、不含 ? & # 空格
 VERSION_SHAPE = re.compile(r"""^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$""")

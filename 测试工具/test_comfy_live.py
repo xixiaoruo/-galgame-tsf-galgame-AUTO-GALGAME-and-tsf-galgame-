@@ -15,7 +15,7 @@ import httpx
 from PIL import Image
 from app.image import ImageClient
 
-BASE = "http://127.0.0.1:8000"
+BASE = "http://127.0.0.1:8188"
 OUT = Path(r"D:\TSF_Galgame\测试样本")
 OUT.mkdir(exist_ok=True)
 CFG = {

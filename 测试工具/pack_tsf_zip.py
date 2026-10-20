@@ -7,7 +7,7 @@ r"""重打 TSF_Galgame 可分发交付包（产物进 release/，文件名带版
     release\TSF_Galgame_v<版本>.zip   ← 上传到 GitHub Release 当附件（不能进仓库：
     内含 129MB 单文件 exe，超过 GitHub 单文件 100MB 上限）
 
-纳入（有效文件+库）：exe/spec/server/launcher/requirements/start.bat/开发者更新游戏状态.bat/
+纳入（有效文件+库）：exe/spec/server/window_host/requirements/start.bat/开发者更新游戏状态.bat/
 README/config.example.json/app/*.py/static/**（含界面内置样例）/使用说明.txt
 剔除（私有与测试件）：config.json（含 API Key）/data/update/档案备份/dist/build/
 各级 __pycache__/TSF_Galgame.zip 与 release/（分发产物本身）/测试工具/测试样本/_test/
@@ -31,10 +31,17 @@ DOC_TPL = TOOLS / "使用说明-整合包.txt"
 
 EXCLUDE_DIRS = {
     "data", "update", "档案备份", "dist", "build", "__pycache__",
+    "_internal",   # 旧根级构建残留；运行时目录从 dist-<版本> 单独加入
     "测试工具", "测试样本", "_test", "角色库",   # 角色库含个人角色卡素材，不进分享包（用户指定）
     ".zcode",   # 本机工作区（技能缓存等，含 Key 字样文档），不进分享包
+    ".dsh-pyenv",   # DSH Python 环境/缓存
+    ".memsearch",   # 记忆检索缓存（含会话历史）
+    ".mimosa",      # 安全扫描缓存
+    ".devdata", ".build-venv", ".venv", "venv",
     "release",  # 历次分发产物，不进包
     ".git",     # 版本库（含全部历史对象），绝不能进分发包
+    # 1.8.0：构建用 PySide6 venv（549MB）与隔离冒烟数据，绝不随包
+    ".build-venv", ".devdata", ".venv", "venv",
 }
 EXCLUDE_FILES = {
     "config.json", "TSF_Galgame.zip", "项目档案与开发备忘.md",
@@ -43,8 +50,14 @@ EXCLUDE_FILES = {
     "一键适配ComfyUI.bat",   # 见文件头说明：依赖的脚本含本机绝对路径，不随包分发
     ".gitignore", ".gitattributes",   # 仓库用文件，对终端用户无意义
     "GitHub上传教程.md",   # 本机发布流程说明，不随包分发
+    "启动说明.txt",   # 含本机 D:\ 数据目录说明；用户侧用生成的「使用说明.txt」
     "使用说明.txt",   # 打包时由模板生成；磁盘上的同名文件（应用更新时留下的）
                       # 也要排除，否则包里会出现两份
+    "start.bat",      # 源码树启动器依赖 start_current/dist；整合包用生成的「启动游戏.bat」
+    "start_current.ps1",
+    "启动前清理旧实例.ps1",
+    "杀掉所有游戏实例.bat",
+    "开发者更新游戏状态.bat",
 }
 EXCLUDE_PREFIXES = {"loop_stdout.log", "loop_stderr.log", "debug.log"}
 
@@ -88,12 +101,33 @@ def collect() -> list:
             continue
         rel = p.relative_to(ROOT)
         parts = rel.parts
-        if any(part in EXCLUDE_DIRS for part in parts):
+        # 1.9.20：`data/` 是运行时私有数据，默认不进分发包；但 `data/coc/`
+        # 是 CoC 引擎的**随包内容**（地点/谜团/卡池/tuning/商店/剧本），
+        # 少了它 CoC 开局就会 TuningMissingError。只放行 data/coc，且排除
+        # 运行时存档与缓存。
+        if parts and parts[0] == "data":
+            if len(parts) < 2 or parts[1] != "coc":
+                continue
+            if "saves" in parts or "__pycache__" in parts:
+                continue
+        elif any(part in EXCLUDE_DIRS for part in parts):
+            continue
+        # 1.9.15 打包踩坑：构建目录从 dist/ 派生出 dist-1.9.1 ~ dist-1.9.15，
+        # 旧规则只排 "dist" 导致 15 个 onedir 全被打进 1.5GB tmp zip，打包卡死。
+        if any(part.startswith("dist-") or part.startswith("dist19") for part in parts):
             continue
         if rel.name in EXCLUDE_FILES:
             continue
+        # 根目录旧单文件 exe 不是 1.9.20 的运行时；真正运行时从
+        # dist-<GAME_VERSION>/TSF_Galgame 整目录加入（见 main）。
+        if rel.name == "TSF_Galgame.exe":
+            continue
         if rel.name in EXCLUDE_PREFIXES:
             continue
+        if rel.name.startswith("TSF_Galgame.exe.") or ".bak" in rel.name:
+            continue   # 旧版 exe / tuning 备份（.bak-v2 / .bak-before-* / .legacy-*），不是分发内容
+        if rel.suffix.lower() == ".lnk":
+            continue   # 本机快捷方式含本机绝对路径，不进分享包
         if any(part.endswith(".tmp.zip") for part in parts):
             continue
         entries.append(rel)
@@ -107,9 +141,51 @@ def usage_doc(version: str) -> bytes:
     return text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
 
 
+def runtime_dir(version: str) -> Path:
+    """定位当前 onedir 运行时目录（优先 dist-<版本>，回退 dist）。"""
+    for cand in (ROOT / f"dist-{version}" / "TSF_Galgame",
+                 ROOT / "dist" / "TSF_Galgame"):
+        if (cand / "TSF_Galgame.exe").is_file():
+            return cand
+    raise SystemExit(
+        f"找不到可打包的 onedir 运行时：dist-{version}/TSF_Galgame 或 dist/TSF_Galgame"
+    )
+
+
+def runtime_files(base: Path) -> list[Path]:
+    """onedir 运行时文件：排除用户配置、缓存、存档。"""
+    out = []
+    for p in sorted(base.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(base)
+        if "__pycache__" in rel.parts:
+            continue
+        if rel.name in ("config.json", "config.json.bak"):
+            continue
+        if rel.parts[:2] == ("data", "saves"):
+            continue
+        if rel.parts[:2] == ("data", "exports"):
+            continue
+        out.append(rel)
+    return out
+
+
+def launcher_bat() -> bytes:
+    """整合包根目录的启动器：直接双击也无需 PowerShell。"""
+    text = (
+        "@echo off\r\n"
+        "cd /d \"%~dp0\"\r\n"
+        "start \"\" \"%~dp0TSF_Galgame.exe\"\r\n"
+    )
+    return text.encode("utf-8")
+
+
 def main() -> int:
     version = sys.argv[1] if len(sys.argv) > 1 else game_version()
     entries = collect()
+    runtime = runtime_dir(version)
+    rfiles = runtime_files(runtime)
 
     # 硬校验：版本库、密钥文件、本机路径等一旦混入就没法补救，直接中止
     fatal = [str(r) for r in entries
@@ -122,9 +198,13 @@ def main() -> int:
     tmp = out.with_suffix(".tmp.zip")
 
     has_doc = DOC_TPL.is_file()
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for rel in entries:
             z.write(ROOT / rel, rel.as_posix())
+        # 当前版本的 onedir 运行时：exe + _internal（用户直接双击即可）
+        for rel in rfiles:
+            z.write(runtime / rel, rel.as_posix())
+        z.writestr("启动游戏.bat", launcher_bat())
         if has_doc:
             z.writestr("使用说明.txt", usage_doc(version))
         else:
@@ -132,8 +212,16 @@ def main() -> int:
 
     seeds = leak_seeds()
     leak = []
+    # 只对文本文件做 Key 扫描：PyInstaller 的 .pak/.dll/.pyd 二进制里会出现
+    # 随机 "sk-" 字节串（1.9.15 实测误报 qtwebengine_*.pak），不代表泄漏。
+    text_suffixes = {
+        ".py", ".js", ".mjs", ".json", ".md", ".txt", ".html", ".css",
+        ".bat", ".ps1", ".spec", ".yml", ".yaml", ".ini", ".cfg", ".toml",
+    }
     with zipfile.ZipFile(tmp) as z:
         for info in z.infolist():
+            if Path(info.filename).suffix.lower() not in text_suffixes:
+                continue
             data = z.read(info.filename)
             if any(seed in data for seed in seeds) or KEY_RE.search(data):
                 leak.append(info.filename)
@@ -143,9 +231,10 @@ def main() -> int:
         raise SystemExit(f"泄漏校验未通过，已中止：{leak}")
 
     tmp.replace(out)
-    total = len(entries) + (1 if has_doc else 0)
+    total = len(entries) + len(rfiles) + 1 + (1 if has_doc else 0)
     print(f"OK {out}")
-    print(f"   {total} 条 / {out.stat().st_size / 1024 / 1024:.1f} MB / 版本 v{version}")
+    print(f"   源码 {len(entries)} + 运行时 {len(rfiles)} + 启动器 + 说明 = {total} 条")
+    print(f"   {out.stat().st_size / 1024 / 1024:.1f} MB / 版本 v{version}")
     return 0
 
 

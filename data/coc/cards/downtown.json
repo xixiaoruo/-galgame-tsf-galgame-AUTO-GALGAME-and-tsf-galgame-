@@ -25,6 +25,11 @@
      },
      "failure": {
       "rea": -1
+     },
+     "requirements": {
+      "stat_min": {
+       "KNW": 6
+      }
      }
     },
     {
@@ -203,7 +208,7 @@
      "check": {
       "stat": "CHA",
       "threat": "SAFE",
-      "dc": 0
+      "dc": -1
      },
      "success": {
       "exp": 8,

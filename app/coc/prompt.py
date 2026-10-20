@@ -93,7 +93,7 @@ TONE_RULES = """【基调约束（必须遵守）】
 
 #: 系统权威声明（对应 `COC-DESIGN.md` §3.2 E7）
 AUTHORITY = """【系统权威声明】
-DOOM、体力（STA）、理智（REA）、属性、状态标签、物品、结局**全部由系统决定**，
+DOOM、体力（STA）、意志（REA）、SAN（理智值）、属性、状态标签、物品、结局**全部由系统决定**，
 你没有修改它们的权限，也不要在正文里断言它们的数值变化。
 你唯一可以提议的数值调整是 `coc_delta` 里列出的那几项（经验/资金/物品/属性微调），
 系统会校验并可能丢弃。数值以系统给出的当前值为准：正文与数值冲突时以数值为准。"""
@@ -147,8 +147,61 @@ def coc_system(run: Run, *, resolution: Resolution | None = None,
     parts.append("【内容分级政策】\n" + content_policy_text(
         content_rating, bool(r18_enabled), adult_intensity, bool(allow_forced)))
 
+    # t73：**自定义剧本**（世界观 / 大纲 / 故事书 / 强制指令）。
+    # 放在数值块之前：这是"这一局在讲什么故事"的世界级前提，应该在具体数值之前先立住。
+    # 空剧本 ⇒ `prompt_block` 返回空串 ⇒ 提示词**逐字节不变**（既有闸门不受影响）。
+    try:
+        from . import scenario as _scn
+        _blk = _scn.prompt_block(getattr(run, "scenario", None))
+        if _blk:
+            parts.append(_blk)
+    except Exception:
+        pass          # 剧本数据异常 ⇒ 不注入该段，绝不让生成失败
+
+    # 1.9.20：玩家导演指令（持续生效；放在数值块前，作为叙事基调）
+    _dir = str((getattr(run, "state", {}) or {}).get("ai_directive") or "").strip()
+    if _dir:
+        parts.append("【玩家导演指令（本局持续生效，优先级高于默认风格；"
+                     "但不得违反内容分级政策，也不得改写系统数值）】\n" + _dir[:500])
+
     # 数值块（t48 已有；此处只调用，不重复实现）
     parts.append("【当前数值】\n" + _state.states_block(st))
+
+    # t71（TSF×CoC 融合）：**把背包与融合模式下的物品可用性告诉 LLM**。
+    # 此前 LLM 完全看不到玩家带着什么 —— 于是会写出"你摸出绷带包扎"而玩家根本没有绷带，
+    # 或写出"你挥起消防斧"而此时斧头因转变已握不住。这里只给事实与可用性，不给指令。
+    try:
+        from . import item_effects as _ie
+        bag = _ie.inventory_effects(st, which="backpack")
+        eq = _state.equipped(st)
+        mech = _ie.mech_view(st)
+        if bag or any(eq.values()):
+            lines = []
+            for it in bag:
+                name = str(it.get("name") or it.get("id"))
+                tag = ""
+                if it.get("block_reason") == "tsf_hand_unfit":
+                    tag = "（身形变化后已无法有效使用）"
+                elif it.get("block_reason") == "tsf_slot_unfit":
+                    tag = "（已不合身，无法继续穿戴）"
+                pen = int(it.get("use_penalty") or 0)
+                if pen > 0 and not tag:
+                    tag = f"（使用需额外耗时 +{pen}）"
+                worn = "〔已装备〕" if it.get("equipped") else ""
+                lines.append(f"  · {name}{worn}{tag}")
+            eq_txt = "、".join(
+                f"{sl}:{( _state.item_meta(str(i)).get('name') or i)}"
+                for sl, i in eq.items() if i)
+            wd = mech.get("wardrobe") or {}
+            block = ("\n【物品】（系统事实，不要凭空发明玩家没有的东西；标注意味的不可按原样使用）\n"
+                     + ("\n".join(lines) if lines else "  · （空）"))
+            if eq_txt:
+                block += f"\n【已装备】{eq_txt}"
+            if wd.get("label"):
+                block += f"\n【衣着状态】{wd.get('label')}"
+            parts.append(block)
+    except Exception:
+        pass          # 物品数据异常 ⇒ 不带该段，绝不因此让整局生成失败
 
     # 本幕卡面（代码插入，LLM 不复述）
     if card is not None:

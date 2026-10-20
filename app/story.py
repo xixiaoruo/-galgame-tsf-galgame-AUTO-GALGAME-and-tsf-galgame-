@@ -4,6 +4,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import characters as charm
 from . import config as cfgmod
 from . import safe as safemod
 
@@ -32,14 +33,14 @@ _ID_OK = _re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 
 def _clean(st: dict) -> dict:
     """规范化剧本字段（防脏数据）；id 非白名单则重新生成（防路径穿越）。"""
-    chars = []
-    for c in st.get("characters") or []:
-        if isinstance(c, dict) and str(c.get("name", "")).strip():
-            chars.append({
-                "name": str(c["name"]).strip()[:12],
-                "appearance": str(c.get("appearance", "")).strip()[:300],
-                "personality": str(c.get("personality", "")).strip()[:200],
-            })
+    # 1.9.0：角色卡统一走 characters.sanitize_character（name/role/
+    # appearance/personality/background 同一套长度限制），并去掉重名与
+    # 与主角同名的脏条目——旧档案升级时也能自然补齐 role/background。
+    chars = charm.normalize_character_list(
+        [c for c in (st.get("characters") or []) if isinstance(c, dict)],
+        limit=4,
+        protagonist=str((st.get("protagonist") or {}).get("name", "")).strip(),
+    )
     catch = [str(x).strip()[:60] for x in (st.get("catchphrases") or [])
              if str(x).strip()][:5]
     rating = str(st.get("content_rating", "18")).strip()[:8]
@@ -77,6 +78,15 @@ def _clean(st: dict) -> dict:
         "stat_config": _clean_stat_config(st.get("stat_config")),
         "uniform_en": str(st.get("uniform_en", "") or "").strip()[:200],
         "uniform_neg": str(st.get("uniform_neg", "") or "").strip()[:200],
+        # 1.9.0：随机/预设制服的名字（仅展示与提示词语境，不影响生图参数）
+        "uniform_name": str(st.get("uniform_name", "") or "").strip()[:40],
+        # 1.9.0：阶段表随档案保存（旧档缺省=6），避免换机器后 4/6/10 段错位
+        "stage_count": (lambda v: v if v in (4, 6, 10) else 6)(
+            (lambda x: x if isinstance(x, int) else 6)(
+                st.get("stage_count", 6))),
+        "schema": 2,
+        "recovered_from": str(st.get("recovered_from", "") or "").strip()[:120],
+        "recovered_at": str(st.get("recovered_at", "") or "").strip()[:40],
         # 1.7.33 主角「最终变化样式」（开局面板：身材/胸/瞳/发/气质/衣物）
         # ——随设定档案保存/读取，开局后由 game 规范化
         "tsf_target": st.get("tsf_target") if isinstance(st.get("tsf_target"), dict) else {},

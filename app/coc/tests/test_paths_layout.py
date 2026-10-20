@@ -24,6 +24,12 @@ from app import config as cfgmod
 from app.coc import paths
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def test_writable_follows_data_dir(s: TestSuite) -> None:
     """① 行为：写盘路径跟随 `config.DATA_DIR`。"""

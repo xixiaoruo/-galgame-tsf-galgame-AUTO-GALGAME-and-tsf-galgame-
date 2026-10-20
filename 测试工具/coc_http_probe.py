@@ -40,6 +40,10 @@ import atexit as _atexit              # noqa: E402
 
 _TEMP_DATA = _tempfile.mkdtemp(prefix="coc-http-probe-")
 os.environ["TSF_DATA_DIR"] = _TEMP_DATA
+# config.py 只有在隔离根存在 config.json 时才会切断 ROOT/config.json 回退；
+# 写入空对象让 DEFAULTS 补齐字段，同时保证探针永远不会继承真实 API Key。
+with open(os.path.join(_TEMP_DATA, "config.json"), "w", encoding="utf-8") as _f:
+    _f.write("{}")
 _atexit.register(_shutil.rmtree, _TEMP_DATA, True)
 
 CHECKS: list[dict] = []

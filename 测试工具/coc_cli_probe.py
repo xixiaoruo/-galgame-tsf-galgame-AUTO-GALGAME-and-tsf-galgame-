@@ -563,9 +563,30 @@ def scenario_sanitize() -> Report:
                 trust_hits.append(got)
     rep.check(
         "E1-LLM-TRUST", "叙事层把 LLM 提案交给 run.apply 时显式 trust=\"llm\"（不得继承 engine 默认）",
-        bool(trust_hits) and all(x == "llm" for x in trust_hits),
-        f"session.py 里 .apply() 调用的 trust 实参：{trust_hits}（全部应为 'llm'）",
+        bool(trust_hits) and "llm" in trust_hits,
+        f"session.py 里 .apply() 调用的 trust 实参：{trust_hits}（须含 'llm'；"
+        f"只有玩家动作路径可以用 'engine'）",
         "反例：写成 run.apply(delta, reason=...)（不传 trust）→ 继承 engine 默认 → 变红",
+    )
+    # t63：玩家动作（装备/卸下，见 `sanitize.PLAYER_ACTION_KEYS`）**必须**走 engine 层 ——
+    # 它不是模型提案；若误用 llm 层会被 `_assert_keys_allowed` 拒绝。
+    # 与上面那条合起来覆盖**两种**信任层，而不是假定"全部是 llm"。
+    # 为什么改（实测）：t53 建上面那条时 `session.py` 只有一个 `.apply()`，于是
+    # `all(x == "llm")` 成立；t63 新增了玩家动作的 `trust="engine"` 调用（正当）
+    # ⇒ 全量约束变成误红。判据应收窄成"两条各自走对层"，而不是"全部同一层"。
+    rep.check(
+        "E1-PLAYER-TRUST", "玩家动作（equip/unequip）走 run.apply 时显式 trust=\"engine\"",
+        "engine" in trust_hits,
+        f"session.py 里 .apply() 调用的 trust 实参：{trust_hits}（须含 'engine'）",
+        "反例：把玩家动作也写成 trust=\"llm\" → _assert_keys_allowed 拒绝 equip → 变红",
+    )
+    # 任一 `.apply()` 若省略 trust（got is None）会继承 engine 默认 —— 正是 t53 修过的那类静默降级。
+    rep.check(
+        "E1-TRUST-EXPLICIT", "session.py 的每个 .apply() 都必须【显式】声明 trust（不得依赖默认值）",
+        bool(trust_hits) and all(x is not None for x in trust_hits),
+        f"未显式声明 trust 的调用数：{sum(1 for x in trust_hits if x is None)}／{len(trust_hits)}"
+        f"（实参：{trust_hits}）",
+        "反例：新增一条 run.apply(delta, reason=...) 而不带 trust → 继承 engine 默认 → 变红",
     )
 
     return rep

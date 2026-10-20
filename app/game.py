@@ -6,16 +6,23 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
+from . import characters as charm
 from . import config as cfgmod
 from . import pixel as pixel_mod
 from . import prompts
+from . import scenes as scenemod
 from . import story_rules
 from . import tsf
 from . import cgbook
 from .image import (ImageClient, ImageGenError, apply_style_mode, asset_key,
                     gen_params_tag, process_portrait, process_portrait_async,
-                    append_appearance_en, emotion_en_tags)
+                    append_appearance_en, emotion_en_tags,
+                    # t61 画风预设层（默认无风格 ⇒ 三者都是零影响）
+                    style_suffix, style_negative, style_key_part,
+                    # t70 画风绑定的 LoRA 词（无绑定/非像素风 ⇒ 空串，零影响）
+                    lora_tag)
 from .llm import LLMClient, LLMError, MockSetup
 
 log = logging.getLogger("galgame.game")
@@ -26,7 +33,22 @@ log = logging.getLogger("galgame.game")
 # 负面词加防漂白（white-on-white, washed out）；v5 起并入生成参数签名。
 # v7：style_suffix 去除"半身像/纯白色背景"矛盾指令（与"必须全身像/浅灰
 # 背景"冲突导致构图随机崩坏），补银灰发/眼镜/长发英文外貌标签。
-PROMPT_VERSION = "v36-tsf-llm-gradient"
+PROMPT_VERSION = "v37-tsf-cards-scene-190"
+
+#: 1.8.0「六段演变工坊」：正在跑的预演任务（sid → asyncio.Task）。
+#: 只用于防重入与取消；进度状态落在 session["stage_tour"] 并由 persist 落盘。
+_STAGE_TOUR_TASKS: dict[str, "asyncio.Task"] = {}
+
+
+def _perf(session: dict) -> dict:
+    """本局性能计数（惰性初始化，随存档持久化；缺失键自动补齐）。"""
+    p = session.setdefault("perf", {})
+    for k, v in (("images", 0), ("failed", 0), ("previews", 0),
+                 ("image_seconds", 0.0), ("tour_runs", 0),
+                 ("cache_hits", 0), ("saved_seconds", 0.0),
+                 ("llm_calls", 0), ("llm_tokens_est", 0)):
+        p.setdefault(k, v)
+    return p
 
 
 def _params_tag(cfg: dict) -> str:
@@ -181,18 +203,8 @@ def load_all() -> None:
     for p in cfgmod.SAVES_DIR.glob("*.json"):
         try:
             s = json.loads(p.read_text(encoding="utf-8"))
-            # 服务重启后：pending 任务标记中断；但磁盘缓存文件实际存在的
-            # 说明生成已完成的资产恢复为就绪（立绘 >60KB 视为真图）
-            for group in s.get("assets", {}).values():
-                for item in group.values():
-                    if item["status"] != "ready":
-                        f = cfgmod.CACHE_DIR / item.get("file", "")
-                        if item.get("file") and f.is_file()                                 and f.stat().st_size > 60000:
-                            item["status"] = "ready"
-                            item["error"] = ""
-                        elif item["status"] == "pending":
-                            item["status"] = "error"
-                            item["error"] = "服务重启，生成中断，可重开新游戏"
+            # 服务重启/读档共用：pending 任务中断恢复、死路径校正、场景重试预算重置
+            _recover_interrupted_assets(s)
             # 兼容旧存档：补主角字段与新增指数（genital 等）
             if "protagonist" not in s:
                 continue
@@ -329,19 +341,18 @@ def _sanitize_turn(turn: dict, emotions: list[str], characters: list[dict],
                 outfit[k] = v
 
     return {
-        "scene": str(turn.get("scene", "")).strip() or "……",
-        "background_hint": str(turn.get("background_hint", "")).strip(),
+        "scene": str(turn.get("scene", "")).strip()[:30] or "……",
+        "background_hint": str(turn.get("background_hint", "")).strip()[:200],
         "is_new_background": bool(turn.get("is_new_background")),
         "dialogue": dialogue[:6],
         "choices": choices[:4],
         "present": present,
         "new_names": list(dict.fromkeys(new_names)),
         "new_characters": [
-            {"name": str(c.get("name", "")).strip()[:12],
-             "appearance": str(c.get("appearance", "")).strip()[:300],
-             "personality": str(c.get("personality", "")).strip()[:200]}
+            charm.sanitize_character(c)
             for c in (turn.get("new_characters") or [])
-            if isinstance(c, dict) and str(c.get("name", "")).strip()
+            if isinstance(c, dict)
+            and str(charm.sanitize_character(c).get("name", "")).strip()
         ][:3],
         "outfit": outfit,
         "cg": {"active": cg_active, "title": cg_title, "prompt": cg_prompt},
@@ -434,6 +445,11 @@ def build_story_system(session: dict) -> str:
         characters=prompts.format_characters(session["characters"]),
         emotions="、".join(session["emotions"]),
     )
+    # 1.9.20：玩家导演指令（持续生效；放在模板之后，确保不会被 format 的花括号误伤）
+    _dir = str(session.get("ai_directive") or "").strip()
+    if _dir:
+        system += ("\n\n【玩家导演指令（本局持续生效，优先级高于默认风格；"
+                   "但不得违反内容分级政策）】\n" + _dir[:500])
     # API 前置注入：启用中的注入文本拼到 system prompt 最前面（全局生效）
     from . import inject as inject_mod
     return inject_mod.inject_block(system)
@@ -671,8 +687,16 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
     """
     assets = session["assets"]
     _persist = persist_fn or persist          # ← 唯一的持久化出口（三条路径共用）
-    if key in assets[group]:
-        return  # 已在生成或已就绪
+    old = assets[group].get(key)
+    if old is not None:
+        # 1.9.8：失败项不能永久占着同一个缓存键。旧逻辑只要 key 存在就直接
+        # return——背景自动重试换到 bg3 时仍然复用同一个 key，于是「重试」根本
+        # 没有新任务，看起来就是旧档场景永远生成不出来。error 项允许重新排队。
+        if old.get("status") in ("pending", "ready"):
+            return  # 已在生成或已就绪
+        log.info("asset retry after error: %s (%s)", label,
+                 str(old.get("error", ""))[:80])
+        assets[group].pop(key, None)
     assets[group][key] = {"status": "pending", "file": "", "label": label,
                           "error": "", "queued_at": time.time()}
     # 新图独占显示：同标签旧版先归档保留；生成失败时回退展示旧版
@@ -688,6 +712,8 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
     async def run():
         item = assets[group][key]
         log.info("asset task start: %s", label)
+        _t_start = time.time()
+        _is_preview = "·演变" in str(label)
         try:
             data = await coro_factory()
             if isinstance(data, tuple):
@@ -709,9 +735,15 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
             # B-05/M-02：成品复检是 CPU/解码密集的同步函数，丢线程池
             # （原来直接在事件循环上跑：一次复检要整图解码 + 像素循环）。
             # 同时把「两次调用」合成一次（`_raw_quality_issue` 内部一次解码）。
-            _bad = await asyncio.to_thread(_raw_quality_issue, data)
-            if _bad:
-                raise ImageGenError(f"成品复检未通过（{_bad}）")
+            # 演示模式（没有真实生图服务）的占位图是彩色噪声，不能走真实
+            # 成品质检——否则会出现「主角有图、NPC 全失败」的假故障。
+            _mock_image = bool((session.get("mock") or {}).get("image"))
+            if not _mock_image:
+                _bad = await asyncio.to_thread(
+                    _raw_quality_issue, data,
+                    allow_multi=(group == "backgrounds"))
+                if _bad:
+                    raise ImageGenError(f"成品复检未通过（{_bad}）")
             filename = _finish_file_name(base, seq, data, ext)
             rel = f"{dir_name}/{sub}/{filename}"
             path = sid_dir / filename
@@ -726,11 +758,17 @@ def _queue_asset(session: dict, group: str, key: str, label: str,
             item["status"] = "ready"
             item["file"] = rel
             _save_cg_if_bridge(session, key, rel)
+            _p = _perf(session)
+            _p["images"] += 1
+            _p["image_seconds"] += max(0.0, time.time() - _t_start)
+            if _is_preview:
+                _p["previews"] += 1
             _persist(session)
             log.info("asset task ready: %s", label)
         except Exception as e:
             # 兜底：任何异常都标记 error（否则任务逃逸会让资产永远 pending）
             log.warning("asset generation failed %s: %s", label, e)
+            _perf(session)["failed"] += 1
             item["status"] = "error"
             item["error"] = str(e)[:200]
             # 生成失败：展示上一版旧立绘，不让玩家空屏
@@ -906,6 +944,7 @@ def start_coc_tsf_portrait(mirror: dict, *, progress: int | None = None,
     mode_tag = "mock" if client.mock else "real"
     key = _skey(mirror, "coc-tsf-portrait", mode_tag, PROMPT_VERSION, _params_tag(cfg),
                 *pixel_mod.key_parts(cfg.get("image")),   # 像素开关进 key：开/关各自成图
+                *style_key_part(cfg.get("image")),        # t61：画风进键（默认零影响）
                 name, anchor, idx, int(p // 10))
     label = f"{name}·阶段{idx + 1}"
     handle = mirror.get("prot_handle") or name
@@ -989,6 +1028,36 @@ def _uniform_for(session: dict) -> tuple[str | None, str | None]:
     if hit:
         return hit
     return None, None
+
+
+# 1.9.0：换装时只有「本来就是制服类」的服装才继续套本局制服锁。
+# 旧逻辑无条件把 uniform_en 追加到换装 prompt——玩家让角色换「白色连衣裙」
+# 时，prompt 里同时有 dress 和 school uniform，两者互撕，经常被拉回校服
+# 或画成四不像。非制服类换装 = 显式清空制服锁（空串，而不是 None——None
+# 会回退全局 config，仍然套锁）。
+_UNIFORM_OUTFIT_HINTS = (
+    "制服", "校服", "水手服", "西装校服", "学生服", "巫女", "女仆",
+    "护士", "白大褂", "军装", "警服", "和服", "浴衣", "骑士", "圣女",
+    "偶像", "打歌服", "啦啦队", "运动服", "体操服", "飞行服", "驾驶服",
+    "uniform", "sailor", "blazer", "miko", "maid", "nurse", "lab coat",
+)
+
+
+def _outfit_uniform_like(outfit: str) -> bool:
+    text = str(outfit or "").strip().lower()
+    return bool(text) and any(k.lower() in text for k in _UNIFORM_OUTFIT_HINTS)
+
+
+def _uniform_for_portrait(session: dict, outfit_s: str = "") -> tuple[str | None, str | None]:
+    """立绘生效制服：普通立绘按会话/场景；换装非制服类时显式摘锁。"""
+    if str(outfit_s or "").strip() and not _outfit_uniform_like(outfit_s):
+        return "", ""
+    return _uniform_for(session)
+
+
+def _uniform_text_for(session: dict, outfit_s: str = "") -> str:
+    en, _neg = _uniform_for_portrait(session, outfit_s)
+    return str(en or "").strip()
 
 
 async def _context_summary(session: dict) -> str:
@@ -1138,13 +1207,9 @@ async def new_game_plus(source: dict, title: str = "") -> dict:
         "title": (str(title).strip()
                   or f"{str(source.get('title', '未命名'))}·二周目")[:40],
         "world": source.get("world", ""),
-        "characters": [
-            {"name": c.get("name", ""),
-             "appearance": c.get("appearance", ""),
-             "personality": c.get("personality", "")}
-            for c in (source.get("characters") or [])
-            if c.get("name")
-        ][:4],
+        "characters": charm.normalize_character_list(
+            source.get("characters") or [], limit=4,
+            protagonist=str(src_prot.get("name", ""))),
         "protagonist": {
             "name": src_prot.get("name", "主角"),
             "anchor": src_prot.get("anchor", "黑色短发，深色眼瞳，日常便装"),
@@ -1158,6 +1223,7 @@ async def new_game_plus(source: dict, title: str = "") -> dict:
         "stat_config": source.get("stat_config"),
         "uniform_en": source.get("uniform_en", ""),
         "uniform_neg": source.get("uniform_neg", ""),
+        "uniform_name": source.get("uniform_name", ""),
         "directives": [d for d in (source.get("directives") or [])
                        if d.get("enabled")],
         "tsf_target": source.get("tsf_target", {}),
@@ -1194,7 +1260,13 @@ async def new_game_plus(source: dict, title: str = "") -> dict:
 
 
 def _img_style(session: dict) -> str:
-    """风格后缀：游戏配置 + 电影风格档 + 插件追加的 image_style 指令。"""
+    """风格后缀：游戏配置 + 电影风格档 + 插件追加的 image_style 指令 + 画风预设。
+
+    t61：末尾**追加** `image.style_preset` / `image.style_custom` 的画风词
+    （`style_suffix()` 在默认/未设时返回空串 ⇒ 与改动前逐字节相同）。
+    追加顺序刻意放在最后：既有 TSF 阶段提示词、电影档、插件指令**一个字符不动**，
+    画风只在尾部叠加（契约红线：不得替换既有提示词）。
+    """
     from .plugins import image_style_extras
     game_cfg = cfgmod.load_config()["game"]
     base = apply_style_mode(game_cfg.get("style_suffix", ""),
@@ -1202,13 +1274,24 @@ def _img_style(session: dict) -> str:
     extras = image_style_extras()
     if extras:
         base += "，" + "，".join(extras)
-    return base
+    img_cfg = cfgmod.load_config().get("image") or {}
+    # t70：画风若绑定了专门 LoRA（如像素风 → pixel-art-xl），LoRA 词**必须**拼进提示词，
+    # 否则模型永远加载不上（A1111 靠 `<lora:名:权重>` 词触发加载）。
+    # 放在最末：既有阶段词/电影档/插件指令/画风词**一个字符不动**（沿用 t61 红线）。
+    lo = lora_tag(img_cfg)
+    return base + style_suffix(img_cfg) + (("，" + lo) if lo else "")
 
 
 def _img_extra_neg(session: dict) -> str:
-    """插件追加的立绘负面词（减少错误生成）。"""
+    """插件追加的立绘负面词（减少错误生成）+ 画风预设的负面追加词（t61）。
+
+    画风负面**只来自预设表**：`image.style_custom`（玩家自由文本）**不进负面**，
+    否则玩家输入会把负面区破掉（契约要求）。
+    """
     from .plugins import image_negative_extras
-    return "，".join(image_negative_extras())
+    parts = ["，".join(image_negative_extras()), style_negative(
+        cfgmod.load_config().get("image") or {}).lstrip("，")]
+    return "，".join(p for p in parts if p)
 
 
 
@@ -1294,16 +1377,21 @@ def _final_check_issue(data: bytes, nude_ok: bool = False) -> str | None:
         return None
 
 
-def _raw_quality_issue(data: bytes) -> str | None:
+def _raw_quality_issue(data: bytes, *, allow_multi: bool = False) -> str | None:
     """raw 级成品复检（`_queue_asset` 写 ready 前的那道门）：双人同框 + 绿噪。
 
-    B-05/M-02：原来是一次 `_multi_figure_issue(data)` 再 `_green_noise_issue(data)`
-    （同一张图解码两次）；这里合成一个函数、共用一次解码，便于整体丢线程池。
+    `allow_multi=True` 用于背景/CG：它们本来就允许多人同框（CG 更是必须），
+    旧逻辑拿「双人同框」去毙背景，导致旧存档的庭院/走廊反复生成失败、永远
+    没有场景图。背景仍保留绿噪/解码/尺寸等硬检查。
     """
     try:
         from .image import (_check_bundle, _multi_figure_issue_b,
                             _green_noise_issue_b)
         bundle = _check_bundle(data)
+        if allow_multi:
+            # 背景/CG：多人同框与绿色场景（庭院/森林/草地）都是正常内容，
+            # 不能拿立绘的绿噪点判据去毙；解码/尺寸由 _bg_check 负责。
+            return None
         return _multi_figure_issue_b(bundle) or _green_noise_issue_b(bundle)
     except Exception:
         return None
@@ -1399,7 +1487,12 @@ async def _refine_with_retry(client, prev_cut: bytes, prompt: str, seed: int,
             prev_cut, prompt, s, denoise=denoise,
             body_pass=True, body_denoise=body_dn,
             hair_words=hair_words, negative_extra=negative_extra)
-        issue = await asyncio.to_thread(_chain_issue, out, prev_cut)
+        # refine_transition 的内部降级会返回原图；不能把“没有发生变化”
+        # 当成链式成功，否则 TSF 阶段会写入一张伪 ready 旧图。
+        if out == prev_cut:
+            issue = "转变链未产生变化"
+        else:
+            issue = await asyncio.to_thread(_chain_issue, out, prev_cut)
         if not issue:
             return out
         last = issue
@@ -2044,14 +2137,23 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
                                 outfit: str = "", note: str = "",
                                 use_initial: bool = False,
                                 force_fullgen: bool = False,
-                                stage_jump: bool = False) -> None:  # noqa: E501
+                                stage_jump: bool = False,
+                                stage_override: int | None = None,
+                                progress_override: int | None = None,
+                                label_override: str = "",
+                                key_tag: str = "") -> str:  # noqa: E501
     """生成主角当前阶段（或换装）的立绘。outfit 非空 = 换装差分；
     note 非空 = 玩家的重画需求（翻译后注入提示词）。
     use_initial=True：以「初始（阶段1）立绘」为底图，按当前同化率重建当前
     阶段——提示词由后台 API 按同化率生成（勾选「参考目前同化率重新生成」）。
     force_fullgen（1.7.18）：阶段四（81-100%）首次跃迁强制走**全量生成**——
     实测链式/初始重建（img2img 0.36~0.5）都变不出完整女性（男性底图质量
-    压不住），全量+放宽负面+女性词=「从男性变为女性」的最终形态（用户诉求）。"""
+    压不住），全量+放宽负面+女性词=「从男性变为女性」的最终形态（用户诉求）。
+
+    1.8.0「六段演变工坊」扩展（全部默认 None/空 = 旧行为逐字不变）：
+    `stage_override` / `progress_override` 让同一条游戏内引擎按指定段与
+    同化率生成（演廊预演），`label_override` / `key_tag` 把它与真实阶段
+    资产区分开（真实资产仍是「角色·阶段N」）。返回资产 key，调用方可等待。"""
     use_initial = bool(use_initial)
     cfg = cfgmod.load_config()
     game_cfg = cfg["game"]
@@ -2059,18 +2161,26 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
     prot = session["protagonist"]
     stages_tbl = tsf.stages_for(session)
     _ensure_stage_plan(session)  # 1.7.43：预写计划缺失/过期时重建（惰性）
-    stage_idx = tsf.stage_of(prot["stats"]["progress"], stages_tbl)
-    pband = int(int(prot["stats"]["progress"]) // 10)  # 进度分带：平滑提示词按 10% 重画
+    if stage_override is None:
+        stage_idx = tsf.stage_of(prot["stats"]["progress"], stages_tbl)
+    else:
+        stage_idx = max(0, min(len(stages_tbl) - 1, int(stage_override)))
+    progress = (int(progress_override) if progress_override is not None
+                else int(prot["stats"]["progress"]))
+    progress = max(0, min(100, progress))
+    pband = int(progress // 10)  # 进度分带：平滑提示词按 10% 重画
     name, anchor = prot["name"], prot.get("anchor", "")
     outfit_s = (outfit or "").strip()
     note_s = (note or "").strip()
     mode_tag = "mock" if client.mock else "real"
     key = _skey(session, "tsf-portrait", mode_tag, PROMPT_VERSION, _params_tag(cfg),
                 *pixel_mod.key_parts(cfg.get("image")),
+                *style_key_part(cfg.get("image")),     # t61：画风进键（默认空元组 ⇒ 键逐位不变）
                 name, anchor, stage_idx, pband, outfit_s[:60], note_s[:60],
-                "initref" if use_initial else "", nonce)
-    label = (f"{name}·阶段{stage_idx + 1}" if not outfit_s
-             else f"{name}·{outfit_s}")
+                "initref" if use_initial else "", key_tag, nonce)
+    label = (label_override
+             or (f"{name}·阶段{stage_idx + 1}" if not outfit_s
+                 else f"{name}·{outfit_s}"))
     fname = _reserve_file_name(session, session.get("prot_handle") or name)  # 主角固定文档名(序号)
     style = _img_style(session)
 
@@ -2080,7 +2190,7 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
         await _ensure_stage_plan_llm(session)
         note_en = await _regen_prompt_suffix(note_s, anchor)
         req = (f"，{note_en}" if note_en else "")
-        progress = int(prot["stats"]["progress"])
+        # progress 已在函数入口按 progress_override 归一（1.8.0 演廊用）
         # 1.7.16：主角「转变目标设定」—— 目标词注入 + 放宽负面（不封杀
         # 女性特征）+ 防变化词已从 TRANSFORM_IMPROVE_EN/SOFT_TRANSFORM_EN
         # 中移除；NPC 路径零影响
@@ -2100,7 +2210,7 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
                         .replace("，cinematic film still, cinematic lighting, "
                                  "dramatic light and shadow, film grain", ""))
         # 1.7.35 本局生效制服（玩家设定 > 当前场景自动映射 > 无）
-        unif_eff = _uniform_for(session)
+        unif_eff = _uniform_for_portrait(session, outfit_s)
         # 1.7.43 预写计划优先（「写出六步/十步变化」能力）：开局已按六条
         # 渐变状态机（发长/发色溶解/脸型/表情/服装重组/性征）写好该段词，
         # 每段只推进 1-2 个主维度；目标词已按段内女性权重并入计划
@@ -2129,7 +2239,8 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
         # 无判定器直调 100% 成功；判定器只服务该局六段验证过的跃迁路径）
         if (not outfit_s and stage_jump and not client.mock
                 and client.provider == "sdwebui"
-                and cfg["image"].get("tsf_stage_matcher", True)):
+                and cfg["image"].get("tsf_stage_matcher", True)
+                and not cfg["image"].get("eco_mode")):  # 1.8.0 节能：跃迁也不打标
             prev = (_find_prev_cutout(session, name,
                                       f"{name}·阶段{stage_idx + 1}")
                     or _find_prev_cutout(session, name,
@@ -2215,8 +2326,8 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
         if outfit_s:
             # 换装首选「图生图限定服装区域重绘」：底图=同阶段当前立绘，脸不变
             outfit_en = await _outfit_terms(outfit_s, anchor)
-            unif_en = str(session.get("uniform_en")
-                          or cfg.get("image", {}).get("uniform_keyword_en", "")) or ""
+            # 非制服类换装显式摘制服锁（见 _uniform_for_portrait 注释）
+            unif_en = _uniform_text_for(session, outfit_s)
             inp_prompt = (f"{base_prompt}，{style_us}，换装为：{outfit_s}"
                           + (f"，{outfit_en}" if outfit_en else "")
                           + (f"，{unif_en}" if unif_en else "")
@@ -2354,7 +2465,9 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
         issue = await asyncio.to_thread(
             _final_check_issue, out,
             nude_ok=_nude_hint_text(outfit_s, note_s))
-        if issue and not outfit_s:
+        # 演示/mock 图只是占位噪声，不能拿真实成品质检去毙掉它，否则
+        # 无 API 的首次体验会出现「主角有图、NPC 全是破图」的假故障。
+        if issue and not outfit_s and not client.mock:
             raise ImageGenError(f"成品完整性复检未通过（{issue}）")
         # 脸部 img2img 一致性：仅同阶段重画/换装有可参考的原图时执行（禁跨阶段取脸）
         if not issue and _face_refine_enabled(cfg):
@@ -2368,6 +2481,234 @@ def _start_protagonist_portrait(session: dict, nonce: int = 0,
 
     _queue_asset(session, "portraits", key, label, factory,
                  session.get("prot_handle") or name, fname)
+    return key
+
+
+def _stage_tour_label(session: dict, idx: int) -> str:
+    """六段演变预演的统一标签（与真实「阶段N」资产严格区分）。"""
+    return f"{session['protagonist']['name']}·演变{int(idx) + 1}"
+
+
+def _stage_tour_progress(stages: list[dict], idx: int) -> int:
+    """取该段的「代表同化率」= 段区间中点（末段 100）。
+
+    为什么不用段下界：`stage_of` 的边界是「progress <= max」——
+    六段一 0-20 的 20 会被判回第一段。中点既保证落段正确，也让该段
+    的女性权重/特征词处于段内代表值，预览图更像玩家真正会看到的样子。
+    """
+    try:
+        s = stages[int(idx)]
+    except (IndexError, TypeError):
+        return 0
+    lo = int(s.get("min", 0))
+    hi = int(s.get("max", lo))
+    return 100 if lo >= 100 or hi >= 100 else min(100, max(lo, (lo + hi) // 2))
+
+
+def _stage_tour_entry(session: dict, idx: int):
+    """会话资产里查找某段的演廊条目 → (key, item|None)。"""
+    label = _stage_tour_label(session, idx)
+    for k, item in (session.get("assets", {}).get("portraits") or {}).items():
+        if item.get("label") == label:
+            return k, item
+    return "", None
+
+
+def stage_tour_view(sid: str) -> dict:
+    """「六段演变工坊」视图：段表 + 预演资产状态 + 任务进度（只读）。"""
+    session = get_session(sid)
+    _ensure_stage_plan(session)
+    stages = tsf.stages_for(session)
+    prot = session["protagonist"]
+    progress = int(prot["stats"]["progress"])
+    cur = tsf.stage_of(progress, stages)
+    plan = session.get("stage_plan") or []
+    out_stages = []
+    for i, s in enumerate(stages):
+        key, item = _stage_tour_entry(session, i)
+        entry = {
+            "index": i,
+            "name": s.get("name", f"第{i + 1}段"),
+            "identity": s.get("identity", ""),
+            "desc": s.get("desc", ""),
+            "min": int(s.get("min", 0)),
+            "max": int(s.get("max", 0)),
+            "progress": _stage_tour_progress(stages, i),
+            "current": i == cur,
+            "plan_prompt": (plan[i].get("prompt", "") if i < len(plan) else ""),
+        }
+        if item:
+            entry["preview"] = {
+                "key": key,
+                "status": item.get("status", ""),
+                "file": item.get("file", ""),
+                "error": item.get("error", ""),
+                "raw_file": item.get("raw_file", ""),
+                "label": item.get("label", ""),
+            }
+        out_stages.append(entry)
+    tour = dict(session.get("stage_tour") or {})
+    running = sid in _STAGE_TOUR_TASKS and not _STAGE_TOUR_TASKS[sid].done()
+    if tour.get("status") == "running" and not running:
+        # 服务重启/任务丢失：不要永远显示「生成中」
+        tour["status"] = "interrupted"
+    cfg = cfgmod.load_config()
+    return {
+        "sid": sid,
+        "version": PROMPT_VERSION,
+        "protagonist": prot["name"],
+        "progress": progress,
+        "stage": cur,
+        "stage_count": len(stages),
+        "stages": out_stages,
+        "tour": {
+            "status": tour.get("status", "idle"),
+            "current": int(tour.get("current", -1)),
+            "total": int(tour.get("total", 0)),
+            "indices": tour.get("indices") or [],
+            "error": tour.get("error", ""),
+            "started": tour.get("started", 0),
+            "updated": tour.get("updated", 0),
+        },
+        "eco": bool(cfg["image"].get("eco_mode")),
+        "gen_cache": bool(cfg["image"].get("gen_cache", True)),
+    }
+
+
+async def _wait_stage_asset(session: dict, key: str, timeout: float = 900.0) -> dict:
+    """等待一个演廊资产落定（ready/error）；error 留 20s 给自动重画翻转。"""
+    t0 = time.time()
+    saw_error = 0.0
+    while time.time() - t0 < timeout:
+        item = (session.get("assets", {}).get("portraits") or {}).get(key)
+        if item is None:
+            return {"status": "missing"}
+        st = item.get("status")
+        if st == "ready":
+            return item
+        if st == "error":
+            if not saw_error:
+                saw_error = time.time()
+            elif time.time() - saw_error > 20:
+                return item
+        await asyncio.sleep(0.4)
+    return {"status": "timeout"}
+
+
+async def run_stage_tour(sid: str, indices: list[int] | None = None,
+                         force: bool = False) -> dict:
+    """用游戏内同一条立绘引擎，按顺序生成「六段性转变」全程。
+
+    - 串行逐段（SD 串行闸门天然生效），每段全量生成（跨性别只能全量）；
+    - 已有且非 force 的段直接复用（缓存/重复点击零消耗）；
+    - 可取消：任务取消后已完成的段保留，未开始的段不再消耗算力。
+    """
+    session = get_session(sid)
+    if sid in _STAGE_TOUR_TASKS and not _STAGE_TOUR_TASKS[sid].done():
+        return {"started": False, "running": True,
+                "tour": stage_tour_view(sid)["tour"]}
+    stages = tsf.stages_for(session)
+    n = len(stages)
+    idxs = [int(i) for i in (indices or list(range(n)))
+            if 0 <= int(i) < n]
+    if not idxs:
+        idxs = list(range(n))
+    tour = session.setdefault("stage_tour", {})
+    tour.update({"status": "running", "current": -1, "total": len(idxs),
+                 "indices": idxs, "error": "", "_pending": True,
+                 "started": time.time(), "updated": time.time()})
+    _perf(session)["tour_runs"] += 1
+    persist(session)
+
+    async def runner():
+        try:
+            for pos, i in enumerate(idxs):
+                tour["current"] = i
+                tour["updated"] = time.time()
+                persist(session)
+                key, item = _stage_tour_entry(session, i)
+                if item and item.get("status") == "ready" and not force:
+                    continue
+                if item and item.get("status") == "pending":
+                    await _wait_stage_asset(session, key)
+                    continue
+                prog = _stage_tour_progress(stages, i)
+                key2 = _start_protagonist_portrait(
+                    session, nonce=int(time.time()) if force else 0,
+                    stage_override=i, progress_override=prog,
+                    force_fullgen=True,
+                    label_override=_stage_tour_label(session, i),
+                    key_tag="stage-tour")
+                res = await _wait_stage_asset(session, key2)
+                if res.get("status") != "ready":
+                    tour["status"] = "error"
+                    tour["error"] = (res.get("error") or
+                                     f"第 {i + 1} 段生成失败（{res.get('status')}）")
+                    persist(session)
+                    return
+            tour["status"] = "done"
+            tour["current"] = idxs[-1]
+            tour["updated"] = time.time()
+            tour.pop("_pending", None)
+            persist(session)
+            log.info("stage tour done: %s (%d stages)", sid, len(idxs))
+        except asyncio.CancelledError:
+            tour["status"] = "cancelled"
+            tour["updated"] = time.time()
+            try:
+                persist(session)
+            except Exception:
+                pass
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("stage tour failed: %s", e)
+            tour["status"] = "error"
+            tour["error"] = str(e)[:200]
+            tour["updated"] = time.time()
+            persist(session)
+        finally:
+            _STAGE_TOUR_TASKS.pop(sid, None)
+
+    task = asyncio.create_task(runner())
+    _STAGE_TOUR_TASKS[sid] = task
+    return {"started": True, "running": True,
+            "tour": {"status": "running", "current": -1,
+                     "total": len(idxs), "indices": idxs}}
+
+
+def cancel_stage_tour(sid: str) -> dict:
+    """取消正在进行的六段演变预演（已生成段保留）。"""
+    task = _STAGE_TOUR_TASKS.get(sid)
+    if task and not task.done():
+        task.cancel()
+        return {"cancelled": True}
+    try:
+        session = get_session(sid)
+        tour = session.setdefault("stage_tour", {})
+        if tour.get("status") == "running":
+            tour["status"] = "cancelled"
+            persist(session)
+    except Exception:
+        pass
+    return {"cancelled": False}
+
+
+def perf_view(sid: str) -> dict:
+    """本局/本次运行的「性能与消耗」快照（只读，供 UI 展示与调参依据）。"""
+    session = get_session(sid)
+    p = _perf(session)
+    cfg = cfgmod.load_config()
+    from . import image as image_mod
+    runtime = image_mod.gen_stats_snapshot(reset=False)
+    return {
+        "session": p,
+        "runtime": runtime,
+        "avg_seconds": round(p["image_seconds"] / max(1, p["images"]), 1),
+        "eco": bool(cfg["image"].get("eco_mode")),
+        "gen_cache": bool(cfg["image"].get("gen_cache", True)),
+        "gen_cache_mb": int(cfg["image"].get("gen_cache_mb", 384) or 384),
+        "sd": image_mod.sd_state(),
+    }
 
 
 def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
@@ -2398,6 +2739,7 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
         outfit_part = f"（服装：{outfit_s}）" if outfit_s else ""
         key = _skey(session, "portrait", mode_tag, PROMPT_VERSION, _params_tag(cfg),
                     *pixel_mod.key_parts(cfg.get("image")),
+                    *style_key_part(cfg.get("image")),   # t61：画风进键（默认零影响）
                     name, appearance, emotion, outfit_s[:60], note_s[:60],
                     nonce)
         label = (f"{name}·{outfit_s}·{emotion}" if outfit_s
@@ -2412,7 +2754,7 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
             req = (f"，{note_en}" if note_en else "")
             emotion_cn = game_cfg.get("emotion_cn", {}).get(emotion, emotion)
             # 1.7.35 本局生效制服（玩家设定 > 当前场景自动映射 > 无）
-            unif_eff = _uniform_for(session)
+            unif_eff = _uniform_for_portrait(session, outfit_s)
             if client.mock:
                 data = await client.generate_portrait(
                     name, appearance + outfit_part + req, emotion,
@@ -2462,9 +2804,7 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
                     # 直接以「当前立绘」为底做同一套换装（身形/姿势/脸不动，
                     # 且不会落入会被制服锁定词拽回校服的 prompt 冲突）
                     outfit_en = await _outfit_terms(outfit_s, appearance)
-                    unif_en_ = str(session.get("uniform_en")
-                                   or cfg.get("image", {}).get(
-                                       "uniform_keyword_en", "")) or ""
+                    unif_en_ = _uniform_text_for(session, outfit_s)
                     nm = _outfit_nude_mode(session, outfit_s)
                     inp_prompt_ = (f"{appearance}，{emotion_cn}，{style}，"
                                    f"换装为：{outfit_s}"
@@ -2490,8 +2830,7 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
             if outfit_s:
                 # 换装首选「图生图限定服装区域重绘」：旧立绘为底，脸/姿势不变
                 outfit_en = await _outfit_terms(outfit_s, appearance)
-                unif_en = str(session.get("uniform_en")
-                          or cfg.get("image", {}).get("uniform_keyword_en", "")) or ""
+                unif_en = _uniform_text_for(session, outfit_s)
                 nm = _outfit_nude_mode(session, outfit_s)
                 inp_prompt = (f"{appearance}，{emotion_cn}，{style}，"
                               f"换装为：{outfit_s}"
@@ -2535,7 +2874,7 @@ def _start_npc_portrait(session: dict, character: dict, nonce: int = 0,
             issue = await asyncio.to_thread(
                 _final_check_issue, out,
                 nude_ok=_nude_hint_text(outfit_s, note_s))
-            if issue and not outfit_s:
+            if issue and not outfit_s and not client.mock:
                 raise ImageGenError(f"成品完整性复检未通过（{issue}）")
             # 脸部 img2img 一致性：NPC 跨表情以 neutral 或同角色原图为参考
             if not issue and _face_refine_enabled(cfg):
@@ -2834,6 +3173,48 @@ def _find_asset_file(file: str) -> str | None:
     return None
 
 
+def _recover_interrupted_assets(session: dict) -> int:
+    """读档/启动时修复「上次进程中断留下的 pending 资产」。
+
+    老存档常见问题：快照保存时某张背景/立绘还是 pending（服务正好在生成），
+    下次读档后这个 pending 永远没有任务推进它——前端一直等，场景也永远不生成。
+    这里把 pending 转 error；若文件其实已落盘则恢复 ready。同时清空场景补生成
+    的重试预算，让旧档读入后能重新尝试生成背景。
+    """
+    recovered = 0
+    for group, items in (session.get("assets") or {}).items():
+        for item in (items or {}).values():
+            if not isinstance(item, dict) or item.get("status") == "ready":
+                continue
+            f = item.get("file") or ""
+            path = cfgmod.CACHE_DIR / f if f else None
+            min_size = 60000 if group == "portraits" else 1024
+            if path is not None and path.is_file() and path.stat().st_size > min_size:
+                item["status"] = "ready"
+                item["error"] = ""
+                recovered += 1
+            elif item.get("status") == "pending":
+                item["status"] = "error"
+                item["error"] = "存档中的生成任务在上次退出时中断，将自动重新生成"
+                recovered += 1
+    # 旧档可能已经耗尽了场景补生成预算（state=unavailable）；读档应给一次新机会。
+    if session.get("bg_retry"):
+        session["bg_retry"] = {}
+    # 旧档的 bg_hint_cache 可能缓存了带角色名的旧提示词（模型据此画出人物）；
+    # 清掉后让 _enhance_bg_hint 用当前规则重新提炼。
+    if session.get("bg_hint_cache"):
+        session["bg_hint_cache"] = {}
+    try:
+        entry = session["log"][-1]
+        turn = entry.get("turn") if isinstance(entry, dict) else None
+        if isinstance(turn, dict):
+            turn.pop("bg_unavailable", None)
+            turn.pop("scene_revisit", None)
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass
+    return recovered + _ensure_asset_paths(session)
+
+
 def _ensure_asset_paths(session: dict) -> int:
     """修复会话全部资产引用（读档/启动后调用），使立绘始终可读取。
 
@@ -2902,22 +3283,55 @@ def portrait_history_view(sid: str) -> dict:
     按时间倒序，主角条目附带当时的同化率。"""
     session = get_session(sid)
     prot_name = session["protagonist"]["name"]
+    # 1.9.13：旧实现把**所有 ready 立绘**都标成 current，于是新生成的阶段6
+    # 在历程里显示「当前」，但舞台实际还在用阶段5（或 pin 的另一张）。
+    # current 必须按引擎真实选图规则计算：pin > 主角当前换装 > 当前阶段
+    # （阶段图缺失时回退到不高于当前阶段的最近一张）；NPC 取最近完成一张。
+    ready = [it for it in session["assets"]["portraits"].values()
+             if it.get("file") and it.get("status") == "ready"]
+    pins = session.get("pinned_portraits") or {}
+    actual = set()
+    pin = pins.get(prot_name)
+    if pin:
+        actual.add(pin)
+    else:
+        outfit = session.get(f"{prot_name}|outfit") or ""
+        if outfit and any(it.get("label") == f"{prot_name}·{outfit}" for it in ready):
+            actual.add(f"{prot_name}·{outfit}")
+        else:
+            stages = tsf.stages_for(session)
+            prog = int((session["protagonist"].get("stats") or {}).get("progress", 0) or 0)
+            cur = tsf.stage_of(prog, stages)
+            for idx in range(cur, -1, -1):
+                label = f"{prot_name}·阶段{idx + 1}"
+                if any(it.get("label") == label for it in ready):
+                    actual.add(label)
+                    break
+    for name in {str((it.get("label") or "").split("·")[0]) for it in ready}:
+        if name == prot_name:
+            continue
+        cand = [it for it in ready
+                if (it.get("label") or "").startswith(name + "·")]
+        if cand:
+            cand.sort(key=lambda it: it.get("finished_at") or 0, reverse=True)
+            actual.add(cand[0].get("label", ""))
+
     entries = []
     for it in session.get("portrait_history", []):
         if it.get("file"):
             entries.append(dict(it, current=False))
-    for it in session["assets"]["portraits"].values():
-        if it.get("file") and it.get("status") == "ready":
-            entries.append({
-                "archive_ts": it.get("finished_at") or session["saved_at"] or 0,
-                "label": it.get("label", ""),
-                "file": it.get("file", ""),
-                "raw_file": it.get("raw_file", ""),
-                "progress": ((session["protagonist"].get("stats") or {})
-                             .get("progress", 0)
-                             if (it.get("label") or "").startswith(prot_name + "·") else 0),
-                "current": True,
-            })
+    for it in ready:
+        label = it.get("label", "")
+        entries.append({
+            "archive_ts": it.get("finished_at") or session["saved_at"] or 0,
+            "label": label,
+            "file": it.get("file", ""),
+            "raw_file": it.get("raw_file", ""),
+            "progress": ((session["protagonist"].get("stats") or {})
+                         .get("progress", 0)
+                         if label.startswith(prot_name + "·") else 0),
+            "current": label in actual,
+        })
     entries.sort(key=lambda e: e.get("archive_ts", 0), reverse=True)
     return {"protagonist": prot_name, "entries": entries}
 
@@ -3309,9 +3723,19 @@ def _assign_scene_bg(session: dict, turn: dict) -> None:
 
     调试信息写入日志：first visit -> new bg / revisit -> reuse bg。
     """
-    scene_name = turn.get("scene", "……")
-    scene_id = hashlib.sha256(scene_name.encode("utf-8")).hexdigest()[:10]
+    scene_name = str(turn.get("scene", "……") or "……")[:30]
     scenes = session.setdefault("scenes", {})
+    # 1.9.0 场景连续性：LLM 常把同一地点写成「操场」「操场（午后）」
+    # 「星冠学园·操场」等变体。旧逻辑按原名哈希 → 每变一次就重画一张背景。
+    # 这里归一到已登记的同地点原名，复用它的固定背景（玩家看到的地名也稳定）。
+    canon = scenemod.canonical_scene(
+        scene_name, [str(x.get("name", "")) for x in scenes.values()
+                     if isinstance(x, dict) and x.get("name")])
+    if canon and canon != scene_name:
+        log.info("scene canonicalize '%s' -> '%s' (reuse same location)",
+                 scene_name, canon)
+        turn["scene"] = scene_name = canon
+    scene_id = hashlib.sha256(scene_name.encode("utf-8")).hexdigest()[:10]
     sc = scenes.get(scene_id)
     if sc and sc.get("bg_id"):
         key = session.get("bg_map", {}).get(sc["bg_id"])
@@ -3866,6 +4290,11 @@ def _apply_turn_stats(session: dict, turn: dict, mock: bool) -> dict:
         char_delta = {n: {k: 1 for k in keys} for n in vn_mod.char_names(session)}
         turn["states_delta"] = char_delta
     vn_mod.apply_char_delta(session, char_delta)
+    # 1.9.0 感情机制：缺席角色缓慢回归 + 本幕情感记忆/关系里程碑。
+    # 必须在 states_delta 应用之后、scene 已确定时记录；开局幕不衰减。
+    vn_mod.apply_absence_decay(session, turn.get("present") or [],
+                               is_opening=not bool(session.get("log")))
+    vn_mod.record_turn_emotions(session, turn)
     _stages = tsf.stages_for(session)
     before_stage = tsf.stage_of(prot["stats"]["progress"], _stages)
     before = dict(prot["stats"])
@@ -3932,8 +4361,9 @@ def _post_turn(session: dict, turn: dict) -> None:
                 and name != prot_name:
             candidates.append({"name": name, "appearance": "", "personality": ""})
     for c in candidates:
+        c = charm.sanitize_character(c)
         name = c["name"]
-        if name in existing or name in ("旁白", prot_name):
+        if not name or name in existing or name in ("旁白", prot_name):
             continue
         if len(pool) >= 10:
             log.warning("character pool full (10), ignoring %s", name)
@@ -3942,13 +4372,11 @@ def _post_turn(session: dict, turn: dict) -> None:
         if not appearance:
             # 自动补全完整性描写（保持成年人设定，避免生成失败）
             appearance = "成年角色，着装整洁，外貌待补充"
-        pool.append({
-            "name": name,
-            "appearance": appearance,
-            "personality": c.get("personality", "").strip(),
-            "auto_added": True,          # 标记：由 AI 自主引入
-            "first_seen": turn.get("scene", ""),
-        })
+        entry = dict(c)
+        entry["appearance"] = appearance
+        entry["auto_added"] = True          # 标记：由 AI 自主引入
+        entry["first_seen"] = turn.get("scene", "")
+        pool.append(entry)
         existing.add(name)
         _start_npc_portrait(session, pool[-1])
 
@@ -4126,9 +4554,13 @@ def public_state(session: dict) -> dict:
         "cg_active": bool(turn.get("cg_id")),
         "cg_id": turn.get("cg_id", ""),
         "cg_title": (turn.get("cg") or {}).get("title", ""),
-        "cg_key": "",
+        # 前端用 cg_key 判断「是否换了一张 CG」；旧代码恒为空串 → dataset.key
+        # 永远与空串相等，img 从不 set src，CG 永远不显示。这里返回真实 key。
+        "cg_key": ((session.get("cg_map") or {}).get(turn.get("cg_id")) or {}).get("key", ""),
         "characters_meta": [
-            {"name": c["name"], "auto_added": bool(c.get("auto_added"))}
+            {"name": c["name"], "role": c.get("role", ""),
+             "background": c.get("background", ""),
+             "auto_added": bool(c.get("auto_added"))}
             for c in session["characters"]
         ],
         # 每个角色自己的情绪 / 好感 / 身体数值（含主角，与主角转变数值并存）
@@ -4154,12 +4586,19 @@ def public_state(session: dict) -> dict:
                               session_stat_config(session),
                               tsf.stages_for(session)),
         "stat_config": session_stat_config(session),
+        "uniform_en": session.get("uniform_en", ""),
+        "uniform_neg": session.get("uniform_neg", ""),
+        "uniform_name": session.get("uniform_name", ""),
+        # 1.9.0：本幕关系升级（前端 toast 用；无升级时为空数组）
+        "bond_up": list(turn.get("bond_up") or []),
         "stage_up": bool(turn.get("stage_up")),
         "assets": session["assets"],
         "bg_map": session["bg_map"],
         "cg_url": _cg_url(session, turn),
         "turn_no": len(session["log"]),
         "mock": session["mock"],
+        # 1.9.20：AI 控制台用（导演指令；控制台记录走独立端点）
+        "ai_directive": str(session.get("ai_directive") or ""),
     }
 
 
@@ -4170,6 +4609,68 @@ def public_state_of(session: dict) -> dict:
         from . import vn as vn_mod
         return vn_mod.public_state(session)
     return public_state(session)
+
+
+def _clean_edited_dialogue(session: dict, dialogue: Any) -> list[dict]:
+    """校验并清洗玩家手动修改后的对话（不重跑 LLM、不改数值）。"""
+    known = {"旁白", session["protagonist"]["name"]}
+    known |= {c["name"] for c in session.get("characters", [])}
+    emotions = set(session.get("emotions") or [])
+    out: list[dict] = []
+    for d in (dialogue or [])[:6]:
+        if not isinstance(d, dict):
+            continue
+        text = str(d.get("text") or "").strip()
+        if not text:
+            continue
+        who = str(d.get("character") or "旁白").strip() or "旁白"
+        if who not in known:
+            raise GameError(f"未知角色：{who}")
+        emo = str(d.get("emotion") or "neutral").strip() or "neutral"
+        if emotions and emo not in emotions:
+            emo = "neutral"
+        out.append({"character": who, "emotion": emo, "text": text[:800]})
+    if not out:
+        raise GameError("对话不能为空")
+    return out
+
+
+def edit_dialogue(sid: str, dialogue: Any, choices: Any = None) -> dict:
+    """手动修改当前幕的 AI 对话（可选同时改选项文本）。
+
+    这是**玩家直接编辑表现层**，不重新请求模型、不改任何数值/好感/状态；
+    下一轮 prompt 会把修改后的 assistant 历史原样带回，因此后续剧情会据此衔接。
+    """
+    session = get_session(sid)
+    if not session.get("log"):
+        raise GameError("当前没有可编辑的对话")
+    turn = session["log"][-1]["turn"]
+    turn["dialogue"] = _clean_edited_dialogue(session, dialogue)
+    if choices is not None:
+        cleaned = []
+        for c in (choices or [])[:4]:
+            if not isinstance(c, dict):
+                continue
+            text = str(c.get("text") or "").strip()[:60]
+            if not text:
+                continue
+            cleaned.append({
+                "text": text,
+                "effect": str(c.get("effect") or "").strip()[:40],
+                "bias": str(c.get("bias") or "").strip()[:20],
+            })
+        if cleaned:
+            turn["choices"] = cleaned
+    turn["edited_by_user"] = True
+    persist(session)
+    return public_state_of(session)
+
+
+def set_ai_directive(sid: str, text: str) -> str:
+    session = get_session(sid)
+    session["ai_directive"] = str(text or "").strip()[:500]
+    persist(session)
+    return session["ai_directive"]
 
 
 def history_view(session: dict) -> list[dict]:
@@ -4190,10 +4691,24 @@ async def random_setup() -> dict:
     llm = LLMClient(cfg)
     if llm.mock:
         return MockSetup.random()
-    return await llm.chat_json(
-        [{"role": "user", "content": "请生成一个新的 TSF 题材视觉小说开局设定。"}],
-        temperature=1.0,
-    )
+    # 1.9.14：旧实现只发一句 user 消息、没有 system / JSON schema，模型经常
+    # 回散文或带解释的 JSON → 前端拿到空 world，开局直接报「请先填写世界观」。
+    # 这里复用 prompts 里本来就有、却一直没接上的 TSF_RANDOM_SETUP_SYSTEM；
+    # 模型仍失败时退本地随机设定，保证「🎲 随机生成设定」永远可用。
+    try:
+        data = await llm.chat_json([
+            {"role": "system", "content": prompts.TSF_RANDOM_SETUP_SYSTEM},
+            {"role": "user", "content": "请生成一个全新的 TSF 题材开局设定。"},
+        ], temperature=1.0)
+        if (not isinstance(data, dict)
+                or not str(data.get("world") or "").strip()
+                or not isinstance(data.get("characters"), list)
+                or not data.get("characters")):
+            raise LLMError("随机设定缺少 world/characters")
+        return data
+    except LLMError as e:
+        log.warning("random_setup 失败，回退本地随机设定：%s", e)
+        return MockSetup.random()
 
 
 async def generate_outline(world: str, pname: str, characters: list[dict]) -> dict:
@@ -4255,15 +4770,9 @@ async def start_game(payload: dict) -> dict:
         for e in (payload.get("lorebook") or [])
         if str(e.get("content", "")).strip()
     ]
-    characters = [
-        {
-            "name": str(c.get("name", "")).strip()[:12],
-            "appearance": str(c.get("appearance", "")).strip()[:300],
-            "personality": str(c.get("personality", "")).strip()[:200],
-        }
-        for c in characters
-        if str(c.get("name", "")).strip()
-    ][:4]
+    # 1.9.0：角色卡统一清洗（role/background 也随开局落库），去重名/主角同名。
+    characters = charm.normalize_character_list(
+        characters, limit=4, protagonist=pname)
     if not world:
         raise GameError("请先填写世界观/剧情设定（或点「随机生成设定」）")
 
@@ -4273,14 +4782,18 @@ async def start_game(payload: dict) -> dict:
     # 跨局互不干扰）
     uniform_en = str(payload.get("uniform_en", "") or "").strip()[:200]
     uniform_neg = str(payload.get("uniform_neg", "") or "").strip()[:200]
+    uniform_name = str(payload.get("uniform_name", "") or "").strip()[:40]
 
     cfg = cfgmod.load_config()
     emotions = cfg["game"].get("emotions", ["neutral", "happy", "shy", "sad"])
     # 1.7.29：开局按 config stage_count（4/6/10，默认 6——六段制：
     # 0-20/20-40/40-60/60-80/80-99/100；四段保留可切）确定阶段表并随档持久
     try:
-        _stage_n = int(cfg["game"].get("stage_count", 6))
+        _stage_n = int(payload.get("stage_count") or
+                       cfg["game"].get("stage_count", 6))
     except (KeyError, TypeError, ValueError):
+        _stage_n = 6
+    if _stage_n not in (4, 6, 10):
         _stage_n = 6
     _stages0 = tsf.build_stages(_stage_n)
     session = {
@@ -4307,11 +4820,21 @@ async def start_game(payload: dict) -> dict:
         "char_states": {},    # 每角色一套情绪/好感/身体数值（含主角），建会话后填充
         "uniform_en": uniform_en,
         "uniform_neg": uniform_neg,
+        "uniform_name": uniform_name,
+        # 1.9.0：开局先按世界观推断一个场景，让「学园→校服 / 神社→巫女服」
+        # 的制服映射在**开场立绘**就生效（第一幕返回真实 scene 后覆盖）。
+        "current_scene": scenemod.guess_initial_scene(world, outline,
+                                                       str(payload.get("title", ""))),
+        "stage_count": _stage_n,
+        "schema": 2,
         # 1.7.16：主角「转变目标设定」（开局可预置；游戏内可随时改）
         "tsf_target": _norm_tsf_target(payload.get("tsf_target") or {}),
         "prot_handle": f"{pname}_{uuid.uuid4().hex[:4]}",   # 主角固定随机文档名
         "emotions": emotions,
         "summary": "",
+        # 1.9.20：AI 控制台 / 玩家导演指令（随存档持久；读档后仍可查看与修改）
+        "ai_console": [],
+        "ai_directive": "",
         "log": [],
         "assets": {"portraits": {}, "backgrounds": {}},
         "bg_map": {},
@@ -4333,7 +4856,7 @@ async def start_game(payload: dict) -> dict:
         for c in characters:
             _start_npc_portrait(session, c)
         # 2) 开场剧情（LLM 失败自动降级演示剧情，绝不卡在设定页）
-        llm = LLMClient(cfg)
+        llm = LLMClient(cfg, session=session, label="开场")
         messages = [{"role": "system", "content": build_story_system(session)},
                     {"role": "user",
                      "content": "请生成游戏的开场剧情段落（第一段 dialogue 之前可以有一两句话交代时间地点与主角的初始状态）。"}]
@@ -4342,7 +4865,8 @@ async def start_game(payload: dict) -> dict:
         except LLMError as e:
             log.warning("LLM API unavailable (%s), degraded to demo story", e)
             session["llm_degraded"] = True
-            llm = LLMClient({"llm": {"base_url": "", "api_key": ""}})  # 强制 mock
+            llm = LLMClient({"llm": {"base_url": "", "api_key": ""}},
+                            session=session, label="开场（演示回退）")  # 强制 mock
             turn_raw = await llm.chat_json(messages, temperature=0.8)
         if llm.mock:
             _mock_localize(turn_raw, pname)
@@ -4370,12 +4894,13 @@ async def advance(sid: str, choice_index: int) -> dict:
 
     try:
         await _maybe_compress(session)
-        llm = LLMClient(cfgmod.load_config())
+        llm = LLMClient(cfgmod.load_config(), session=session, label="剧情推进")
         turn_raw = await llm.chat_json(build_messages(session), temperature=0.85)
     except LLMError as e:
         log.warning("LLM API unavailable (%s), this turn degraded to demo", e)
         session["llm_degraded"] = True
-        llm = LLMClient({"llm": {"base_url": "", "api_key": ""}})
+        llm = LLMClient({"llm": {"base_url": "", "api_key": ""}},
+                        session=session, label="剧情推进（演示回退）")
         turn_raw = await llm.chat_json(build_messages(session), temperature=0.85)
 
     if llm.mock:
@@ -4405,7 +4930,7 @@ async def speak(sid: str, text: str) -> dict:
                                     "bias": ""}
     try:
         await _maybe_compress(session)
-        llm = LLMClient(cfgmod.load_config())
+        llm = LLMClient(cfgmod.load_config(), session=session, label="固定话语")
         turn_raw = await llm.chat_json(build_messages(session), temperature=0.85)
     except LLMError as e:
         session["log"][-1]["choice"] = None
@@ -4533,7 +5058,7 @@ async def apply_command(sid: str, character: str, action: str) -> dict:
         messages.append({"role": "user", "content": command_msg})
 
     try:
-        llm = LLMClient(cfgmod.load_config())
+        llm = LLMClient(cfgmod.load_config(), session=session, label="命令")
         turn_raw = await llm.chat_json(messages, temperature=0.9)
         _rename = _clean_rename(turn_raw)
         turn = _sanitize_turn(turn_raw, session["emotions"],
@@ -4718,7 +5243,14 @@ def list_slots(sid: str = "") -> list[dict]:
 def save_slot(sid: str, name: str) -> dict:
     """把当前会话完整快照存入全局存档库（固定位置）。"""
     session = get_session(sid)
-    slot_id = f"slot{int(time.time())}"
+    # 1.9.4：毫秒级 + 碰撞后缀。旧版用秒级 slot{int(time.time())}，快速连存
+    # 会覆盖上一份（用户看到的「刚存的档不见了」/存档乱跳的诱因之一）。
+    base = int(time.time() * 1000)
+    slot_id = f"slot{base}"
+    n = 1
+    while (_slots_dir() / f"{slot_id}.json").exists():
+        slot_id = f"slot{base}{n}"
+        n += 1
     snapshot = json.loads(json.dumps(session, ensure_ascii=False))
     snapshot["slot_name"] = (name or "存档").strip()[:30]
     snapshot["slot_created"] = time.time()
@@ -4751,7 +5283,8 @@ def load_slot(slot_id: str) -> dict:
     snapshot.setdefault("allow_forced", False)
     snapshot.setdefault("scenes", {})
     snapshot.setdefault("outfits", {})
-    _ensure_asset_paths(snapshot)   # 读档即校正立绘引用（历史路径自适应）
+    # 读档即恢复「上次中断的 pending 资产」+ 校正路径 + 重置场景补生成预算
+    _recover_interrupted_assets(snapshot)
     SESSIONS[sid] = snapshot
     persist(snapshot)
     ensure_scene_bg(snapshot)   # 读档：当前幕背景不可用时立即补生成
@@ -4775,6 +5308,7 @@ def load_slot_raw(slot_id: str) -> dict:
     except (json.JSONDecodeError, OSError) as e:
         raise GameError(f"存档损坏：{e}")
     snapshot["sid"] = snapshot.get("sid") or uuid.uuid4().hex[:12]
+    _recover_interrupted_assets(snapshot)
     return snapshot
 
 

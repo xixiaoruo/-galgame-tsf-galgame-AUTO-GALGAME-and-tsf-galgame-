@@ -26,7 +26,9 @@ update/
 # ================= 构建产物 =================
 build/
 dist/
+dist-*/
 release/
+_internal/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -40,6 +42,11 @@ TSF_Galgame.zip
 *.tmp.zip
 
 # ================= 本机工作区与编辑器 =================
+# 1.8.0：隔离冒烟数据 / 构建用 venv（PySide6 打包依赖，体积大，不入库）
+.devdata/
+.build-venv/
+.dsh-pyenv/
+.memsearch/
 GitHub上传教程.md
 .zcode/
 .mimosa/

@@ -14,6 +14,12 @@ from app.coc import dice
 from app.coc import provenance as P
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def _all_combos(cfg):
     lo = int(P.t(cfg, "checks.roll_min"))

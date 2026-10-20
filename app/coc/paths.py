@@ -66,6 +66,13 @@ ITEMS_PATH = os.path.join(DATA_DIR, "items.json")
 TOWN_STATUS_PATH = os.path.join(DATA_DIR, "town_status.json")
 ENEMIES_PATH = os.path.join(DATA_DIR, "enemies.json")
 CAST_PATH = os.path.join(DATA_DIR, "cast.json")
+#: 1.9.19：CoC 剧本预设与固定商店场景（随包只读）
+SCENARIOS_PATH = os.path.join(DATA_DIR, "scenarios.json")
+SHOPS_PATH = os.path.join(DATA_DIR, "shops.json")
+#: 战斗动作表（t62 新增）。任务书给定落点为 `combat_actions.json`；
+#: `MECHANISM-MAP.md` / `COC-DESIGN.md` §4.2 把它写作 `actions.json` —— **只保留一个真源**，
+#: 差异记在报告 `COC-COMBAT.md` §7。
+COMBAT_ACTIONS_PATH = os.path.join(DATA_DIR, "combat_actions.json")
 
 
 # ---------------------------------------------------------------- 玩家可写数据层
@@ -120,6 +127,9 @@ def classify() -> dict:
             "root": DATA_DIR,
             "tuning": TUNING_PATH,
             "cards": CARDS_DIR,
+            "combat_actions": COMBAT_ACTIONS_PATH,
+            "scenarios": SCENARIOS_PATH,
+            "shops": SHOPS_PATH,
             "note": "随包分发（spec 收集 data/coc/**）；不跟随 DATA_DIR",
         },
         "player_writable": {

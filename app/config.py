@@ -17,6 +17,26 @@ if _BUNDLE:
 else:
     BUNDLE = None
     ROOT = Path(__file__).resolve().parent.parent
+def project_roots() -> list[Path]:
+    """可能放着「角色库 / 档案备份」的项目根（只读探测，不创建目录）。
+
+    · 源码运行：ROOT = 项目根，只返回它；
+    · 冻结 onedir：ROOT = dist/TSF_Galgame，向上最多两级找到真实项目根
+      （dist/TSF_Galgame → dist → 项目根），这样用 dist 里的 exe 启动时
+      仍能看到/导出项目根的角色库与旧档案备份。
+    不越过盘符根，避免在 C:/ 等系统位置误扫/误写。
+    """
+    roots = [ROOT]
+    p = ROOT
+    for _ in range(2):
+        nxt = p.parent
+        if nxt == p or nxt.parent == nxt:
+            break
+        roots.append(nxt)
+        p = nxt
+    return roots
+
+
 # 注意：CONFIG_PATH 在下面 `_resolve_config_path()` 里定义（需要先算出隔离根，
 # 而隔离根依赖 `_default_data_root()`）。此处不要提前赋值，否则会覆盖。
 EXAMPLE_PATH = (BUNDLE if BUNDLE else ROOT) / "config.example.json"

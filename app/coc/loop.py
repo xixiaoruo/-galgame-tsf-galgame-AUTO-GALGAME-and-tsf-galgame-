@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import combat as _combat
 from . import content
 from . import dice
 from . import sanitize as _san
@@ -84,6 +85,13 @@ def decide_endings(state: dict, cfg: dict) -> tuple[str | None, list[str]]:
         if sta <= 0:
             notes.append("sta<=0 → END_STA_ZERO（SUDDEN DEATH，§1.3）")
             return "END_STA_ZERO", notes
+
+    # 2b) SAN —— 1.9.19 新增的理智归零结局（与 REA 分开）
+    #     旧档/旧测试没有 san 字段 ⇒ 不判，保持既有行为逐字不变。
+    if "san" in state and state.get("san") is not None:
+        if int(state.get("san", 0)) <= 0:
+            notes.append("san<=0 → END_SAN_ZERO（理智归零，1.9.19）")
+            return "END_SAN_ZERO", notes
 
     # 3) REA —— 精神崩溃进精神病院（§3.2，可信度高）
     rea = int(state.get("rea", 0))
@@ -177,6 +185,8 @@ class Run:
     card_pool: list[dict] = field(default_factory=list)
     enemy_table: dict = field(default_factory=dict)
     town_table: list[dict] = field(default_factory=list)
+    #: t73：自定义剧本（`app/coc/scenario.py`）。`None` = 用随包内容（现行行为）。
+    scenario: dict | None = None
 
     #: 事件日志（只由本模块写入 —— E6）
     events: list[dict] = field(default_factory=list)
@@ -187,55 +197,75 @@ class Run:
 
     @classmethod
     def start(cls, payload: dict | None = None, cfg: dict | None = None, *,
-              extra_cards: list[dict] | None = None) -> "Run":
-        """开一局。`extra_cards` 供测试注入夹具卡（不改内容文件）。"""
+              extra_cards: list[dict] | None = None,
+              scenario: dict | None = None) -> "Run":
+        """开一局。`extra_cards` 供测试注入夹具卡（不改内容文件）。
+
+        t73 `scenario`：玩家自定义剧本（`app/coc/scenario.py`）。给了就用它替换
+        地点/谜团/古神/事件卡；**缺哪张表就回落随包内容**，`None` 时与改动前逐字相同。
+        """
         if cfg is None:
             from .provenance import load_tuning
             cfg = load_tuning()
+        from . import scenario as _scn
         p = dict(payload or {})
         st = _state.initial_states(p, cfg)
+        # 1.9.19：短篇剧本可覆盖章节长度/钥匙数；缺省时与难度表逐字相同。
+        if scenario:
+            if scenario.get("mystery_len"):
+                st["mystery_len"] = int(scenario["mystery_len"])
+            if scenario.get("mystery_count"):
+                st["mystery_count"] = int(scenario["mystery_count"])
         rng = random.Random(int(p["seed"])) if p.get("seed") is not None else random.Random()
-        pool = content.cards()
-        if extra_cards:
-            pool = list(pool) + list(extra_cards)
+        pool = _scn.cards(scenario, extra_cards)
         run = cls(
             state=st, cfg=cfg, rng=rng,
-            loc_table=content.locations(),
-            mystery_table=content.mysteries(),
+            loc_table=_scn.locations(scenario),
+            mystery_table=_scn.mysteries(scenario),
             card_pool=pool,
             enemy_table=_enemy_index(),
             town_table=content.town_status(),
+            scenario=scenario or None,
         )
         run.state["rng_state"] = _state.rng_to_json(run.rng)
+        # 1.9.19：剧本预设的初始物品（已验证为 items.json 登记 id；走唯一写入点）
+        started_items = [str(x) for x in ((scenario or {}).get("starting_items") or [])]
+        if started_items:
+            run.apply({"item_grant": started_items}, reason="scenario_start", clamp=False)
         run.log("run_start", {
             "difficulty": st["difficulty"], "old_god": st["old_god"],
             "seed": p.get("seed"), "cards": len(pool),
+            "scenario": bool(scenario),
         })
         return run
 
     @classmethod
     def resume(cls, saved: dict, cfg: dict | None = None, *,
-               extra_cards: list[dict] | None = None) -> "Run":
+               extra_cards: list[dict] | None = None,
+               scenario: dict | None = None) -> "Run":
         """从存档恢复（rng 精确还原、**事件账本也还原** —— E6 / V-08 A7）。
 
         事件账本必须一起还原：它是 V-08 A2「DOOM 为何变化」的唯一依据，
         丢账本会让读档后的判定与存档前不一致（A7 就是靠这个差异变红抓到的）。
+
+        t73：`scenario` 与 `Run.start` 同义；读档时由 `session.load_slot` 从存档信封取出并传回，
+        因此自定义剧本**随存档往返**。
         """
         if cfg is None:
             from .provenance import load_tuning
             cfg = load_tuning()
+        from . import scenario as _scn
         st = _state.from_json_obj(json.loads(json.dumps(saved, ensure_ascii=False)))
-        pool = content.cards()
-        if extra_cards:
-            pool = list(pool) + list(extra_cards)
+        pool = _scn.cards(scenario, extra_cards)
         log = st.get("log") or []
         run = cls(
             state=st, cfg=cfg, rng=_state.restore_rng(st["rng_state"]),
-            loc_table=content.locations(),
-            mystery_table=content.mysteries(),
+            loc_table=_scn.locations(scenario),
+            mystery_table=_scn.mysteries(scenario),
             card_pool=pool,
             enemy_table=_enemy_index(),
             town_table=content.town_status(),
+            scenario=scenario or None,
         )
         run.events = [dict(x) for x in log]
         return run
@@ -292,17 +322,154 @@ class Run:
         ⚠️ 注意：`prompt.narr_turn` 已经把模型提案过了 `sanitize_llm_delta`（白名单+钳制），
         所以 `session.py:206` 的 `run.apply(turn["coc_delta"])` 落进来的是**已清洗**的值。
         """
-        before = {k: int(self.state.get(k, 0)) for k in ("doom", "sta", "rea", "exp", "funds")}
+        before = {k: int(self.state.get(k, 0)) for k in ("doom", "sta", "rea", "san", "exp", "funds")}
         res = _san.apply_delta(self.state, delta, self.cfg, clamp=clamp, trust=trust)
-        after = {k: int(self.state.get(k, 0)) for k in ("doom", "sta", "rea", "exp", "funds")}
+        after = {k: int(self.state.get(k, 0)) for k in ("doom", "sta", "rea", "san", "exp", "funds")}
         changes = {k: after[k] - before[k] for k in before if after[k] != before[k]}
         self.log("delta", {"reason": reason, "changes": changes,
                            "applied": res["applied"], "dropped": res["dropped"],
                            "invariant_notes": res["notes"],
-                           "doom": after["doom"], "sta": after["sta"], "rea": after["rea"]})
+                           "doom": after["doom"], "sta": after["sta"],
+                           "rea": after["rea"], "san": after["san"]})
         return {"changes": changes, **res}
 
     # ------------------------------------------------------ 抽卡
+
+    # ------------------------------------------------------ 门槛（t63：卡片级与选项级共用）
+
+    def _card_requirements_met(self, req: Any) -> tuple[bool, str]:
+        """`requirements` 判定（**fail-closed**：未知字段 ⇒ 不满足）。返回 `(满足, 原因)`。
+
+        t63 把原先内联在 `_card_eligible` 里的判定抽出来，让**卡片级**与
+        **选项级**门槛共用同一套语义 —— 避免两处各写一份、慢慢漂移
+        （这正是 t53 §10 记录的"两套机制漂移"的同类风险）。
+
+        **为什么 fail-closed**：写成 fail-open 的话，一个写错的字段名
+        （例如 `stat_mim`）会让门槛**静默失效** —— 卡片照常可用、玩家毫无察觉。
+        那正是任务书禁止的"静默按普通检定处理"。所以未知字段 = 不满足，
+        并在原因里点名那个字段（写错的人一眼能看到）。
+        """
+        if not isinstance(req, dict) or not req:
+            return True, ""
+        flags = self.state.get("flags") or {}
+        bag = (self.state.get("inventory") or {}).get("backpack") or []
+        stats = self.state.get("stats") or {}
+
+        for f in req.get("flags_all", []):
+            if not flags.get(f):
+                return False, f"flag_missing:{f}"
+        for f in req.get("flags_none", []):
+            if flags.get(f):
+                return False, f"flag_present:{f}"
+        for i in req.get("items_all", []):
+            if i not in bag:
+                return False, f"item_missing:{i}"
+        if "items_any" in req and not any(i in bag for i in req["items_any"]):
+            return False, "item_none_of_any"
+        d = int(self.state.get("doom", 0))
+        if "doom_min" in req and d < int(req["doom_min"]):
+            return False, f"doom_too_low:{d}"
+        if "doom_max" in req and d > int(req["doom_max"]):
+            return False, f"doom_too_high:{d}"
+        for k, v in (req.get("stat_min") or {}).items():
+            if k not in _state.STAT_KEYS:
+                return False, f"unknown_stat:{k}"
+            cur = int(stats.get(k, 0))
+            if cur < int(v):
+                return False, f"stat_below:{k}({cur}<{int(v)})"
+        # 武器门槛（t63）：要求右手装备武器；`weapon_any` 可限定具体武器 id
+        if req.get("weapon"):
+            w = _state.wielded_weapon(self.state)
+            if w is None:
+                return False, "weapon_required"
+            want = req.get("weapon_any")
+            if isinstance(want, (list, tuple)) and want:
+                if str(w["id"]) not in [str(x) for x in want]:
+                    return False, f"weapon_wrong:{w['id']}"
+        # ★ fail-closed：未知字段视为不满足（理由见 docstring）
+        known = {"flags_all", "flags_none", "items_all", "items_any",
+                 "doom_min", "doom_max", "stat_min", "weapon", "weapon_any"}
+        unknown = [k for k in req if k not in known]
+        if unknown:
+            return False, "unknown_requirement:" + ",".join(sorted(map(str, unknown)))
+        return True, ""
+
+    def check_requirements(self, req: Any) -> tuple[bool, str]:
+        """公开门槛判定（session/前端用它，语义与卡片级完全一致）。"""
+        return self._card_requirements_met(req)
+
+    def resolve_weapon_stat(self, spec: dict) -> tuple[str, str]:
+        """决定本次检定走**哪项属性**。返回 `(属性名, 来源说明)`。
+
+        `check.weapon_stat == true` 时走**当前右手武器**的 `stat`
+        （`items.json`：SteakKnife→DEX、FireAxe→STR）。
+
+        ⚠️ **不改 `dice.py`**：这里只把 `stat_name`/`stat_value` 换成武器的，
+        公式与"平手判玩家胜"（t48 验证过的语义）**完全不动**。
+        未装备武器时**退回 `spec.stat`**：路由本身**不是**隐性门槛 ——
+        "必须先装备武器"由 `requirements.weapon` 显式表达，两者职责分开，
+        否则玩家会莫名其妙地"力量检定突然改走 KNW"。
+        """
+        base = str(spec.get("stat") or "")
+        if not spec.get("weapon_stat"):
+            return base, base
+        w = _state.wielded_weapon(self.state)
+        if w is None:
+            return base, base
+        wstat = str(w.get("stat") or "").strip()
+        if wstat not in _state.STAT_KEYS:
+            return base, base
+        return wstat, f"{wstat}（{w.get('name') or w['id']}）"
+
+    def choices_view(self, card: dict | None, choices: Any = None) -> list[dict]:
+        """给前端的**选项视图**：每项带 `available` / `blocked_reason`。
+
+        t63 选定的行为是「**不可选（前端灰掉）+ 后端拒绝**」，而不是"换成另一段描述"：
+          · 换成描述 = 玩家以为自己选了，而结果早被改写（隐瞒）；
+          · 灰掉 + 给出原因 = 玩家看到"我力量不够，所以掀不开"——
+            这正是"属性门槛真的影响结果"**可被玩家察觉**的形式。
+
+        后端 `resolve_card` 用**同一个**判定函数拒绝越界索引 ⇒
+        "前端灰掉"只是提示，**强制在服务端**（不靠前端守门）。
+        """
+        src = choices if isinstance(choices, (list, tuple)) else None
+        if src is None:
+            src = (card or {}).get("choices") or []
+        out: list[dict] = []
+        for c in src:
+            if not isinstance(c, dict):
+                continue
+            ok, why = self.check_requirements(c.get("requirements") or {})
+            spec = c.get("check") if isinstance(c.get("check"), dict) else {}
+            out.append({
+                "text": str(c.get("text", "")),
+                "effect": "",
+                "check": ({"stat": spec.get("stat"), "dc": spec.get("dc", 0),
+                           "threat": spec.get("threat")} if spec else None),
+                "available": bool(ok),
+                "blocked_reason": ("" if ok else str(why)),
+                "weapon_stat": bool(spec.get("weapon_stat")),
+            })
+        return out
+
+    def first_playable_choice(self, card: dict | None) -> int:
+        """卡片里第一个**门槛满足**的选项下标；一个都没有时返回 0。
+
+        t63 引入属性门槛后，"按固定下标选"的路由（探针 / 无 LLM 环境 /
+        前端旧客户端）会撞上被锁住的选项并抛 LoopError —— 那会让探索**卡死**。
+        这个函数给出"至少能做什么"，让调用方在不知道玩家会选哪项时仍能推进。
+
+        **返回 0 的兜底是刻意的**：若所有选项都被锁（玩家属性实在太低），
+        仍让第 0 项走正常流程 —— 由 `resolve_card` 报错暴露问题，
+        而不是在这里静默换一条不存在的路（那会变成"看似能玩、实则跳过规则"）。
+        """
+        for i, ch in enumerate((card or {}).get("choices") or []):
+            if not isinstance(ch, dict):
+                continue
+            ok, _why = self.check_requirements(ch.get("requirements") or {})
+            if ok:
+                return i
+        return 0
 
     def _card_eligible(self, card: dict, loc_id: str) -> bool:
         if loc_id not in (card.get("locations") or []):
@@ -311,26 +478,8 @@ class Run:
         mid = m["id"] if m else None
         if card.get("mystery_only") and card["mystery_only"] != mid:
             return False
-        req = card.get("requirements") or {}
-        flags = self.state.get("flags") or {}
-        bag = (self.state.get("inventory") or {}).get("backpack") or []
-        if any(f not in flags or not flags[f] for f in req.get("flags_all", [])):
-            return False
-        if any(flags.get(f) for f in req.get("flags_none", [])):
-            return False
-        if any(i not in bag for i in req.get("items_all", [])):
-            return False
-        if "items_any" in req and not any(i in bag for i in req["items_any"]):
-            return False
-        d = int(self.state.get("doom", 0))
-        if "doom_min" in req and d < int(req["doom_min"]):
-            return False
-        if "doom_max" in req and d > int(req["doom_max"]):
-            return False
-        for k, v in (req.get("stat_min") or {}).items():
-            if int((self.state.get("stats") or {}).get(k, 0)) < int(v):
-                return False
-        return True
+        ok, _why = self._card_requirements_met(card.get("requirements") or {})
+        return ok
 
     def draw_card(self, loc_id: str, *, allow_seen: bool = False) -> dict | None:
         """抽一张卡。
@@ -350,51 +499,81 @@ class Run:
         weights = [max(1, int(c.get("weight", 10))) for c in use]
         return self.rng.choices(use, weights=weights, k=1)[0]
 
-    # ------------------------------------------------------ 战斗（MVP 最简）
+    # ------------------------------------------- 战斗（t62：200 时间单位 / ≤8 动作队列）
 
     def resolve_combat(self, enemy_id: str, *, is_boss: bool = False,
-                       extra_dmg: int = 0) -> dict:
-        """极简确定性战斗：双方每回合互打，直到一方倒下或到回合上限。
+                       extra_dmg: int = 0, sequence: list[str] | None = None,
+                       free_actions: list[str] | None = None,
+                       max_turns: int | None = None,
+                       repeat_sequence: bool = False) -> dict:
+        """**有序动作队列**战斗：`Σ time_cost ≤ 200`、`len ≤ 8`（`MECHANICS.md` §5.1）。
 
-        **刻意做成极简**：本任务（t48）只保证"A1–A8 能在不花 LLM 调用的前提下跑通"，
-        完整动作表/时间槽（`MECHANICS.md` §5.1–§5.3）属 v2。
-        但两条上游结论已经体现在数据上：
-          - §9.4 坑 2「战斗拖沓」→ `round_cap` 兜底，非 Boss 必须 ≤2 回合可解；
-          - §5.4 幽灵免疫普通攻击 → `incorporeal` 的敌人打不动，探针会如实记账。
+        本方法**只是接线层**：全部规则在 `app/coc/combat.py`（`Fight`）。
+        它做三件事，顺序固定：
+
+        ① 把 `combat.Fight` 的**完整事件账本**逐条写进本局的 `Run.events`
+           （`combat_step` / `check` / `combat_turn` / `combat_exorcism` / `combat`）——
+           因此"这一步为什么掉 2 点体力"是可逐条回溯的（E6 落盘即真值）；
+        ② 把数值增量交给 `Run.apply()`（**唯一写点**）落账；
+        ③ 返回 `Outcome.to_json()`，键集**向后兼容** t48 的返回形状
+           （`enemy/is_boss/rounds/player_damage/damage_taken/incorporeal/won/hit_cap`
+           全部保留，`rounds` 与新的 `turns` 同值）。
+
+        ## 与接入前（t48 的 `while` 循环）的行为差异
+
+        | 维度 | 接入前 | 接入后 |
+        |---|---|---|
+        | 玩家输出 | 每回合固定 `probe.probe_attack_damage`(=2)，**不看武器** | 按动作表：Kick 2 / 武器普攻 = 武器伤害 / 强攻 = `floor(伤害×1.5)`；**走已装备武器的 `stat`** |
+        | 玩家受击 | 每"轮"一次，与玩家行动次数无关 | **每个玩家动作之后**反击一次（`§5.1` 的"动作→敌人伤害"；`combat_actions.json.enemy_counter.mode`） |
+        | 时间/步数 | 无 | `Σ≤200`、`≤8`（越界 ⇒ `combat.QueueRejected`，带全部可读理由） |
+        | 防御动作 | 不存在 | Dodge（本回合余下 50% miss）/ Brace（伤害减半）真的改变受击 |
+        | 幽灵 | **永远打不动**：玩家一次都伤不到它，只能被它打死 | 普通动作记 `incorporeal_blocked`；自动路径改排 `SeverTies`/`LeaveOffering`，两者都不可用则**逃跑**（若允许） |
+        | 账本 | 只有一条汇总 `combat` | 每步一条 `combat_step`，命中另加 `check`，回合边界 `combat_turn` |
+
+        ⚠️ 基础攻击（Kick，伤害 2）下**总伤害量与接入前一致**：1 个动作 = 1 次命中 = 受 1 次反击，
+        所以 `rounds` 与 `damage_taken` 在无武器、非幽灵的场景里与旧实现同量级 ——
+        这正是"per_action 反击"这个取舍的平衡依据（见 `combat.py` 模块头）。
+
+        `sequence=None` 时走 `combat.default_sequence()`（确定性自动编排，逐回合打到底）；
+        玩家路径请传 `sequence`，此时**只结算这一个回合** —— 一回合没打完就如实停下
+        （`notes` 里写明需要下一回合的新编排），**不会**用自动队列接管玩家的编排。
+        要让同一队列重复打到底，显式传 `repeat_sequence=True`（探针场景）。
         """
         en = self.enemy_table.get(enemy_id)
         if en is None:
             raise LoopError(f"敌人表里没有 {enemy_id!r}")
-        cap = int(t(self.cfg, "combat.round_cap"))
-        atk = int(t(self.cfg, "probe.probe_attack_damage"))
-        dmg = int(en.get("damage", 1)) + int(self._difficulty()["enemy_dmg"]) + int(extra_dmg)
-        dmg = max(0, dmg)
-        hp = int(en.get("hp", 1))
-        incorporeal = "incorporeal" in (en.get("traits") or [])
-        rounds = 0
-        player_dmg_dealt = 0
-        taken = 0
-        while hp > 0 and rounds < cap:
-            rounds += 1
-            if not incorporeal:
-                hp -= atk
-                player_dmg_dealt += atk
-            else:
-                self.log("combat_note", {
-                    "enemy": enemy_id, "note": "普通攻击穿过了它的身体（MECHANICS.md §5.4 幽灵免疫）"})
-            if hp <= 0:
-                break
-            taken += dmg
-            self.apply({"sta": -dmg}, reason=f"combat:{enemy_id}:enemy_hit", clamp=False)
-            if int(self.state.get("sta", 0)) <= 0:
-                break
-        won = hp <= 0
-        res = {"enemy": enemy_id, "is_boss": bool(is_boss), "rounds": rounds,
-               "player_damage": player_dmg_dealt, "damage_taken": taken,
-               "incorporeal": incorporeal, "won": won,
-               "hit_cap": rounds >= cap and not won}
-        self.log("combat", res)
-        return res
+        out = _combat.resolve(self.state, self.rng, en, self.cfg,
+                              sequence=sequence, is_boss=is_boss, extra_dmg=extra_dmg,
+                              free_actions=tuple(free_actions or ()), max_turns=max_turns,
+                              repeat_sequence=repeat_sequence)
+        # ① 账本：逐步落盘（不合并成一条，否则"为什么掉血"不可回溯）
+        for ev in out.events:
+            kind = str(ev.get("kind") or _combat.EVENT_STEP)
+            self.log(kind, {k: v for k, v in ev.items() if k != "kind"})
+        # ② 数值增量 → 唯一写点（clamp=False：战斗伤害是**引擎结构化规则**，
+        #    与 `complete_mystery` 的章节减免同理，不是 LLM 提案）
+        delta: dict[str, Any] = {}
+        for key, val in (("sta", out.sta_delta), ("rea", out.rea_delta),
+                         ("doom", out.doom_delta), ("exp", out.exp_delta),
+                         ("funds", out.funds_delta)):
+            if val:
+                delta[key] = int(val)
+        for key in ("item_take", "item_grant", "tags_remove"):
+            vals = list(getattr(out, key) or [])
+            if vals:
+                delta[key] = vals
+        if delta:
+            self.apply(delta, reason=f"combat:{enemy_id}", clamp=False)
+        return out.to_json()
+
+    def combat_menu(self, enemy_id: str | None = None) -> dict:
+        """给前端/LLM 的动作菜单（每项带**当前**耗时、走哪个属性、伤害与不可选理由）。
+
+        `§10.1 #3` 的等价物：把"悬停才显示"的数值直接印在列表里；
+        不可选的动作**不隐藏**，而是带着 `reject_reasons` 一起给出来。
+        """
+        en = self.enemy_table.get(str(enemy_id)) if enemy_id else None
+        return _combat.action_menu(self.state, en, cfg=self.cfg)
 
     def _difficulty(self) -> dict:
         diff = t(self.cfg, "difficulty")
@@ -403,11 +582,20 @@ class Run:
     # ------------------------------------------------------ 结算（E1）
 
     def resolve_card(self, card: dict, choice_index: int) -> Resolution:
-        """结算一次事件卡：检定 → 选分支 → 数值/标签/flag 变化（**LLM 未参与**）。"""
+        """结算一次事件卡：门槛 → 检定 → 选分支 → 数值/标签/flag 变化（**LLM 未参与**）。"""
         choices = card.get("choices") or []
         if not (0 <= choice_index < len(choices)):
             raise LoopError(f"{card['id']} 选项越界：{choice_index}（共 {len(choices)} 个）")
         ch = choices[choice_index]
+        # ★ t63：选项级门槛 —— **服务端强制**（不能靠前端灰掉守门）。
+        # 与 `choices_view` 用的是**同一个** `check_requirements`，所以
+        # "前端显示可选"与"后端真的可执行"不可能不一致。
+        _ok, _why = self.check_requirements(ch.get("requirements") or {})
+        if not _ok:
+            raise LoopError(
+                f"{card['id']} 选项 {choice_index} 门槛未满足：{_why}"
+                f"（该选项应呈现为不可选）"
+            )
         spec = ch.get("check")
         res_check: dice.CheckResult | None = None
         branch: str | None = None
@@ -415,7 +603,9 @@ class Run:
         if spec:
             locs = card.get("locations") or []
             threat = str(spec.get("threat") or (self.threat_of(locs[0]) if locs else "SAFE"))
-            stat_name = str(spec.get("stat"))
+            # ★ t63 武器路由：`check.weapon_stat` ⇒ 走当前武器的属性
+            #   （SteakKnife→DEX / FireAxe→STR）。未装备时退回 spec.stat。
+            stat_name, stat_src = self.resolve_weapon_stat(spec)
             stat_value = int((self.state.get("stats") or {}).get(stat_name, 0))
             # ★ t54 接线点：TSF 转变修正接进检定公式（**唯一**的检定点）
             #   · 修正来自 `tsf.check_shift`，是**纯函数**（只读账本投影 + 固定表）
@@ -433,6 +623,9 @@ class Run:
                 # t54：把转变修正记入账本（V-08 A2 的"数值为何变化"同样适用于它）
                 "tsf_shift": res_check.tsf_shift,
                 "tsf_progress": _tsf.progress(self.state),
+                # t63：记录"这一检定走的属性从哪来"（武器路由的证据）
+                "stat_source": stat_src,
+                "weapon": (_state.wielded_weapon(self.state) or {}).get("id"),
             })
             branch = "success" if res_check.success else "failure"
             outcome = dict(ch.get(branch) or {})
@@ -451,7 +644,7 @@ class Run:
 
         # 数值/标签/flag 变化（唯一写点）
         delta: dict[str, Any] = {}
-        for k in ("doom", "sta", "rea", "exp", "funds"):
+        for k in ("doom", "sta", "rea", "san", "exp", "funds"):
             if k in outcome:
                 delta[k] = int(outcome[k])
         if isinstance(outcome.get("stat"), dict):

@@ -18,33 +18,92 @@
        Content-Security-Policy: frame-ancestors 'none'。 -->
   <title>自动化AI Galgame · 即时物语生成器</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=1.7.52">
+  <link rel="stylesheet" href="style.css?v=1.9.20">
 </head>
 <body>
 
-  <!-- ===== 开始界面 ===== -->
+  <!-- ===== 开始界面（UI 2.0 · 左侧步骤导航 + 右侧工作区） ===== -->
   <section id="setup-screen" class="screen active">
+    <div class="setup-aurora" aria-hidden="true"></div>
     <div class="setup-wrap">
-      <h1 class="logo">TSF <span>Galgame</span></h1>
-      <p class="subtitle">大模型 × 绘画 API · 转变之路的即时立绘与互动物语</p>
-      <div class="setup-topbar">
-        <button id="btn-shutdown-setup" class="btn mini ghost danger-text">⨯ 关闭游戏</button>
-      </div>
-      <div class="mode-switch-wrap">
-        <span class="mode-label">模式：</span>
-        <span id="version-tag" class="version-tag"></span>
-        <button id="mode-btn-vn" class="btn ghost mode-btn">♥ 普通 Galgame</button>
-        <button id="mode-btn-coc" class="btn ghost mode-btn">🕯 CoC 跑团</button>
-        <!-- C×T4（t56）：第四模式 CoC×TSF（CoC 玩法 + TSF 转变进度/立绘） -->
-        <button id="mode-btn-coc-tsf" class="btn ghost mode-btn">🕯♀ CoC×TSF</button>
-        <button id="mode-btn-tsf" class="btn ghost mode-btn on">♀ TSF Galgame</button>
-        <button id="btn-credits" class="btn ghost mode-btn credits-link">🍰 制作名单</button>
-      </div>
-      <div id="mock-banner" class="mock-banner hidden">
-        当前为<b>演示模式</b>（未配置 API Key）：剧情与立绘使用内置占位内容。
-        <a href="#" id="mock-banner-link">前往配置 →</a>
-      </div>
+      <aside class="setup-rail">
+        <div class="rail-brand">
+          <div class="rail-mark">✦</div>
+          <div class="rail-brand-text">
+            <b>TSF</b> Galgame
+            <span>AI 物语 · 转变视觉小说</span>
+          </div>
+        </div>
+        <div class="rail-version"><span id="rail-version">v1.9.20</span><span class="rail-dot"></span><span>本地运行</span></div>
+        <nav id="setup-nav" class="setup-nav" aria-label="开局步骤">
+          <button class="setup-nav-item active" data-step="story">
+            <span class="nav-index">01</span>
+            <span class="nav-copy"><b>故事世界</b><small>标题 · 世界观</small></span>
+          </button>
+          <button class="setup-nav-item" data-step="cast">
+            <span class="nav-index">02</span>
+            <span class="nav-copy"><b>登场角色</b><small>主角 · 同伴 · 制服</small></span>
+          </button>
+          <button class="setup-nav-item" data-step="rules">
+            <span class="nav-index">03</span>
+            <span class="nav-copy"><b>规则与系统</b><small>故事书 · 状态 · 指令</small></span>
+          </button>
+          <button class="setup-nav-item" data-step="tone">
+            <span class="nav-index">04</span>
+            <span class="nav-copy"><b>外观与尺度</b><small>制服 · 目标 · 分级</small></span>
+          </button>
+          <button class="setup-nav-item" data-step="files">
+            <span class="nav-index">05</span>
+            <span class="nav-copy"><b>台词与档案</b><small>话语 · 大纲 · 指令 · 存档</small></span>
+          </button>
+        </nav>
+        <div class="rail-meter">
+          <div class="rail-meter-head"><span>开局准备度</span><b id="rail-pct">0%</b></div>
+          <div class="rail-meter-bar"><i id="rail-bar"></i></div>
+          <p id="rail-hint">填好世界观与主角，就能开始。</p>
+        </div>
+        <div class="rail-actions">
+          <button id="btn-open-settings" class="btn ghost rail-btn">⚙ API 设置</button>
+          <button id="btn-shutdown-setup" class="btn ghost rail-btn danger-text">⨯ 关闭游戏</button>
+          <button id="btn-credits" class="btn ghost rail-btn">🍰 制作名单</button>
+        </div>
+        <div class="rail-foot">数据只保存在本机 · 更新不丢档</div>
+      </aside>
 
+      <main class="setup-main" id="setup-main">
+        <header class="setup-hero">
+          <div class="hero-copy">
+            <span class="hero-kicker">LIVE STORY ENGINE · 本地 AI GALGAME</span>
+            <h1 class="logo">TSF <span>Galgame</span></h1>
+            <p class="subtitle">大模型 × 绘画引擎 · 转变之路的即时立绘与互动物语</p>
+          </div>
+          <div class="hero-side">
+            <div class="mode-switch-wrap">
+              <span class="mode-label">游玩模式</span>
+              <span id="version-tag" class="version-tag"></span>
+              <button id="mode-btn-vn" class="btn ghost mode-btn">♥ 普通 Galgame</button>
+              <button id="mode-btn-coc" class="btn ghost mode-btn">🕯 CoC 跑团</button>
+              <!-- C×T4（t56）：第四模式 CoC×TSF（CoC 玩法 + TSF 转变进度/立绘） -->
+              <button id="mode-btn-coc-tsf" class="btn ghost mode-btn">🕯♀ CoC×TSF</button>
+              <button id="mode-btn-tsf" class="btn ghost mode-btn on">♀ TSF Galgame</button>
+            </div>
+            <!-- 1.9.20：模式简介（TSF / 普通 Galgame 下方补 CoC 介绍；切模式即时换） -->
+            <p id="mode-intro" class="mode-intro">TSF Galgame：普通剧情 + 性别同化率 / 六段转变立绘。</p>
+            <div id="mock-banner" class="mock-banner hidden">
+              当前为<b>演示模式</b>（未配置 API Key）：剧情与立绘使用内置占位内容。
+              <a href="#" id="mock-banner-link">前往配置 →</a>
+            </div>
+            <div id="setup-summary" class="setup-summary"></div>
+          </div>
+        </header>
+        <div class="setup-steps">
+
+      <section class="setup-step active" data-step="story">
+        <div class="step-head">
+          <span class="step-kicker">STEP 01 · 故事世界</span>
+          <h2>先决定这是一个怎样的故事</h2>
+          <p>标题可留空；世界观写得越具体，AI 的立绘与剧情就越稳定。右侧随时可以切模式。</p>
+        </div>
       <div class="panel">
         <div class="panel-head">
           <h2>① 世界观 / 剧情设定</h2>
@@ -54,7 +113,14 @@
         <textarea id="inp-world" class="text-input" rows="4"
           placeholder="例：现代都市。主角在旧货市场淘到一块古董怀表，从此身体开始悄然改变……"></textarea>
       </div>
+      </section>
 
+      <section class="setup-step" data-step="cast">
+        <div class="step-head">
+          <span class="step-kicker">STEP 02 · 登场角色</span>
+          <h2>谁站在故事中央</h2>
+          <p>主角锚点会注入每一段立绘，保证同一个人从第一段走到第六段仍然认得出。</p>
+        </div>
       <div class="panel tsf-panel-setup">
         <div class="panel-head"><h2 id="prot-head-title">② 主角设定（转变将从 TA 开始）</h2>
           <button id="btn-lib-pick-prot" class="btn ghost" title="从角色库选择：自动填入主角设定，并直接复用已有立绘">📚 从角色库选</button>
@@ -87,6 +153,23 @@
               <select id="coc-character" class="text-input"></select>
             </label>
           </div>
+          <!-- 1.9.19：CoC 剧本预设（宅邸/渔港/极地/学园/黑色电影）。
+               预设只换内容层，不换 DOOM/STA/REA/SAN 的数值；选完仍可在下面覆盖自定义 JSON。 -->
+          <label>CoC 剧本预设
+            <select id="coc-scenario-preset" class="text-input">
+              <option value="default">盐川町（随包原版）</option>
+            </select>
+          </label>
+          <p id="coc-scenario-desc" class="hint-line">选择剧本会替换地点、谜团、古神、事件卡与叙述基调；数值规则不变。</p>
+          <!-- t73：**自定义剧本**（可选）。留空 = 用随包内容（原来的盐川町/古神/谜团）。
+               填了就用它真正决定地点/谜团/古神/事件卡 —— 这才是"按你的背景剧情跑"。
+               形状示例见 app/coc/scenario.py 顶部注释；结构非法时后端会回 400 并说明原因。 -->
+          <label>自定义剧本 JSON（可选 · 留空=用随包内容）
+            <textarea id="inp-scenario" class="text-input" rows="3"
+                      placeholder='{"title":"星冠学园","world":"封闭的女子学园…","outline":"…","locations":[{"id":"Dorm","name":"女生宿舍","threat":"SAFE","home":true}],"mysteries":[{"id":"MY-X","name":"夜里的点名","locations":["Dorm"]}],"old_gods":[{"id":"TheWatcher","name":"观者"}]}'></textarea>
+          </label>
+          <p class="hint-line">上面「世界观 / 故事大纲 / 故事书 / 指令」在 CoC 系模式下会作为
+            <b>叙述设定</b>注入；若要让它们**决定地点与谜团**，请填写这份 JSON 剧本。</p>
         </div>
         <div class="prot-grid">
           <input id="prot-name" class="text-input" placeholder="主角名字" maxlength="12" value="">
@@ -134,7 +217,14 @@
         </div>
         <div id="char-list"></div>
       </div>
+      </section>
 
+      <section class="setup-step" data-step="rules">
+        <div class="step-head">
+          <span class="step-kicker">STEP 03 · 规则与系统</span>
+          <h2>世界如何运转，数值如何变化</h2>
+          <p>故事书只在命中关键词时注入，长局也不烧 token；状态栏决定你在游戏里能看见什么。</p>
+        </div>
       <div class="panel">
         <div class="panel-head">
           <h2>④ 故事书（世界规则与设定，注入 AI 提示词）</h2>
@@ -146,7 +236,7 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h2>④ 状态栏自定义（开局前编辑）</h2>
+          <h2>⑤ 状态栏自定义（开局前编辑）</h2>
           <span>
             <button id="btn-stat-reset" class="btn ghost" title="恢复为本模式的默认状态">↺ 恢复默认</button>
           </span>
@@ -159,12 +249,28 @@
           <button id="btn-stat-add" class="btn ghost">＋ 添加状态</button>
         </div>
       </div>
+      </section>
 
+      <section class="setup-step" data-step="tone">
+        <div class="step-head">
+          <span class="step-kicker">STEP 04 · 外观与尺度</span>
+          <h2>这一局该长什么样、能写到什么程度</h2>
+          <p>制服与最终变化样式决定「画面」；内容分级与固定话语决定「文字」。两者互不干扰。</p>
+        </div>
       <div class="panel">
         <div class="panel-head">
-          <h2>④ 制服设定（本局所有角色统一）</h2>
+          <h2>⑥ 制服设定（本局所有角色统一）</h2>
         </div>
         <p class="hint-line">填写的制服关键词会应用到<b>本局所有角色</b>的立绘（每局独立保存，别的局/存档互不干扰）；留空 = 使用全局设置中的制服词。</p>
+        <div class="uniform-quick">
+          <button id="btn-uniform-random" class="btn primary" type="button"
+            title="从内置制服库随机抽一套与世界观/场景相符的制服">🎲 随机制服</button>
+          <select id="uniform-preset-select" class="text-input" title="从内置制服库选择">
+            <option value="">从预设选择…</option>
+          </select>
+          <button id="btn-uniform-clear" class="btn ghost" type="button">清空</button>
+          <span id="uniform-name" class="uniform-badge">未启用预设</span>
+        </div>
         <label>本局制服关键词（英文，逗号分隔）
           <input id="uniform-en" class="text-input" placeholder="如：navy sailor uniform, white blouse, pleated skirt, ribbon tie, knee-high socks" maxlength="200">
         </label>
@@ -241,7 +347,7 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h2>⑤ 内容分级（全年龄为默认安全档）</h2>
+          <h2>⑦ 内容分级（全年龄为默认安全档）</h2>
         </div>
         <div class="rating-grid">
           <label>年龄分段
@@ -262,10 +368,17 @@
         </div>
         <p class="hint-line">默认即为 18+ 全解锁；若想保守，可手动切到全年龄档。</p>
       </div>
+      </section>
 
+      <section class="setup-step" data-step="files">
+        <div class="step-head">
+          <span class="step-kicker">STEP 05 · 台词与档案</span>
+          <h2>把故事交给 AI，把进度留在这里</h2>
+          <p>固定话语、大纲与指令都会进入每一轮提示词；设定档案与存档可跨会话复用，更新游戏也不会丢。</p>
+        </div>
       <div class="panel">
         <div class="panel-head">
-          <h2>⑥ 固定话语（可选，每行一条，游戏内可随时说）</h2>
+          <h2>⑧ 固定话语（可选，每行一条，游戏内可随时说）</h2>
         </div>
         <p class="hint-line">角色不在场时画面只显示在场者；固定话语会作为选项之外的快捷发言按钮出现在选项上方。</p>
         <textarea id="inp-catchphrases" class="text-input" rows="3"
@@ -274,7 +387,7 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h2>⑥ 故事大纲（可选，注入后 AI 按此脉络推进剧情）</h2>
+          <h2>⑨ 故事大纲（可选，注入后 AI 按此脉络推进剧情）</h2>
           <span>
             <button id="btn-outline" class="btn ghost">🤖 用 AI 生成大纲</button>
             <button id="btn-clear-outline" class="btn ghost">✕ 清空</button>
@@ -286,7 +399,7 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h2>⑥ AI 指令注入（文风 / 限度，可多选）</h2>
+          <h2>⑩ AI 指令注入（文风 / 限度，可多选）</h2>
         </div>
         <p class="hint-line">勾选的指令将注入每一轮剧情生成；开局后可随时在游戏顶栏「⚡ 指令」中调整。立绘与背景的画面区分指令已内置，无需在此配置。</p>
         <div id="preset-grid" class="preset-grid"></div>
@@ -299,7 +412,7 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h2>⑦ 设定档案（保存全部开局选项，下次一键使用）</h2>
+          <h2>⑪ 设定档案（保存全部开局选项，下次一键使用）</h2>
         </div>
         <div class="preset-save-row">
           <input id="setup-save-name" class="text-input" placeholder="档案名（如：雨夜怀表局）" maxlength="30">
@@ -315,21 +428,33 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h2>⑧ 我的存档（跨会话保存，可随时读取继续游戏）</h2>
+          <h2>⑫ 我的存档（跨会话保存，可随时读取继续游戏）</h2>
           <button id="btn-archives-setup" class="btn ghost" title="把整局（剧情+立绘+背景+历史）打包为 zip 档案，可分享/再导入继续玩">📦 对局归档</button>
         </div>
         <p class="hint-line">存档保存在游戏专属数据目录（更新或移动游戏都不会丢失；无 D 盘时会自动使用系统用户数据目录）。</p>
         <div id="slot-list-setup" class="slot-list"></div>
       </div>
+      </section>
+        </div><!-- /setup-steps -->
 
-      <div class="setup-actions">
-        <button id="btn-open-settings" class="btn ghost">⚙ API 设置</button>
-        <button id="btn-start" class="btn primary big">▶ 开始游戏</button>
-      </div>
+        <div class="step-pager">
+          <button id="setup-prev" class="btn ghost" type="button">← 上一步</button>
+          <span id="setup-step-label" class="step-pager-label">01 / 05 · 故事世界</span>
+          <button id="setup-next" class="btn ghost" type="button">下一步 →</button>
+        </div>
+
+        <div class="setup-actions">
+          <div class="setup-actions-copy">
+            <b>准备好了吗？</b>
+            <span id="setup-action-hint">开局后可随时在设置里调整画面与尺度；进度会自动保存。</span>
+          </div>
+          <button id="btn-start" class="btn primary big">▶ 开始游戏</button>
+        </div>
+        <footer class="credits-foot">
+          <button id="btn-credits-foot" class="credits-btn">🍰 制作名单</button>
+        </footer>
+      </main>
     </div>
-    <footer class="credits-foot">
-      <button id="btn-credits-foot" class="credits-btn">🍰 制作名单</button>
-    </footer>
   </section>
 
   <!-- ===== 制作名单弹窗 ===== -->
@@ -354,30 +479,71 @@
     <div id="bg-veil" class="bg-veil"></div>
 
     <div id="top-bar" class="top-bar">
-      <button id="btn-shutdown" class="btn mini ghost danger-text" title="关闭游戏全部窗口与服务">⨯ 关闭游戏</button>
-      <span id="game-title" class="game-title"></span>
-      <span id="mock-badge" class="mock-badge hidden">演示模式（内置剧情·未配置对话API）</span>
-      <span class="top-actions">
-        <button id="btn-credits-game" class="btn mini ghost">🍰 制作名单</button>
-        <button id="btn-command" class="btn mini ghost">⚡ 命令</button>
-        <button id="btn-outfit" class="btn mini ghost">👗 换装</button>
-        <button id="btn-save-cg" class="btn mini ghost">📷 存为CG</button>
-        <button id="btn-cg-refresh" class="btn mini ghost" title="重新生成当前幕的桥段 CG（旧图保留）">🔄 刷新CG</button>
-        <button id="btn-cg" class="btn mini ghost">🎨 CG回廊</button>
-        <button id="btn-history" class="btn mini ghost">📜 历史</button>
-        <button id="btn-directives" class="btn mini ghost">⚡ 指令</button>
-        <button id="btn-context-reset" class="btn mini ghost" title="长局剧情压缩为前情提要并重置 AI 上下文（保留最近 6 幕；尺度语境不丢，AI 回到更开放的写作状态）">🧠 压缩上下文</button>
-        <button id="btn-save" class="btn mini ghost">💾 存档</button>
-        <button id="btn-load" class="btn mini ghost">📂 读档</button>
-        <button id="btn-fastforward" class="btn mini ghost">⏩ 快进</button>
-        <button id="btn-scene-mgr" class="btn mini ghost" title="读取/更换场景：进入已有场景或重生成当前场景背景">🌄 读取场景</button>
-        <button id="btn-settings-game" class="btn mini ghost">⚙ 设置</button>
-        <button id="btn-exit" class="btn mini ghost">↩ 重新开始</button>
-      </span>
+      <div class="tb-left">
+        <button id="btn-shutdown" class="btn mini ghost danger-text tb-close" title="关闭游戏全部窗口与服务">⨯</button>
+        <div class="tb-brand" title="TSF Galgame"><span class="tb-mark">✦</span><span class="tb-word">TSF</span></div>
+        <div class="tb-titles">
+          <span id="game-title" class="game-title"></span>
+          <span class="tb-sub" id="tb-sub">第 1 幕</span>
+        </div>
+        <span id="mock-badge" class="mock-badge hidden">演示模式</span>
+      </div>
+      <div class="tb-right">
+        <div id="art-status" class="art-status" title="绘画线路状态：就绪 / 生成中 / 排队">
+          <i class="art-dot"></i><span id="art-status-text">画面就绪</span>
+        </div>
+        <div class="top-group" data-menu="story">
+          <button class="btn mini ghost top-trigger" type="button" aria-haspopup="true" aria-expanded="false"><b>📖</b> 叙事 <i>▾</i></button>
+          <div class="top-menu">
+            <div class="menu-label">剧情推进</div>
+            <button id="btn-command" class="btn mini ghost" type="button">⚡ 命令面板</button>
+            <button id="btn-rng" class="btn mini ghost" type="button" title="随机数 / 掷骰（含 CoC 检定）">🎲 掷骰</button>
+            <button id="btn-fastforward" class="btn mini ghost" type="button">⏩ 快进</button>
+            <button id="btn-history" class="btn mini ghost" type="button">📜 剧情历史</button>
+            <button id="btn-ai-console" class="btn mini ghost" type="button" title="查看 AI 请求 / 思考 / 原始输出，修改对话或导演指令">🧠 AI 控制台</button>
+            <div class="menu-sep"></div>
+            <div class="menu-label">写作与场景</div>
+            <button id="btn-directives" class="btn mini ghost" type="button">⚡ 指令注入</button>
+            <button id="btn-context-reset" class="btn mini ghost" type="button" title="长局剧情压缩为前情提要并重置 AI 上下文（保留最近 6 幕；尺度语境不丢，AI 回到更开放的写作状态）">🧠 压缩上下文</button>
+            <button id="btn-scene-mgr" class="btn mini ghost" type="button" title="读取/更换场景：进入已有场景或重生成当前场景背景">🌄 读取场景</button>
+          </div>
+        </div>
+        <div class="top-group" data-menu="art">
+          <button class="btn mini ghost top-trigger" type="button" aria-haspopup="true" aria-expanded="false"><b>🎨</b> 画面 <i>▾</i></button>
+          <div class="top-menu">
+            <div class="menu-label">立绘与画面</div>
+            <button id="btn-stage-studio" class="btn mini ghost" type="button" title="用游戏内同一条引擎生成六段性转变全程（可逐段查看）">🧬 六段演变工坊</button>
+            <button id="btn-outfit" class="btn mini ghost" type="button">👗 换装</button>
+            <button id="btn-cg" class="btn mini ghost" type="button">🎨 CG 回廊</button>
+            <div class="menu-sep"></div>
+            <div class="menu-label">CG 操作</div>
+            <button id="btn-save-cg" class="btn mini ghost" type="button">📷 存为 CG</button>
+            <button id="btn-cg-refresh" class="btn mini ghost" type="button" title="重新生成当前幕的桥段 CG（旧图保留）">🔄 刷新 CG</button>
+          </div>
+        </div>
+        <div class="top-group" data-menu="save">
+          <button class="btn mini ghost top-trigger" type="button" aria-haspopup="true" aria-expanded="false"><b>💾</b> 存档 <i>▾</i></button>
+          <div class="top-menu">
+            <button id="btn-save" class="btn mini ghost" type="button">💾 立即存档</button>
+            <button id="btn-load" class="btn mini ghost" type="button">📂 读档</button>
+          </div>
+        </div>
+        <div class="top-group" data-menu="system">
+          <button class="btn mini ghost top-trigger" type="button" aria-haspopup="true" aria-expanded="false"><b>⚙</b> 系统 <i>▾</i></button>
+          <div class="top-menu">
+            <button id="btn-palette" class="btn mini ghost" type="button" title="Ctrl+K">⌘ 命令面板（Ctrl+K）</button>
+            <button id="btn-perf" class="btn mini ghost" type="button">📊 性能与消耗</button>
+            <button id="btn-settings-game" class="btn mini ghost" type="button">⚙ 设置</button>
+            <div class="menu-sep"></div>
+            <button id="btn-credits-game" class="btn mini ghost" type="button">🍰 制作名单</button>
+            <button id="btn-exit" class="btn mini ghost" type="button">↩ 重新开始</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 立绘生成提示横幅 -->
-    <div id="gen-banner" class="gen-banner hidden">🎨 立绘生成中，请稍等…</div>
+    <div id="gen-banner" class="gen-banner hidden"><i class="gen-pulse"></i><span id="gen-banner-text">🎨 立绘生成中，请稍等…</span></div>
 
     <!-- TSF 状态框（可收起/调出） -->
     <div id="tsf-panel" class="tsf-panel">
@@ -386,6 +552,14 @@
         <button id="tsf-collapse" class="btn mini ghost" title="收起状态框">—</button>
       </div>
       <div class="tsf-body">
+        <!-- 1.8.0：六段轨道（一眼看到走到第几段；点击打开演变工坊） -->
+        <div id="stage-track" class="stage-track">
+          <button id="stage-track-open" class="stage-track-open" type="button" title="打开六段演变工坊：用游戏内引擎生成完整转变过程">
+            <span class="stage-track-head"><b>六段性转变</b><em id="stage-track-pct">0%</em></span>
+            <span id="stage-track-dots" class="stage-track-dots"></span>
+            <span id="stage-track-name" class="stage-track-name">六段一 · 初变</span>
+          </button>
+        </div>
         <!-- 状态面板角色切换：每个出场角色都有自己的一套数值 -->
         <div id="tsf-who" class="stat-who"></div>
         <div class="tsf-identity" id="tsf-identity">
@@ -394,6 +568,7 @@
           <div id="tsf-stage-name" class="tsf-stage-name"></div>
         </div>
         <div id="tsf-bars"></div>
+        <div id="tsf-bond" class="char-bond hidden"></div>
         <div id="tsf-stage-desc" class="tsf-stage-desc"></div>
         <div class="tsf-foot">
           <button id="btn-regen-prot" class="btn mini ghost" title="重置并重新生成主角当前立绘">🔄 重画主角立绘</button>
@@ -421,6 +596,7 @@
         <!-- 状态面板角色切换：每个出场角色都有自己的一套数值 -->
         <div id="vn-who" class="stat-who"></div>
         <div id="vn-bars"></div>
+        <div id="vn-bond" class="char-bond hidden"></div>
         <div class="tsf-foot">
           <button id="btn-vn-regen-prot" class="btn mini ghost" title="重画主角立绘（可描述需求）">🔄 重画主角立绘</button>
           <button id="btn-vn-regen" class="btn mini ghost" title="重画全场角色立绘">🔁 重画全部立绘</button>
@@ -446,6 +622,34 @@
       <div class="tsf-body">
         <div id="coc-doom" class="model-info"></div>
         <div id="coc-bars"></div>
+        <!-- 1.9.19：SAN 是独立于 REA 的 0–99 理智值；这里同时给出条、状态和一次检定入口 -->
+        <div id="coc-san-box">
+          <div class="tsf-row-head"><span>🧠 SAN 理智</span><b id="coc-san-val">0 / 99</b></div>
+          <div class="tsf-bar"><div class="tsf-bar-fill" id="coc-san-bar" style="width:0%"></div></div>
+          <div id="coc-san-state" class="model-info"></div>
+          <div class="coc-san-actions">
+            <select id="coc-san-loss" class="text-input" title="SAN 损失：成功/失败">
+              <option value="0/1d3">0 / 1d3（轻微）</option>
+              <option value="0/1d6" selected>0 / 1d6（常见）</option>
+              <option value="1/1d6">1 / 1d6（目睹）</option>
+              <option value="1/1d10">1 / 1d10（重度）</option>
+              <option value="2/1d10+2">2 / 1d10+2（恐怖）</option>
+            </select>
+            <select id="coc-san-diff" class="text-input" title="检定难度">
+              <option value="regular" selected>常规</option>
+              <option value="hard">困难</option>
+              <option value="extreme">极难</option>
+            </select>
+            <button id="btn-coc-san-check" class="btn mini primary" type="button">🧠 SAN 检定</button>
+          </div>
+          <div id="coc-san-msg" class="model-info"></div>
+        </div>
+        <!-- 1.9.19：固定商店 / 搜刮放在 SAN 之后、物品栏之前，长背包也不会把入口挤到屏幕外 -->
+        <div class="coc-quick-actions">
+          <button id="btn-coc-shop" class="btn mini ghost" type="button" title="进入固定商店场景">🏪 商店</button>
+          <button id="btn-coc-search" class="btn mini ghost" type="button" title="在当前地点搜刮一次（成功自动生成物品）">🔍 搜刮</button>
+          <span id="coc-loot-msg" class="coc-loot-msg"></span>
+        </div>
         <div id="coc-stats" class="model-info"></div>
         <div id="coc-tags" class="model-info"></div>
         <div id="coc-extra" class="model-info"></div>
@@ -455,6 +659,31 @@
           <div class="tsf-bar"><div class="tsf-bar-fill" id="coc-tsf-bar" style="width:0%"></div></div>
           <div id="coc-tsf-stage" class="model-info"></div>
           <div id="coc-tsf-sprite-hint" class="model-info"></div>
+        </div>
+        <!-- U2（t66）：物品栏（背包 + 装备槽 + 装备/卸下）。
+             契约见 coc-mode/COC-STATS-ITEMS.md §9；数据来自 /api/game/{sid} 的
+             coc.inventory（t63 已暴露）。结构与 coc-tsf-box 同款：**容器与
+             结构骨架放在 HTML 里**（不是 JS 生成），这样闸门与 CDP 都能静态定位；
+             条目内容才由 JS 填。 -->
+        <div id="coc-inventory" class="hidden">
+          <div class="tsf-row-head">
+            <span>🎒 物品栏</span><b id="coc-inv-count">0</b>
+          </div>
+          <div id="coc-inv-weapon" class="model-info"></div>
+          <!-- t71（TSF×CoC 融合）：把"身体变化对物品/装备的影响"摆在物品栏里看得见的地方。
+               数据来自 panel_view 的 tsf_mech（衣物档 + 属性修正 + 使用惩罚），
+               默认无转变时为全 0/空，本行自动隐藏。 -->
+          <div id="coc-inv-tsf" class="model-info hidden"></div>
+          <!-- 契约 §9：三个槽位各有固定 id（coc-inv-equip-R|C|B）；
+               外层 coc-inv-slots 只是行容器（事件委托挂在它上面） -->
+          <div id="coc-inv-slots">
+            <div id="coc-inv-equip-R" class="coc-inv-slot"></div>
+            <div id="coc-inv-equip-C" class="coc-inv-slot"></div>
+            <div id="coc-inv-equip-B" class="coc-inv-slot"></div>
+          </div>
+          <div id="coc-inv-list"></div>
+          <div id="coc-inv-storage"></div>
+          <div id="coc-inv-msg" class="model-info"></div>
         </div>
         <div class="tsf-foot">
           <button id="btn-coc-save-slot" class="btn mini ghost" title="存入全局存档槽">💾 存档</button>
@@ -469,11 +698,22 @@
     <div id="dialog-box" class="dialog-box">
       <div id="name-tag" class="name-tag hidden"></div>
       <div id="dialog-text" class="dialog-text"></div>
+      <div class="dialog-foot">
+        <span id="dialog-progress" class="dialog-progress"></span>
+        <span class="dialog-shortcuts"><kbd>Space</kbd> 下一句 <span>·</span> <kbd>A</kbd> 自动 <span>·</span> <kbd>H</kbd> 沉浸 <span>·</span> <kbd>Ctrl</kbd>+<kbd>K</kbd> 命令</span>
+      </div>
       <div id="next-hint" class="next-hint hidden">▼</div>
     </div>
 
     <div id="choices-wrap" class="choices-wrap hidden"></div>
     <div id="catchphrase-bar" class="catchphrase-bar hidden"></div>
+
+    <!-- 1.8.0：左下快捷操作（自动播放 / 沉浸模式 / 六段工坊） -->
+    <div id="quick-rail" class="quick-rail">
+      <button id="btn-auto" class="qr-btn" type="button" title="自动播放（A）"><span>▶</span>自动</button>
+      <button id="btn-hide-ui" class="qr-btn" type="button" title="隐藏界面，专注画面（H）"><span>◐</span>沉浸</button>
+      <button id="btn-stage-fab" class="qr-btn qr-accent" type="button" title="打开六段演变工坊"><span>🧬</span>六段</button>
+    </div>
 
     <div id="stageup-overlay" class="stageup-overlay hidden">
       <div class="stageup-flash"></div>
@@ -485,6 +725,90 @@
       <div id="loading-text">正在书写剧情……</div>
     </div>
   </section>
+
+  <!-- ===== 1.8.0 六段演变工坊 ===== -->
+  <div id="modal-stages" class="modal hidden">
+    <div class="modal-box stage-studio-box">
+      <div class="studio-head">
+        <div class="studio-head-copy">
+          <span class="studio-kicker">SAME ENGINE · SIX-STAGE TRANSFORMATION</span>
+          <h2>🧬 六段演变工坊</h2>
+          <p class="hint-line">用游戏内<b>同一条立绘引擎</b>，按当前角色锚点与渐变计划逐段全量生成。
+            每段独立成画、逐段推进；已生成段会被复用，重复打开不再消耗算力。</p>
+        </div>
+        <div class="studio-head-side">
+          <div class="studio-ring">
+            <b id="studio-pct">0%</b>
+            <span>当前同化率</span>
+          </div>
+          <button id="btn-stages-close" class="btn mini ghost" type="button">✕</button>
+        </div>
+      </div>
+
+      <div class="studio-summ" id="studio-summary"></div>
+
+      <div class="studio-toolbar">
+        <button id="btn-stages-run" class="btn primary" type="button">▶ 生成全部六段</button>
+        <button id="btn-stages-cancel" class="btn ghost" type="button" disabled>■ 取消</button>
+        <label class="studio-opt"><input type="checkbox" id="studio-force"> 强制重画已生成段</label>
+        <span class="studio-eta" id="studio-eta">等待开始</span>
+        <button id="btn-studio-perf" class="btn mini ghost" type="button">📊 性能与消耗</button>
+      </div>
+      <div class="studio-progress" aria-hidden="true"><i id="studio-bar"></i></div>
+      <div id="studio-grid" class="studio-grid"></div>
+      <div class="studio-foot">
+        <span id="studio-hint" class="hint"></span>
+        <span class="studio-legend"><i class="lg ready"></i>已生成 <i class="lg pending"></i>生成中 <i class="lg"></i>未生成</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 1.8.0 性能与消耗 ===== -->
+  <div id="modal-perf" class="modal hidden">
+    <div class="modal-box perf-box">
+      <div class="perf-head">
+        <div>
+          <span class="studio-kicker">PERFORMANCE · CONSUMPTION</span>
+          <h2>📊 性能与消耗</h2>
+          <p class="hint-line">统计本局出图耗时、缓存命中与串行队列状态。节能与缓存修改后<b>下一张图立即生效</b>。</p>
+        </div>
+        <button id="btn-perf-close" class="btn mini ghost" type="button">✕</button>
+      </div>
+      <div id="perf-grid" class="perf-grid"></div>
+      <div class="perf-section">
+        <h3>线路开关</h3>
+        <label class="opt-row"><input type="checkbox" id="perf-eco"> <b>节能模式</b>
+          <small>重试减半、关闭 Hires 二遍、阶段跃迁不打标——8GB 卡长跑更稳更省电</small></label>
+        <label class="opt-row"><input type="checkbox" id="perf-cache"> <b>成品缓存</b>
+          <small>同提示词 / 同参数 / 同种子的成品直接复用（只缓存质检通过的结果）</small></label>
+        <label class="opt-row perf-mb-row">缓存上限
+          <input id="perf-cache-mb" class="text-input" type="number" min="64" max="4096" step="64" value="384"> MB</label>
+        <div class="perf-actions">
+          <span id="perf-hint" class="hint"></span>
+          <button id="btn-perf-save" class="btn primary" type="button">保存线路设置</button>
+          <button id="btn-perf-refresh" class="btn ghost" type="button">↻ 刷新统计</button>
+        </div>
+      </div>
+      <div class="perf-section">
+        <h3>SD 串行队列</h3>
+        <div id="perf-sd" class="model-info">读取中…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 1.8.0 命令面板（Ctrl+K） ===== -->
+  <div id="modal-palette" class="modal hidden">
+    <div class="palette-box">
+      <div class="palette-search">
+        <span class="palette-glyph">⌘</span>
+        <input id="palette-input" class="palette-input" placeholder="输入命令或搜索：六段 / 换装 / 存档 / 设置 / 重画…"
+               autocomplete="off" spellcheck="false">
+        <kbd>Esc</kbd>
+      </div>
+      <div id="palette-list" class="palette-list"></div>
+      <div class="palette-foot"><span>↑↓ 选择</span><span>Enter 执行</span><span>Esc 关闭</span></div>
+    </div>
+  </div>
 
   <!-- ===== 设置弹窗 ===== -->
   <div id="modal-settings" class="modal hidden">
@@ -557,6 +881,9 @@
       </div>
       <div class="config-section">
         <h3>立绘生成选项</h3>
+        <!-- t68：本段原为 12 个控件平铺，现按语义分三组（只加容器，id/顺序不变） -->
+        <div class="config-group">
+          <span class="group-title">输出与画质</span>
         <label>抠图标准
           <select id="cfg-cutout-mode" class="text-input">
             <option value="ai" selected>AI 智能抠图（rembg，推荐）</option>
@@ -594,20 +921,32 @@
             <option value="every_turn">每一轮都更新</option>
           </select>
         </label>
+        </div><!-- /输出与画质 -->
+
+        <div class="config-group">
+          <span class="group-title">画风 / 像素 / 渐变</span>
         <label>立绘风格
           <select id="cfg-style-mode" class="text-input">
             <option value="default">默认风格</option>
             <option value="cinematic">电影风格</option>
           </select>
         </label>
-        <label>wai 模型特适配（1.7.46：ClipSkip2/2:3尺寸/白发偏置负面/步数）
-          <input type="checkbox" id="cfg-wai-adapt" checked>
+        <label>画风预设（生图风格 · 选项来自后端预设表）
+          <select id="cfg-style-preset" class="text-input"></select>
         </label>
-        <label>TSF 性转变显性链（1.7.47：18+ 且 r18 局才生效，默认关闭）
-          <input type="checkbox" id="cfg-tsf-explicit">
+        <label>画风自定义补充（可留空；与上面的预设「叠加」而非二选一）
+          <input id="cfg-style-custom" class="text-input" maxlength="300"
+                 placeholder="如：soft rim light, pastel palette">
         </label>
-        <label>AI 按角色定制渐变计划（1.7.48：每局变化过程由 AI 按角色/剧情编排）
+        <div id="cfg-style-hint" class="model-info"></div>
+        <label class="opt-row">
+          <input type="checkbox" id="cfg-pixel-art">
+          像素化立绘（把生成图量化成硬色块，配合上面「画风预设 = 像素风」使用；两者一起开才有完整像素观感）
+        </label>
+        <div id="cfg-pixel-hint" class="model-info"></div>
+        <label class="opt-row">
           <input type="checkbox" id="cfg-tsf-plan-llm" checked>
+          AI 按角色定制渐变计划（每局变化过程由 AI 按角色/剧情编排）
         </label>
         <label>渐变阶段词样式（wai 系模型）
           <select id="cfg-stage-style" class="text-input">
@@ -616,6 +955,19 @@
             <option value="generic">通用链</option>
           </select>
         </label>
+        </div><!-- /画风与像素 -->
+
+        <div class="config-group">
+          <span class="group-title">模型适配与性能</span>
+          <p class="group-note">以下两项影响显存与生成速度；不确定就保持默认。</p>
+        <label class="opt-row">
+          <input type="checkbox" id="cfg-wai-adapt" checked>
+          wai 模型特适配（ClipSkip2 / 2:3 尺寸 / 白发偏置负面 / 步数）
+        </label>
+        <label class="opt-row">
+          <input type="checkbox" id="cfg-tsf-explicit">
+          TSF 性转变显性链（仅 18+ 且 R18 局生效，默认关闭）
+        </label>
         <label>显存档位（适配显卡）
           <select id="cfg-vram-mode" class="text-input">
             <option value="low">低（4-6GB，512×768）</option>
@@ -623,6 +975,24 @@
             <option value="high">高（12GB+，1024×1760）</option>
           </select>
         </label>
+        </div><!-- /模型适配与性能 -->
+
+        <div class="config-group">
+          <span class="group-title">⚡ 绘画线路优化（1.8）</span>
+          <p class="group-note">成品缓存与节能模式只改变「怎么画」，不改变画面配方与角色一致性。</p>
+          <label class="opt-row">
+            <input type="checkbox" id="cfg-gen-cache" checked>
+            <b>成品缓存</b><small>同提示词 / 同参数 / 同种子直接复用，重复打开六段或重画同一差分时零算力</small>
+          </label>
+          <label class="opt-row">
+            <input type="checkbox" id="cfg-eco-mode">
+            <b>节能模式</b><small>重试减半、关闭 Hires、跃迁跳过打标——长局更稳更省电</small>
+          </label>
+          <label>缓存上限（MB）
+            <input id="cfg-gen-cache-mb" class="text-input" type="number" min="64" max="4096" step="64" value="384">
+          </label>
+          <button id="btn-open-perf" class="btn ghost" type="button" style="margin-bottom:12px">📊 查看性能与消耗</button>
+        </div><!-- /绘画线路优化 -->
       </div>
       <div class="modal-actions">
         <span id="settings-hint" class="hint"></span>
@@ -668,6 +1038,8 @@
             <option value="slow">慢</option>
           </select>
         </label>
+        <button id="btn-legacy" class="btn ghost" type="button"
+          title="扫描档案备份/旧数据/回收站/角色库，把旧设定档案与旧角色卡找回并适配到当前版本">🧰 旧档案找回</button>
         <button id="btn-wipe" class="btn ghost danger">🧹 清空全部游戏历史数据</button>
         <p class="hint-line">清空立绘缓存 / 对局 / 全局存档 / 世界观档案 / 插件（保留 API 配置）。需输入确认词 WIPE。</p>
       </div>
@@ -734,6 +1106,160 @@
           <button id="btn-phist-next" class="btn mini ghost">下一页 ›</button>
         </span>
         <button id="btn-prot-hist-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 随机数 / 骰子 ===== -->
+  <div id="modal-rng" class="modal hidden">
+    <div class="modal-box">
+      <h2>🎲 随机数 / 掷骰</h2>
+      <p class="hint-line">使用系统安全随机源（secrets.SystemRandom）；不会调用 LLM，也不影响剧情判定。
+        CoC 模式下可切到「CoC 检定」页，直接按调查员属性掷 d12。</p>
+      <div class="rng-tabs">
+        <button id="rng-tab-dice" class="btn mini primary" type="button">普通骰</button>
+        <button id="rng-tab-coc" class="btn mini ghost" type="button">CoC 检定</button>
+      </div>
+      <div id="rng-dice-pane">
+        <div class="outfit-row">
+          <select id="rng-preset" class="text-input">
+            <option value="1d100">d100（1~100）</option>
+            <option value="1d20">d20（1~20）</option>
+            <option value="1d12">d12（1~12）</option>
+            <option value="1d10">d10（1~10）</option>
+            <option value="1d8">d8（1~8）</option>
+            <option value="1d6">d6（1~6）</option>
+            <option value="1d4">d4（1~4）</option>
+            <option value="2d6+3">2d6+3</option>
+            <option value="">自定义…</option>
+          </select>
+          <input id="rng-custom" class="text-input" maxlength="24" placeholder="自定义：3d8-1">
+        </div>
+        <input id="rng-label" class="text-input" maxlength="40" placeholder="这次掷骰的用途（可选）">
+        <div class="modal-actions">
+          <span id="rng-hint" class="hint"></span>
+          <button id="btn-rng-roll" class="btn primary" type="button">🎲 掷骰</button>
+        </div>
+      </div>
+      <div id="rng-coc-pane" class="hidden">
+        <div class="outfit-row">
+          <select id="rng-coc-stat" class="text-input">
+            <option value="STR">STR · 力量</option>
+            <option value="DEX">DEX · 敏捷</option>
+            <option value="PER">PER · 感知</option>
+            <option value="KNW" selected>KNW · 知识</option>
+            <option value="CHA">CHA · 魅力</option>
+          </select>
+          <select id="rng-coc-threat" class="text-input">
+            <option value="SAFE">SAFE</option>
+            <option value="LOW" selected>LOW</option>
+            <option value="DANGEROUS">DANGEROUS</option>
+            <option value="DOOMED">DOOMED</option>
+          </select>
+        </div>
+        <div class="modal-actions">
+          <span id="rng-coc-hint" class="hint"></span>
+          <button id="btn-rng-coc" class="btn primary" type="button">🎲 掷 d12 检定</button>
+        </div>
+      </div>
+      <div id="rng-result" class="rng-result">还没有掷骰。</div>
+      <div id="rng-history" class="rng-history"></div>
+      <div class="modal-actions">
+        <span class="hint">历史只保留本次打开后的最近 20 条</span>
+        <button id="btn-rng-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 1.9.19 固定商店场景 ===== -->
+  <div id="modal-shop" class="modal hidden">
+    <div class="modal-box shop-box">
+      <h2>🏪 固定商店</h2>
+      <p class="hint-line">商店是城镇里固定的一处场景；货架由本局种子自动生成，买走后本轮不再出现。
+        进入与重掷会按 CoC 规则增加 DOOM。</p>
+      <div id="shop-tabs" class="shop-tabs"></div>
+      <div id="shop-desc" class="shop-desc"></div>
+      <div id="shop-stock" class="shop-stock"></div>
+      <div id="shop-msg" class="model-info"></div>
+      <div class="modal-actions">
+        <span id="shop-funds" class="hint"></span>
+        <button id="btn-shop-reroll" class="btn ghost" type="button">🎲 重新进货（+DOOM）</button>
+        <button id="btn-shop-close" class="btn ghost" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 1.9.20 AI 控制台：请求 / 思考 / 原始输出 / 改对话 / 导演指令 ===== -->
+  <div id="modal-ai" class="modal hidden">
+    <div class="modal-box ai-console-box">
+      <div class="ai-console-head">
+        <div>
+          <h2>🧠 AI 控制台</h2>
+          <p class="hint-line">这里显示主剧情模型实际收到的请求、原始回复，以及模型返回的
+            reasoning_content（若该模型支持）。修改对话只改表现层，不重掷数值。</p>
+        </div>
+        <button id="btn-ai-close" class="btn mini ghost" type="button">✕</button>
+      </div>
+      <div class="ai-tabs">
+        <button id="ai-tab-think" class="btn mini primary" type="button">思考 / 请求</button>
+        <button id="ai-tab-edit" class="btn mini ghost" type="button">修改对话</button>
+        <button id="ai-tab-direct" class="btn mini ghost" type="button">控制 AI</button>
+      </div>
+
+      <div id="ai-pane-think">
+        <div class="ai-split">
+          <div id="ai-entry-list" class="ai-entry-list"></div>
+          <div id="ai-entry-detail" class="ai-entry-detail">还没有记录。推进一幕后再打开这里。</div>
+        </div>
+      </div>
+
+      <div id="ai-pane-edit" class="hidden">
+        <p class="hint-line">编辑当前幕 AI 写出的对话。保存后会立即替换画面上的台词；
+          下一轮会把修改后的版本作为历史交给模型。</p>
+        <div id="ai-dialogue-editor"></div>
+        <div class="modal-actions">
+          <button id="btn-ai-add-line" class="btn mini ghost" type="button">＋ 加一行</button>
+          <span id="ai-edit-msg" class="hint"></span>
+          <button id="btn-ai-save-dialogue" class="btn primary" type="button">保存对话</button>
+        </div>
+      </div>
+
+      <div id="ai-pane-direct" class="hidden">
+        <p class="hint-line">导演指令会持续注入之后的系统提示词，用来控制 AI 的写法、
+          节奏、视角或禁忌。不要在这里填写数值修改；数值仍由系统结算。</p>
+        <textarea id="ai-directive" class="text-input" rows="6" maxlength="500"
+          placeholder="例：叙事保持第二人称、冷峻克制；不要替主角做决定；每幕结尾停在具体动作上。"></textarea>
+        <div class="modal-actions">
+          <span id="ai-direct-msg" class="hint"></span>
+          <button id="btn-ai-save-directive" class="btn primary" type="button">保存导演指令</button>
+        </div>
+      </div>
+
+      <div class="modal-actions ai-console-foot">
+        <span id="ai-msg" class="hint"></span>
+        <button id="btn-ai-refresh" class="btn mini ghost" type="button">刷新</button>
+        <button id="btn-ai-clear" class="btn mini ghost" type="button">清空记录</button>
+        <button id="btn-ai-close2" class="btn ghost" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 角色卡 AI 微调弹窗 ===== -->
+  <div id="modal-finetune" class="modal hidden">
+    <div class="modal-box">
+      <h2>✨ AI 微调角色卡</h2>
+      <p class="hint-line">只修改未固定的字段；名字与「固定性格」字段不会被改写。
+        可直接写要求，例如：身高 +5cm、体型更纤细、语气更温柔、加一个「怕生」标签。</p>
+      <div class="outfit-row">
+        <span id="finetune-target" class="hint"></span>
+      </div>
+      <textarea id="finetune-note" class="text-input" rows="3" maxlength="300"
+        placeholder="例：身高改成 168cm，体型更纤细，性格更主动一点，但保持「嘴硬心软」"></textarea>
+      <div id="finetune-chips" class="cmd-actions"></div>
+      <div class="modal-actions">
+        <span id="finetune-hint" class="hint"></span>
+        <button id="btn-finetune-cancel" class="btn ghost">取消</button>
+        <button id="btn-finetune-go" class="btn primary">✨ 应用微调</button>
       </div>
     </div>
   </div>
@@ -857,7 +1383,10 @@
       <div class="outfit-row">
         <select id="outfit-char" class="text-input"></select>
         <input id="outfit-preset" class="text-input" placeholder="或自定义服饰（如：晚礼服）" maxlength="40">
+        <button id="btn-outfit-random" class="btn ghost" type="button"
+          title="从内置制服库随机抽一套（按当前场景匹配）">🎲 随机制服</button>
       </div>
+      <p id="outfit-random-note" class="hint-line"></p>
       <div id="outfit-presets" class="cmd-actions"></div>
       <div class="modal-actions">
         <span id="outfit-hint" class="hint"></span>
@@ -953,6 +1482,8 @@
       <div id="libpick-list" class="cg-grid"></div>
       <div class="modal-actions">
         <span id="libpick-hint" class="hint"></span>
+        <button id="btn-libpick-adapt" class="btn ghost" type="button"
+          title="把旧版角色卡补齐身份/背景字段（不重新生成立绘）">🧰 适配旧角色卡</button>
         <button id="btn-libpick-close" class="btn ghost">关闭</button>
       </div>
     </div>
@@ -977,8 +1508,34 @@
     </div>
   </div>
 
+  <!-- ===== 旧档案找回（1.9.0） ===== -->
+  <div id="modal-legacy" class="modal hidden">
+    <div class="modal-box tall">
+      <h2>🧰 旧档案找回与适配 <span class="tag">不覆盖现有内容</span></h2>
+      <p class="hint-line">扫描「档案备份」「项目旧数据」「回收站」与「角色库」，把旧版设定档案、旧角色卡、
+        对局 zip 找回，并补齐 1.9.0 的身份/背景/阶段表/制服名等字段。同 id 且内容不同的档案会另存副本。</p>
+      <div id="legacy-summary" class="model-info">点「重新扫描」查看可找回的旧档案。</div>
+      <div class="legacy-options">
+        <label class="opt-row"><input type="checkbox" id="legacy-storylines" checked> 设定档案（storylines）</label>
+        <label class="opt-row"><input type="checkbox" id="legacy-roster" checked> 旧角色卡（角色库）</label>
+        <label class="opt-row"><input type="checkbox" id="legacy-archives"> 对局归档 zip</label>
+        <label class="opt-row"><input type="checkbox" id="legacy-bg"> 同时用 AI 补写缺失背景（较慢）</label>
+      </div>
+      <div id="legacy-list" class="slot-list"></div>
+      <div id="legacy-result" class="model-info"></div>
+      <div class="modal-actions">
+        <span id="legacy-hint" class="hint"></span>
+        <button id="btn-legacy-scan" class="btn ghost">🔍 重新扫描</button>
+        <button id="btn-legacy-restore" class="btn primary">🧰 找回并适配</button>
+        <button id="btn-legacy-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="main.js?v=1.7.52"></script>
+  <script src="main.js?v=1.9.20"></script>
+  <!-- UI 2.0：开局向导 / 顶栏菜单 / 六段演变工坊 / 性能面板（独立文件，后加载） -->
+  <script src="ui2.js?v=1.9.20"></script>
 </body>
 </html>

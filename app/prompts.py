@@ -48,7 +48,7 @@ TSF_STORY_SYSTEM = """\
   "scene": "当前场景的简短名称",
   "present": ["在场角色名（此场景中真正出现在主角面前的其他角色；主角不必列入；不在场的角色必须从列表移除）"],
   "new_characters": [
-    {{"name": "新登场的其他角色名（2~5字中文名；必须同时列在 present 中——只有本幕真正登场的新角色才写，没有新角色登场时返回空列表 []）", "appearance": "完整外貌描写（发色发型、瞳色、服装、气质，40~80字，供立绘生成，必须具体）", "personality": "性格与说话风格"}}
+    {{"name": "新登场的其他角色名（2~5字中文名；必须同时列在 present 中——只有本幕真正登场的新角色才写，没有新角色登场时返回空列表 []）", "role": "身份/与主角的关系（如：同班同学、社团学姐、咖啡店店员）", "appearance": "完整外貌描写（发色发型、瞳色、服装、气质，40~80字，供立绘生成，必须具体）", "personality": "性格与说话风格", "traits": ["性格标签 2~5 个，如：慢热、嘴硬心软、观察力强"], "age": 22, "height_cm": 164, "body_type": "纤细高挑/娇小柔软/匀称标准等", "measurements": "B86 / W58 / H88（可留空）", "birthday": "5月12日（可留空）", "speech_style": "说话语气、口头禅、句长", "likes": "喜欢的事物", "dislikes": "讨厌的事物", "background": "角色背景（80~150字：出身/日常、与主角的因缘、一个可被剧情利用的钩子）"}}
   ],
   "outfit": {{"角色名": "该角色当前穿着（未换装不写该键）"}},
   "cg": {{"active": false, "title": "CG 标题（4~12字）", "prompt": "CG 画面描述（40~80字，横版电影镜头感，多人同框允许；仅在 active=true 时填写）"}},
@@ -85,13 +85,23 @@ TSF_STORY_SYSTEM = """\
    场景内无其他角色时写 []。立绘系统会根据它决定是否显示角色。
 8. 内容分级政策优先于一切写作倾向：政策禁止的尺度一律不写，哪怕剧情自然走向
    也不得越界；所有角色均为成年人，严禁任何未成年人相关的不当内容。
-9. 新角色引入规则：剧情需要新人物时，用 new_characters 数组一次给出其完整外貌
-   与性格（外貌必须具体，供立绘生成），角色池会自动登记并生成其立绘；已经出过场
-   的角色不要再写入 new_characters。无需新人物时写 []。
+9. 新角色引入规则：剧情需要新人物时，用 new_characters 数组一次给出其完整外貌、
+   身份/关系、性格与背景（外貌必须具体，供立绘生成；background 写过去与因缘，
+   不是外貌复述），角色池会自动登记并生成其立绘；已经出过场的角色不要再写入
+   new_characters。无需新人物时写 []。
 10. 换装检测：{outfit_policy}
 11. TSF 数值稳定：体质特征（physique）必须与性别同化率（progress）保持同步，
    差值不超过 10；progress 不下降。
-12. CG 规则：{cg_policy}"""
+12. CG 规则：{cg_policy}
+13. 关系阶段必须影响写法：【各角色数值状态】里的「关系 陌生/认识/熟悉/亲近/心动/依恋/恋人」
+    是当前关系的硬约束——称呼、身体距离、主动性、吃醋/回避反应都要与阶段相符；
+    升级要写出铺垫与契机，不能一幕之内从陌生跳到恋人；最近情感记忆可自然回扣，
+    但不要机械复述数值。
+14. scene 用稳定的地点名（2~10 字，如「学校教室」「商店街」），不要每幕加时间/
+    天气/人物/临时动作；同一地点请沿用同一个名字，避免背景反复重画。
+15. 已有角色卡中的性格标签、年龄、身高、体型、三围、说话风格是硬设定：
+    剧情只能让人物在压力下表现出层次，不能改写这些固定属性；只有 new_characters
+    才填写这些字段。角色卡 locked_fields / personality_locked 标记的字段绝对不可改。"""
 
 TSF_SUMMARY_SYSTEM = """\
 你是视觉小说的剧情记录员。请把下面已发生的 TSF 故事浓缩为简洁摘要（300字内），\
@@ -117,8 +127,9 @@ TSF_RANDOM_SETUP_SYSTEM = """\
 {{
   "title": "作品标题",
   "world": "世界观与故事背景设定（100~200字，包含时代、地点、转变的缘由或规则、基调）",
+  "outline": "故事大纲（5 段，每段以 ◆ 开头的一句标题+一两句剧情，覆盖初遇/转变契机/关系变化/抉择/结局）",
   "characters": [
-    {{"name": "角色名（2~4字）", "appearance": "外貌描述（发色发型、瞳色、服装、气质，40~80字，供立绘生成用）", "personality": "性格与说话风格（40字内）"}}
+    {{"name": "角色名（2~4字）", "appearance": "外貌描述（发色发型、瞳色、服装、气质，40~80字，供立绘生成用）", "personality": "性格与说话风格（40字内）", "traits": ["性格标签 2~4 个"], "age": 22, "height_cm": 164, "body_type": "体型", "measurements": "B86 / W58 / H88（可留空）", "speech_style": "说话语气", "likes": "喜欢的事物", "dislikes": "讨厌的事物"}}
   ]
 }}
 
@@ -171,9 +182,41 @@ def content_tone(adult_intensity: str) -> str:
 def format_characters(characters: list[dict]) -> str:
     lines = []
     for c in characters:
-        lines.append(
-            f"- {c['name']}：{c.get('personality', '')}｜外貌：{c.get('appearance', '')}"
-        )
+        role = str(c.get("role", "") or "").strip()
+        bg = str(c.get("background", "") or "").strip()
+        line = (f"- {c['name']}"
+                + (f"（{role}）" if role else "")
+                + f"：{c.get('personality', '')}｜外貌：{c.get('appearance', '')}")
+        profile = []
+        traits = [str(x).strip() for x in (c.get("traits") or []) if str(x).strip()]
+        if traits:
+            profile.append("性格标签：" + "、".join(traits))
+        if c.get("age"):
+            profile.append(f"年龄：{int(c['age'])}")
+        if c.get("height_cm"):
+            profile.append(f"身高：{int(c['height_cm'])}cm")
+        if c.get("body_type"):
+            profile.append("体型：" + str(c["body_type"]))
+        if c.get("measurements"):
+            profile.append("三围：" + str(c["measurements"]))
+        if c.get("birthday"):
+            profile.append("生日：" + str(c["birthday"]))
+        if c.get("speech_style"):
+            profile.append("说话风格：" + str(c["speech_style"]))
+        if c.get("likes"):
+            profile.append("喜欢：" + str(c["likes"]))
+        if c.get("dislikes"):
+            profile.append("厌恶：" + str(c["dislikes"]))
+        if profile:
+            line += "｜" + "｜".join(profile)
+        if bg:
+            line += f"｜背景：{bg}"
+        locks = [str(x) for x in (c.get("locked_fields") or []) if str(x)]
+        if c.get("personality_locked") and "personality" not in locks:
+            locks.append("personality")
+        if locks:
+            line += "｜【固定属性，不得改写】" + "、".join(locks)
+        lines.append(line)
     if not lines:
         lines.append("-（无其他角色）")
     return "\n".join(lines)

@@ -28,6 +28,11 @@
      },
      "failure": {
       "doom": 1
+     },
+     "requirements": {
+      "stat_min": {
+       "KNW": 6
+      }
      }
     },
     {
@@ -126,7 +131,7 @@
      "check": {
       "stat": "DEX",
       "threat": "LOW",
-      "dc": 0
+      "dc": -1
      },
      "success": {
       "exp": 5
@@ -134,11 +139,40 @@
      "failure": {
       "sta": -1,
       "rea": -1
+     },
+     "requirements": {
+      "stat_min": {
+       "DEX": 7
+      }
      }
     },
     {
      "text": "让它开着",
      "success": {
+      "doom": 1
+     }
+    },
+    {
+     "text": "用刀背把窗栓勾过来",
+     "requirements": {
+      "weapon": true,
+      "stat_min": {
+       "DEX": 6
+      }
+     },
+     "check": {
+      "stat": "DEX",
+      "threat": "LOW",
+      "dc": -1,
+      "weapon_stat": true
+     },
+     "success": {
+      "exp": 5,
+      "flags": {
+       "window_closed": true
+      }
+     },
+     "failure": {
       "doom": 1
      }
     }
@@ -199,7 +233,7 @@
      "check": {
       "stat": "CHA",
       "threat": "LOW",
-      "dc": 0
+      "dc": -1
      },
      "success": {
       "flags": {
@@ -209,6 +243,11 @@
      },
      "failure": {
       "doom": 1
+     },
+     "requirements": {
+      "stat_min": {
+       "CHA": 6
+      }
      }
     },
     {

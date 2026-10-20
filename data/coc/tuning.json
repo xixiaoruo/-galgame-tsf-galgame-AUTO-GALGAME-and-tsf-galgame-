@@ -176,6 +176,11 @@
       "value": 3,
       "_unverified": true,
       "_source": "MECHANICS.md §2.1 在纪念碑献祭 -3%"
+    },
+    "Item:HolyWater": {
+      "value": 2,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 圣水是仪式性消耗品；一次使用 -2% DOOM，量级低于神秘日记(-3)/魔典(-4)/图腾(-10)，避免商店可无限刷低 DOOM"
     }
   },
   "rest": {
@@ -337,6 +342,89 @@
       "value": 6,
       "_unverified": true,
       "_source": "MECHANICS.md §1.1 有 Heart of Darkness 城镇状态时 6 场"
+    }
+  },
+  "sanity": {
+    "_note": "1.9.19 新增的 CoC 式 SAN 子系统。现有 REA 是“意志/精神耐久”，SAN 是独立 0–99 的理智值；两者同时存在：REA 归零仍是精神崩溃结局，SAN 归零新增 END_SAN_ZERO。所有数值均为【本项目设计】，不覆盖既有 REA 公式。",
+    "base": {
+      "value": 50,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 SAN 初始值基准 50；按 KNW 调整，使知识型调查员更易接触真相、也更易被真相磨损"
+    },
+    "knw_step": {
+      "value": 5,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 每点 KNW 相对 6 修正 5 点 SAN；KNW 1–12 ⇒ 初始 SAN 25–80"
+    },
+    "max": {
+      "value": 99,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 SAN 上限 99（经典 CoC 0–99 口径）"
+    },
+    "bout_threshold": {
+      "value": 5,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 单次 SAN 损失 ≥5 触发临时疯狂（经典 CoC 7e 的 5 点规则）"
+    },
+    "bout_turns": {
+      "value": 2,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 临时疯狂持续 2 个回合；不阻断操作，只影响叙述与检定提示"
+    },
+    "recover_max": {
+      "value": 99,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 物品/SAN 回复不得超过上限"
+    },
+    "difficulty": {
+      "regular": {
+        "value": 1.0,
+        "_unverified": true,
+        "_source": "【本项目设计】1.9.19 SAN 检定目标 = 当前 SAN × 倍率；regular 为满值"
+      },
+      "hard": {
+        "value": 0.5,
+        "_unverified": true,
+        "_source": "【本项目设计】1.9.19 hard = SAN 的一半"
+      },
+      "extreme": {
+        "value": 0.2,
+        "_unverified": true,
+        "_source": "【本项目设计】1.9.19 extreme = SAN 的五分之一"
+      }
+    }
+  },
+  "shop": {
+    "_note": "1.9.19 固定商店。商店不是新地图，而是城镇里固定的一处场景；进入仍按 doom_up.shop_enter 计 DOOM，重掷按 doom_up.shop_reroll 计。",
+    "stock_size": {
+      "value": 6,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 每次进货展示 6 件；固定场景的货架不会无限增长"
+    },
+    "restock_turns": {
+      "value": 4,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 每 4 个回合自动补货；玩家也可手动重掷"
+    },
+    "sell_ratio": {
+      "value": 0.5,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 出售返还标价的 50%（向下取整，最低 1）；防止低买高卖刷钱"
+    },
+    "loot_base_chance": {
+      "value": 0.25,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 搜刮基础成功率 25%"
+    },
+    "loot_per": {
+      "value": 0.05,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 每点 PER 提高 5 个百分点搜刮成功率"
+    },
+    "loot_doom": {
+      "value": 1,
+      "_unverified": true,
+      "_source": "【本项目设计】1.9.19 搜刮也是一次调查动作，+1% DOOM"
     }
   },
   "sanitize": {
@@ -521,6 +609,99 @@
       "value": "partial",
       "_unverified": true,
       "_source": "MECHANICS.md §12 #12：Endings 页列出 20 余条但未验证是否穷尽；本模式只做 4 基础 + 特殊"
+    }
+  },
+  "coc_tsf_items": {
+    "_note": "TSF×CoC 融合模式：转变进度（0–100，六档 = MECH_THRESHOLDS 0/20/40/60/80/100）对**物品/装备/背包**的机制后果。档位口径与 app/coc/tsf.py 的 tier_of() 完全一致。本段只描述“能不能用/能不能穿/穿成什么样”，不含任何美术与露骨内容。",
+    "wear_table": {
+      "value": {
+        "R": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "C": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "B": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          false
+        ]
+      },
+      "_unverified": true,
+      "_source": "【本项目设计】用户要求：TSF×CoC 融合模式下物品/装备/背包机制必须真正生效（2026-10-05）；衣物随身形重构而失效是 TSF 的核心意象，且 tsf.py 的 _SYMPTOMS 已叙述“衣服开始不合身”；此处给它机制落点。B 槽在档位 3/4/5 拒绝旧衣物。"
+    },
+    "item_hand_tier_max": {
+      "value": {
+        "two": 4
+      },
+      "_unverified": true,
+      "_source": "【本项目设计】用户要求：TSF×CoC 融合模式下物品/装备/背包机制必须真正生效（2026-10-05）；双手武器（FireAxe）需要原有体格与握持半径；档位 4/5 起拒绝，使“转变后抡不动消防斧”成为真实机制（用户要求 ① 的直接落地）。"
+    },
+    "use_penalty": {
+      "value": [
+        0,
+        0,
+        1,
+        1,
+        2,
+        2
+      ],
+      "_unverified": true,
+      "_source": "【本项目设计】用户要求：TSF×CoC 融合模式下物品/装备/背包机制必须真正生效（2026-10-05）；手部精细动作随转变受影响，使用/服用类操作变慢；数值量级与 MECH_TABLE 的 ±(0..2) 对齐，避免超过 dc_max=6 造成与 DOOM 叠加失控。"
+    },
+    "wardrobe_states": {
+      "value": [
+        {
+          "tier": 0,
+          "state": "normal",
+          "label": "衣着合身，一切如常"
+        },
+        {
+          "tier": 1,
+          "state": "loose",
+          "label": "袖子松了，肩线不再撑得起来"
+        },
+        {
+          "tier": 2,
+          "state": "tight",
+          "label": "腰线把衣料绷住，活动时总有牵扯"
+        },
+        {
+          "tier": 3,
+          "state": "straining",
+          "label": "旧衣物明显不合身，扣子与接缝都在抗议"
+        },
+        {
+          "tier": 4,
+          "state": "strain_torn",
+          "label": "衣料已到极限，动作大一点就会崩开"
+        },
+        {
+          "tier": 5,
+          "state": "forced",
+          "label": "旧衣物彻底穿不住，必须换成合身的"
+        }
+      ],
+      "_unverified": true,
+      "_source": "【本项目设计】用户要求：TSF×CoC 融合模式下物品/装备/背包机制必须真正生效（2026-10-05）；给 B 槽的可用性提供可读叙述；state 名沿用 project 既有英文风格。"
+    },
+    "effects_apply_at_use": {
+      "value": true,
+      "_unverified": true,
+      "_source": "【本项目设计】用户要求：TSF×CoC 融合模式下物品/装备/背包机制必须真正生效（2026-10-05）；背包物品的效果（绷带治伤、日记/魔典降 DOOM、图腾/十字架/相机的战斗用途）在 融合模式下必须真正结算 —— 用户明确要求“所得到的物品的机制要体现在 CoC×TSF”。"
     }
   }
 }

@@ -15,6 +15,12 @@ import sys
 from app.coc import provenance as P
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def test_red_first_proof(s: TestSuite) -> None:
     """★ 先红后绿：缺来源必须真的抛错（而不是「我们相信它不会」)。"""

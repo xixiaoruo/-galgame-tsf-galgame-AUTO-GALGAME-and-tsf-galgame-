@@ -23,6 +23,12 @@ from app.coc import provenance as PR
 from app.coc import rules_horror_erotic as R
 from app.coc.tests.harness import TestSuite
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 #: 空串场景（G2 未过）：任务书点名的三组里，all / 16 属空串；温和档属"降档"
 EMPTY_CASES = (
     ("rating=all", dict(content_rating="all", r18_enabled=False,

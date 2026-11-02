@@ -673,6 +673,9 @@ def _vn_system(session: dict) -> str:
     if _dir:
         system += ("\n\n【玩家导演指令（本局持续生效，优先级高于默认风格；"
                    "但不得违反内容分级政策）】\n" + _dir[:500])
+    # 1.9.21：写作风格 + 玩家自定义提示词（默认/空时零影响）
+    from . import prompt_presets as _pp
+    system += _pp.session_prompt_block(session)
     # API 前置注入：启用中的注入文本拼到 system prompt 最前面（全局生效）
     from . import inject as inject_mod
     return inject_mod.inject_block(system)
@@ -915,6 +918,10 @@ def public_state(session: dict) -> dict:
         "mock": session["mock"],
         # 1.9.20：AI 控制台用（导演指令；记录走独立端点）
         "ai_directive": str(session.get("ai_directive") or ""),
+        # 1.9.21：写作风格 / 自定义提示词 / 一致性检查
+        "writing_style": str(session.get("writing_style") or "default"),
+        "custom_prompt": str(session.get("custom_prompt") or ""),
+        "consistency": game.consistency_view(session),
     }
 
 
@@ -986,6 +993,11 @@ async def start(payload: dict) -> dict:
         # 1.9.20：AI 控制台 / 玩家导演指令
         "ai_console": [],
         "ai_directive": "",
+        # 1.9.21：写作风格 / 自定义提示词 / DeepSeek 一致性检查（与 TSF 共用）
+        "writing_style": "default",
+        "custom_prompt": "",
+        "consistency": None,
+        "consistency_auto": 0,
         "log": [],
         "assets": {"portraits": {}, "backgrounds": {}},
         "bg_map": {},
@@ -1068,6 +1080,8 @@ async def advance(sid: str, choice_index: int) -> dict:
     _post_turn(session, turn)
     session["log"].append({"turn": turn, "choice": None})
     game.persist(session)
+    # 1.9.21：到点自动跑一次 DeepSeek 一致性检查（配置为 0 时零开销）
+    await game.maybe_auto_consistency(session)
     return public_state(session)
 
 
@@ -1095,6 +1109,8 @@ async def speak(sid: str, text: str) -> dict:
     _post_turn(session, turn)
     session["log"].append({"turn": turn, "choice": None})
     game.persist(session)
+    # 1.9.21：到点自动跑一次 DeepSeek 一致性检查（配置为 0 时零开销）
+    await game.maybe_auto_consistency(session)
     return public_state(session)
 
 

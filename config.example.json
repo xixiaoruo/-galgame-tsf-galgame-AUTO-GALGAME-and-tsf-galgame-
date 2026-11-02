@@ -44,7 +44,15 @@
     "_comment_18": "1.8.0 绘画线路优化：gen_cache=同提示词/种子成品复用（省电省时间）；eco_mode=节能模式（重试减半、关 HR、跃迁不打标）；gen_cache_mb=缓存上限",
     "gen_cache": true,
     "gen_cache_mb": 384,
-    "eco_mode": false
+    "eco_mode": false,
+    "auto_local_failover": true,
+    "comfy_urls": [],
+    "comfy_max_wait": 1500,
+    "comfy_poll_interval": 1.0,
+    "portrait_extra": "",
+    "background_extra": "",
+    "cg_extra": "",
+    "negative_extra_global": ""
   },
   "game": {
     "emotions": [
@@ -70,7 +78,10 @@
     "stage_count": 6,
     "style_mode": "default",
     "inject_outline": true,
-    "history_max_per_label": 10
+    "history_max_per_label": 10,
+    "writing_style": "default",
+    "custom_prompt": "",
+    "consistency_auto_turns": 0
   },
   "coc": {
     "_comment": "CoC 跑团模式（第三个独立模式）。数值真值在 data/coc/tuning.json；这里只放开关与展示默认值。",

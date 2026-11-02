@@ -2,10 +2,11 @@
 param()
 
 $root = (Get-Item -LiteralPath $PSScriptRoot).FullName.TrimEnd('\')
-# Prefer the 1.9.20 build (AI console / editable dialogue / director directive).
+# Prefer the 1.9.21 build (DeepSeek consistency check / outfit img2img fix /
+# ComfyUI multi-use + color-guard / more prompts).
 # Older dist dirs may still be locked by a running instance, so the new build
 # has its own directory.
-$targetDir = Join-Path $root 'dist-1.9.20\TSF_Galgame'
+$targetDir = Join-Path $root 'dist-1.9.21\TSF_Galgame'
 if (-not (Test-Path -LiteralPath (Join-Path $targetDir 'TSF_Galgame.exe') -PathType Leaf)) {
     $targetDir = Join-Path $root 'dist\TSF_Galgame'
 }

@@ -29,7 +29,7 @@ DESKTOP_CANDIDATES = (
     Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "ComfyUI" / "ComfyUI.exe",
     Path.home() / "ComfyUI" / "ComfyUI.exe",
 )
-PREFERRED = ("zukiAnimeILL", "miaomiaoRealskin")
+PREFERRED = ("waiIllustrious", "zukiAnimeILL", "miaomiaoRealskin")
 
 
 def _loopback_only(url: str) -> bool:

@@ -18,7 +18,7 @@
        Content-Security-Policy: frame-ancestors 'none'。 -->
   <title>自动化AI Galgame · 即时物语生成器</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=1.9.20">
+  <link rel="stylesheet" href="style.css?v=1.9.21">
 </head>
 <body>
 
@@ -34,7 +34,7 @@
             <span>AI 物语 · 转变视觉小说</span>
           </div>
         </div>
-        <div class="rail-version"><span id="rail-version">v1.9.20</span><span class="rail-dot"></span><span>本地运行</span></div>
+        <div class="rail-version"><span id="rail-version">v1.9.21</span><span class="rail-dot"></span><span>本地运行</span></div>
         <nav id="setup-nav" class="setup-nav" aria-label="开局步骤">
           <button class="setup-nav-item active" data-step="story">
             <span class="nav-index">01</span>
@@ -877,6 +877,10 @@
           超高清（Hi-Res，仅 OpenAI 线：基准尺寸×2，上限约 4.6MP——Seedream 5.0 Pro 实测支持）
         </label>
         <label>负面提示词（SD WebUI 用）<input id="cfg-img-neg" class="text-input" placeholder="lowres, bad anatomy, bad hands, blurry"></label>
+        <label>追加提示词 · 立绘（可选）<input id="cfg-portrait-extra" class="text-input" placeholder="例：柔和逆光, 细腻发丝, 轻飘衣料"></label>
+        <label>追加提示词 · 背景（可选）<input id="cfg-bg-extra" class="text-input" placeholder="例：雨后湿润的路面, 远景纵深"></label>
+        <label>追加提示词 · CG（可选）<input id="cfg-cg-extra" class="text-input" placeholder="例：电影级构图, 丁达尔光"></label>
+        <label>追加负面词 · 全部（可选）<input id="cfg-neg-extra" class="text-input" placeholder="例：extra fingers, bad perspective"></label>
         <div id="cfg-model-info" class="model-info"></div>
       </div>
       <div class="config-section">
@@ -1204,6 +1208,8 @@
         <button id="ai-tab-think" class="btn mini primary" type="button">思考 / 请求</button>
         <button id="ai-tab-edit" class="btn mini ghost" type="button">修改对话</button>
         <button id="ai-tab-direct" class="btn mini ghost" type="button">控制 AI</button>
+        <button id="ai-tab-prompt" class="btn mini ghost" type="button">提示词</button>
+        <button id="ai-tab-consistency" class="btn mini ghost" type="button">一致性检查</button>
       </div>
 
       <div id="ai-pane-think">
@@ -1232,6 +1238,49 @@
         <div class="modal-actions">
           <span id="ai-direct-msg" class="hint"></span>
           <button id="btn-ai-save-directive" class="btn primary" type="button">保存导演指令</button>
+        </div>
+      </div>
+
+      <div id="ai-pane-prompt" class="hidden">
+        <p class="hint-line">写作风格与自定义提示词会持续注入系统提示词（在导演指令之后），
+          下一轮生成生效。默认风格 + 空自定义 = 与原版完全一致。</p>
+        <label>写作风格
+          <select id="ai-style-select" class="text-input"></select>
+        </label>
+        <p id="ai-style-note" class="hint-line"></p>
+        <label>自定义提示词（最多 600 字，可留空）
+          <textarea id="ai-custom-prompt" class="text-input" rows="5" maxlength="600"
+            placeholder="例：叙述多写气味与触感；主角内心独白用括号；每三幕给一次街景空镜。"></textarea>
+        </label>
+        <div class="modal-actions">
+          <span id="ai-prompt-msg" class="hint"></span>
+          <button id="btn-ai-save-prompt" class="btn primary" type="button">保存提示词</button>
+        </div>
+      </div>
+
+      <div id="ai-pane-consistency" class="hidden">
+        <p class="hint-line">用本机配置的对话模型（默认 DeepSeek）检查人物设定、关系、
+          时间线、服饰、场景与代词是否自相矛盾。只读检查，不改数值；
+          「写进导演指令」会让下一轮剧情自行修正。</p>
+        <div class="outfit-row">
+          <select id="ai-consistency-mode" class="text-input">
+            <option value="recent">最近 12 幕</option>
+            <option value="full">尽可能全篇（最多 16 幕）</option>
+          </select>
+          <input id="ai-consistency-focus" class="text-input" maxlength="200"
+            placeholder="可选：只查某方面（如「服饰」「主角代词」）">
+          <button id="btn-ai-consistency-run" class="btn primary" type="button">🔍 开始检查</button>
+        </div>
+        <div id="ai-consistency-report" class="ai-entry-detail">还没有检查记录。</div>
+        <div class="modal-actions">
+          <label class="hint">每
+            <input id="ai-consistency-auto" type="number" min="0" max="50" value="0"
+              style="width:56px" title="每 N 幕自动检查一次；0 = 关闭">
+            幕自动检查
+          </label>
+          <span id="ai-consistency-msg" class="hint"></span>
+          <button id="btn-ai-consistency-auto" class="btn mini ghost" type="button">保存自动检查</button>
+          <button id="btn-ai-consistency-fix" class="btn primary" type="button">📝 写进导演指令</button>
         </div>
       </div>
 
@@ -1534,8 +1583,8 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="main.js?v=1.9.20"></script>
+  <script src="main.js?v=1.9.21"></script>
   <!-- UI 2.0：开局向导 / 顶栏菜单 / 六段演变工坊 / 性能面板（独立文件，后加载） -->
-  <script src="ui2.js?v=1.9.20"></script>
+  <script src="ui2.js?v=1.9.21"></script>
 </body>
 </html>

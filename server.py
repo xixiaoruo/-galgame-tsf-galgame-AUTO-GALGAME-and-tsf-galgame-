@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from app import archive as archive_mod
 from app import characters as charm
 from app import cgbook
+from app import consistency as consistency_mod
 from app import exporter
 from app import game
 from app import image as image_mod
@@ -255,7 +256,7 @@ async def _unhandled_exception(request, exc):
 #     python 测试工具/check_version_sync.py
 #     python 测试工具/check_version_sync.py --fix     # 用本常量回写 index.html 两处
 # 注意：不要用中间件注入 HTML 去改 `?v=`——StaticFiles 是流式响应、没有 body 可改。
-GAME_VERSION = "1.9.20"
+GAME_VERSION = "1.9.21"
 
 
 # ---------- 请求参数安全校验（B-01：路径穿越 / id 边界）----------
@@ -1894,6 +1895,23 @@ class AiDialoguePayload(BaseModel):
     dialogue: list[dict] = []
 
 
+# ---------------------------------------------------------------- 1.9.21：提示词 / 一致性检查
+
+class PromptStylePayload(BaseModel):
+    style_id: str = "default"
+    custom_prompt: str | None = None
+
+
+class ConsistencyCheckPayload(BaseModel):
+    mode: str = "recent"
+    turns: int = 12
+    focus: str = ""
+
+
+class ConsistencyAutoPayload(BaseModel):
+    turns: int = 0
+
+
 def _ai_parts(sid: str):
     """返回 `(会话, 控制台容器, 模式)`；CoC 用 run.state，TSF/VN 用 session。"""
     if coc.is_coc(sid):
@@ -1976,6 +1994,76 @@ def ai_console_clear(sid: str):
     else:
         game.persist(_sess)
     return {"ok": True, "entries": []}
+
+
+# ---------------------------------------------------------------- 1.9.21：写作风格 / 一致性检查
+
+@app.get("/api/prompt-presets")
+def prompt_presets_list():
+    """写作风格预设库（前端「提示词」页下拉用）。"""
+    from app import prompt_presets as pp
+    return {"styles": pp.list_styles(), "max_custom": pp.MAX_CUSTOM}
+
+
+@app.post("/api/game/{sid}/prompt-style")
+def prompt_style_set(sid: str, payload: PromptStylePayload):
+    """设置本局写作风格 + 玩家自定义提示词（下一轮生成生效）。"""
+    _sess, _trace, mode = _ai_parts(sid)
+    if mode in ("coc", "coc_tsf"):
+        raise HTTPException(400, "CoC 模式暂不支持写作风格注入")
+    try:
+        data = game.set_writing_style(sid, payload.style_id, payload.custom_prompt)
+    except game.GameError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, **data}
+
+
+@app.get("/api/game/{sid}/consistency")
+def consistency_get(sid: str):
+    """读取最近一次一致性检查报告（无报告时 report=None）。"""
+    sess, _trace, mode = _ai_parts(sid)
+    if mode in ("coc", "coc_tsf"):
+        raise HTTPException(400, "CoC 模式暂不支持一致性检查")
+    return {"ok": True, **game.consistency_view(sess)}
+
+
+@app.post("/api/game/{sid}/consistency/check")
+async def consistency_check(sid: str, payload: ConsistencyCheckPayload):
+    """用本机配置的 LLM（默认 DeepSeek）审计设定一致性。"""
+    sess, _trace, mode = _ai_parts(sid)
+    if mode in ("coc", "coc_tsf"):
+        raise HTTPException(400, "CoC 模式暂不支持一致性检查")
+    try:
+        report = await consistency_mod.check(
+            sess, mode=payload.mode, turns=payload.turns,
+            focus=payload.focus)
+    except consistency_mod.ConsistencyError as e:
+        raise HTTPException(503, str(e))
+    game.persist(sess)
+    return {"ok": True, "report": report,
+            "consistency": game.consistency_view(sess)}
+
+
+@app.post("/api/game/{sid}/consistency/fix")
+def consistency_fix(sid: str):
+    """把问题清单里的修复建议写进导演指令（下一轮生成生效）。"""
+    sess, _trace, mode = _ai_parts(sid)
+    if mode in ("coc", "coc_tsf"):
+        raise HTTPException(400, "CoC 模式暂不支持一致性检查")
+    directive = consistency_mod.apply_fixes(sess)
+    game.persist(sess)
+    return {"ok": True, "directive": directive,
+            "consistency": game.consistency_view(sess)}
+
+
+@app.post("/api/game/{sid}/consistency/auto")
+def consistency_auto_set(sid: str, payload: ConsistencyAutoPayload):
+    """每 N 幕自动检查一次；0 = 关闭。"""
+    sess, _trace, mode = _ai_parts(sid)
+    if mode in ("coc", "coc_tsf"):
+        raise HTTPException(400, "CoC 模式暂不支持一致性检查")
+    n = game.set_consistency_auto(sid, payload.turns)
+    return {"ok": True, "auto_turns": n}
 
 
 @app.post("/api/game/{sid}/slots")

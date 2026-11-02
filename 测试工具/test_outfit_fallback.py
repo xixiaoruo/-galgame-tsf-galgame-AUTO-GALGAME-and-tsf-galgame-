@@ -1,4 +1,10 @@
-"""换装链路回退契约：非 SD provider 不得把原图当成成功换装。"""
+"""换装链路回退契约（1.9.21 更新语义）：
+
+- 本地线路（SD WebUI **与 ComfyUI**）支持换装 img2img；
+- 云端/未知线路（如 OpenAI 兼容）必须抛 ImageGenError，让上层回退
+  「全量重画」，绝不允许把原图原样当成换装成功；
+- 底图非法（不是图片）时任何线路都必须抛错，而不是静默成功。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +20,8 @@ from app.image import ImageClient, ImageGenError
 
 
 class OutfitFallbackTests(unittest.TestCase):
-    def test_comfy_outfit_refine_requests_full_generation_fallback(self) -> None:
+    def test_comfy_invalid_image_still_raises(self) -> None:
+        """ComfyUI 已支持换装，但非法底图仍必须失败（不许假装成功）。"""
         client = ImageClient({"image": {"provider": "comfyui", "base_url": "http://127.0.0.1:8188"}})
         with self.assertRaises(ImageGenError):
             asyncio.run(client.refine_outfit(b"not-an-image", "outfit", 1))

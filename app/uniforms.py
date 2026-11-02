@@ -46,18 +46,20 @@ SCENE_TAGS: list[tuple[str, tuple[str, ...]]] = [
 
 # 标签 → 预设 id 的优先池（随机时提高权重，不是硬限制）。
 TAG_POOLS: dict[str, tuple[str, ...]] = {
-    "school": ("sailor", "blazer", "gym", "student_council", "library"),
+    "school": ("sailor", "blazer", "gym", "student_council", "library",
+               "sportswear"),
     "shrine": ("miko", "kimono", "yukata"),
     "maid": ("maid", "cafe_apron", "waitress"),
     "medical": ("nurse", "labcoat", "clinic"),
-    "beach": ("swimsuit", "beach_cover", "gym"),
-    "work": ("office", "ol", "secretary", "labcoat"),
+    "beach": ("swimsuit", "beach_cover", "gym", "casual_dress"),
+    "work": ("office", "ol", "secretary", "suit", "qipao", "detective"),
     "military": ("military", "pilot", "police"),
-    "fantasy": ("fantasy_mage", "fantasy_knight", "fantasy_priestess"),
-    "traditional": ("kimono", "yukata", "miko"),
-    "idol": ("idol", "stage_dress", "cheer"),
-    "home": ("loungewear", "hoodie", "pajama"),
-    "scifi": ("scifi_suit", "labcoat", "pilot"),
+    "fantasy": ("fantasy_mage", "fantasy_knight", "fantasy_priestess",
+                "witch", "gothic"),
+    "traditional": ("kimono", "yukata", "miko", "qipao"),
+    "idol": ("idol", "stage_dress", "cheer", "lolita", "gothic"),
+    "home": ("loungewear", "hoodie", "pajama", "casual_dress", "lolita"),
+    "scifi": ("scifi_suit", "labcoat", "pilot", "detective"),
 }
 
 UNIFORMS: list[dict] = [
@@ -253,6 +255,55 @@ UNIFORMS: list[dict] = [
         "note": "飞船/未来设施",
         "en": "sci-fi pilot suit, fitted bodysuit with panels, utility belt, gloves, boots, holographic badge",
         "neg": "casual clothes, jeans, school uniform, fantasy robe, swimsuit",
+    },
+    # ---- 1.9.21「更多提示词支持」：补充 8 套常用/幻想制服 ----
+    {
+        "id": "qipao", "name": "旗袍", "icon": "🏮", "tags": ["traditional", "work"],
+        "note": "中式立领旗袍，适合宴会/夜游/旧城区",
+        "en": "elegant cheongsam, mandarin collar, side slit, embroidered floral pattern, silk fabric, hair pin, high heels",
+        "neg": "casual clothes, jeans, school uniform, armor, swimsuit, modern suit",
+    },
+    {
+        "id": "lolita", "name": "洛丽塔", "icon": "🎀", "tags": ["idol", "home"],
+        "note": "层叠裙摆与蕾丝，适合洋馆/茶会",
+        "en": "sweet lolita dress, layered frilled skirt, lace trim, ribbon bow, puffed sleeves, knee socks, mary jane shoes",
+        "neg": "casual clothes, jeans, school uniform, office wear, armor, swimsuit",
+    },
+    {
+        "id": "gothic", "name": "哥特礼服", "icon": "🖤", "tags": ["fantasy", "idol"],
+        "note": "黑红配色的礼服，宴会/夜之馆",
+        "en": "gothic evening gown, black and crimson layers, corset bodice, lace sleeves, choker, long skirt, heeled boots",
+        "neg": "casual clothes, jeans, school uniform, sportswear, swimsuit, bright pastel colors",
+    },
+    {
+        "id": "casual_dress", "name": "连衣裙便装", "icon": "👗", "tags": ["home", "beach"],
+        "note": "日常外出连衣裙，轻松自然",
+        "en": "simple one-piece dress, soft cotton fabric, pastel color, cardigan over shoulders, flat shoes, small shoulder bag",
+        "neg": "formal wear, school uniform, office wear, armor, swimsuit, heavy makeup",
+    },
+    {
+        "id": "suit", "name": "女式西装", "icon": "🧥", "tags": ["work"],
+        "note": "利落的三件式西装，谈判/职场",
+        "en": "women's tailored three-piece suit, slim blazer, waistcoat, white shirt, straight trousers, leather oxfords, wristwatch",
+        "neg": "casual clothes, jeans, school uniform, swimsuit, fantasy robe, frills",
+    },
+    {
+        "id": "sportswear", "name": "运动套装", "icon": "🏸", "tags": ["school", "home"],
+        "note": "现代运动套装，跑步/健身",
+        "en": "modern tracksuit, zip jacket, fitted joggers, running shoes, sports wristband, ponytail tie",
+        "neg": "formal wear, school uniform, office wear, swimsuit, armor, high heels",
+    },
+    {
+        "id": "witch", "name": "魔女装", "icon": "🧙", "tags": ["fantasy"],
+        "note": "尖帽与斗篷，奇幻/万圣夜",
+        "en": "witch outfit, pointed hat, short cape, corset dress, striped stockings, ankle boots, magic staff",
+        "neg": "casual clothes, jeans, school uniform, office wear, sci-fi suit, armor",
+    },
+    {
+        "id": "detective", "name": "侦探风衣", "icon": "🕵", "tags": ["work", "scifi"],
+        "note": "长风衣与帽，悬疑/旧城区",
+        "en": "detective trench coat, wide-brim hat, waistcoat, white shirt, necktie, leather gloves, ankle boots",
+        "neg": "casual clothes, jeans, school uniform, swimsuit, fantasy robe, bright colors",
     },
 ]
 

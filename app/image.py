@@ -1087,6 +1087,37 @@ def _validate_url(url: str, allow_local: bool) -> None:
         raise ImageGenError("该生图服务类型不允许使用本地/内网地址；本地整合包请将服务类型切换为 SD WebUI")
 
 
+def _local_host_port(url: str) -> tuple[str, int] | None:
+    """从 URL 取出「本机 + 端口」；非 127.0.0.1/localhost 或解析失败返回 None。
+
+    仅用于**本地绘画服务**的可用性探测（自动线路切换），不参与任何外部请求。
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").strip().lower()
+        port = parsed.port
+    except ValueError:
+        return None
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return None
+    if not port:
+        port = 443 if parsed.scheme == "https" else 80
+    return host, int(port)
+
+
+def _port_open(host: str, port: int, timeout: float = 0.25) -> bool:
+    """本机端口是否在监听（毫秒级 TCP 握手，仅 127.0.0.1）。"""
+    import socket
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def _is_local_ip(addr) -> bool:
     """单个 IP 是否属于本地/内网/保留/不可路由类别（SSRF 判据，B-13）。"""
     return bool(addr.is_loopback or addr.is_private or addr.is_reserved
@@ -2920,10 +2951,16 @@ def process_portrait(data: bytes, cutout_mode: str = "auto") -> bytes:
 def _comfy_workflow(prompt: str, negative: str, width: int, height: int,
                     seed: int, steps: int, cfg_scale: float,
                     sampler: str, scheduler: str,
-                    checkpoint: str, filename_prefix: str = "tsf_galgame") -> dict:
+                    checkpoint: str, filename_prefix: str = "tsf_galgame",
+                    clip_layer: int = -1) -> dict:
     """ComfyUI API 版工作流（txt2img）：Checkpoint -> 双 CLIP 条件 ->
-    KSampler -> VAE 解码 -> 保存。节点编号固定，结果从 9/9 取图。"""
-    return {
+    KSampler -> VAE 解码 -> 保存。节点编号固定，结果从 7 取图。
+
+    clip_layer > 0：插入 `CLIPSetLastLayer`（stop_at_clip_layer=-N），
+    与 SD WebUI 线的 `override_settings.CLIP_stop_at_last_layers` 等价
+    ——wai/Illustrious 系模型推荐 ClipSkip 2，缺这条会明显「发灰/偏色」。
+    """
+    wf = {
         "1": {"class_type": "CheckpointLoaderSimple",
               "inputs": {"ckpt_name": checkpoint or ""}},
         "2": {"class_type": "CLIPTextEncode",
@@ -2944,6 +2981,165 @@ def _comfy_workflow(prompt: str, negative: str, width: int, height: int,
               "inputs": {"filename_prefix": filename_prefix,
                          "images": ["6", 0]}},
     }
+    if int(clip_layer) > 0:
+        wf["11"] = {"class_type": "CLIPSetLastLayer",
+                    "inputs": {"clip": ["1", 1],
+                               "stop_at_clip_layer": -int(clip_layer)}}
+        wf["2"]["inputs"]["clip"] = ["11", 0]
+        wf["3"]["inputs"]["clip"] = ["11", 0]
+    return wf
+
+
+def _comfy_workflow_img2img(prompt: str, negative: str, width: int, height: int,
+                            seed: int, steps: int, cfg_scale: float,
+                            sampler: str, scheduler: str, checkpoint: str,
+                            image_name: str, denoise: float = 0.6,
+                            filename_prefix: str = "tsf_galgame",
+                            clip_layer: int = -1) -> dict:
+    """ComfyUI API 版 **图生图** 工作流（1.9.21 换装修复核心）。
+
+    LoadImage(上传到 ComfyUI input 目录的底图) → VAEEncode → KSampler
+    （denoise<1，整幅低重绘）→ VAEDecode → SaveImage。节点编号固定，
+    SaveImage 是 "8"（`_comfy_extract_image` 显式取这个 id，取不到再回退扫描）。
+    """
+    wf = {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": checkpoint or ""}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": negative, "clip": ["1", 1]}},
+        "3": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["1", 1]}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "5": {"class_type": "VAEEncode",
+              "inputs": {"pixels": ["4", 0], "vae": ["1", 2]}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"seed": seed % (2 ** 31), "steps": steps,
+                         "cfg": cfg_scale, "sampler_name": sampler,
+                         "scheduler": scheduler or "normal",
+                         "denoise": float(denoise), "model": ["1", 0],
+                         "positive": ["3", 0], "negative": ["2", 0],
+                         "latent_image": ["5", 0]}},
+        "7": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
+        "8": {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": filename_prefix,
+                         "images": ["7", 0]}},
+    }
+    if int(clip_layer) > 0:
+        wf["11"] = {"class_type": "CLIPSetLastLayer",
+                    "inputs": {"clip": ["1", 1],
+                               "stop_at_clip_layer": -int(clip_layer)}}
+        wf["2"]["inputs"]["clip"] = ["11", 0]
+        wf["3"]["inputs"]["clip"] = ["11", 0]
+    return wf
+
+
+def _comfy_workflow_inpaint(prompt: str, negative: str, width: int, height: int,
+                            seed: int, steps: int, cfg_scale: float,
+                            sampler: str, scheduler: str, checkpoint: str,
+                            image_name: str, mask_name: str,
+                            denoise: float = 0.4,
+                            filename_prefix: str = "tsf_galgame",
+                            clip_layer: int = -1) -> dict:
+    """ComfyUI API 版 **掩膜重绘** 工作流（脸部细化 / 渐变身体通道用）。
+
+    LoadImage + LoadImageMask → VAEEncode → **SetLatentNoiseMask**（只给掩膜
+    区域加噪，掩膜外原样保留）→ KSampler(denoise) → VAEDecode → SaveImage。
+    实测（测试工具/comfy_probe_img2img.py）：掩膜外平均像素差 0.70、
+    掩膜内 18.84——掩膜外几乎零改动，等价于 A1111 的 inpaint 语义。
+    """
+    wf = {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": checkpoint or ""}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": negative, "clip": ["1", 1]}},
+        "3": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["1", 1]}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "5": {"class_type": "VAEEncode",
+              "inputs": {"pixels": ["4", 0], "vae": ["1", 2]}},
+        "6": {"class_type": "LoadImageMask",
+              "inputs": {"image": mask_name, "channel": "red"}},
+        "7": {"class_type": "SetLatentNoiseMask",
+              "inputs": {"samples": ["5", 0], "mask": ["6", 0]}},
+        "8": {"class_type": "KSampler",
+              "inputs": {"seed": seed % (2 ** 31), "steps": steps,
+                         "cfg": cfg_scale, "sampler_name": sampler,
+                         "scheduler": scheduler or "normal",
+                         "denoise": float(denoise), "model": ["1", 0],
+                         "positive": ["3", 0], "negative": ["2", 0],
+                         "latent_image": ["7", 0]}},
+        "9": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["1", 2]}},
+        "10": {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": filename_prefix,
+                          "images": ["9", 0]}},
+    }
+    if int(clip_layer) > 0:
+        wf["11"] = {"class_type": "CLIPSetLastLayer",
+                    "inputs": {"clip": ["1", 1],
+                               "stop_at_clip_layer": -int(clip_layer)}}
+        wf["2"]["inputs"]["clip"] = ["11", 0]
+        wf["3"]["inputs"]["clip"] = ["11", 0]
+    return wf
+
+
+_COMFY_WEIGHT_RE = None
+
+
+def comfy_sanitize_text(text: str) -> str:
+    """ComfyUI 专用：去掉 A1111 风格的 `(关键词:1.35)` 权重语法。
+
+    ⚠️ 为什么必须做（1.9.21 实机定论）：
+    本机 ComfyUI（waiIllustrious/Illustrious SDXL）在**长负面提示词**里带
+    `(2girls:1.35)` / `(1girl 1boy:1.35)` 这类权重标签时，CLIP 的 pooled
+    输出会被推入数值崩坏——整幅图红通道被摧毁（实测平均 RGB 从
+    (204,203,202) 变成 (25,191,241)），脸/衣服/背景全部变成青蓝色。
+    同一段文本去掉 `:1.35` 权重后完全干净（(208,206,205)），语义内容
+    （多人/重复/裁剪等负面）全部保留。
+
+    A1111 线路不受影响（它自己处理权重），所以本清洗只在 ComfyUI 请求前
+    执行——见 `_request_comfyui*`。纯文本函数，便于单测。
+    """
+    global _COMFY_WEIGHT_RE
+    import re
+    if _COMFY_WEIGHT_RE is None:
+        _COMFY_WEIGHT_RE = re.compile(
+            r"\(\s*([^():]+?)\s*:\s*[0-9]*\.?[0-9]+\s*\)")
+    out = _COMFY_WEIGHT_RE.sub(r"\1", str(text or ""))
+    # 剩下的裸括号 `(xxx)` 也摊平（与去权重视觉语义一致，避免 CLIP 对
+    # 嵌套括号做二次解释）
+    while True:
+        new = out.replace("((", "(").replace("))", ")")
+        new = re.sub(r"\(\s*([^()]+?)\s*\)", r"\1", new)
+        if new == out:
+            break
+        out = new
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
+def comfy_color_issue(raw: bytes) -> str:
+    """ComfyUI 出图颜色崩坏检测（1.9.21）：红通道被摧毁 / 整幅偏青蓝。
+
+    返回非空字符串 = 判定崩坏（供重试或回退）；空串 = 正常。
+    只做一次整图缩放统计（约 1ms），不在热路径上做逐像素循环。
+    """
+    try:
+        im = Image.open(io.BytesIO(raw)).convert("RGB").resize((48, 48))
+        px = list(im.getdata())
+    except Exception:                       # noqa: BLE001
+        return ""
+    n = max(1, len(px))
+    r = sum(p[0] for p in px) / n
+    g = sum(p[1] for p in px) / n
+    b = sum(p[2] for p in px) / n
+    # 正常立绘/换装图：灰底 + 人像，R 通道均值通常 >150。
+    # 崩坏样本实测 (9,202,213)/(22,199,208)/(88,195,197)——R 极低、G/B 高。
+    if r < 120 and ((g + b) / 2.0 - r) > 55:
+        return f"红通道塌陷（mean RGB {r:.0f}/{g:.0f}/{b:.0f}）"
+    if r < 60 and (g > 120 or b > 120):
+        return f"整幅偏色（mean RGB {r:.0f}/{g:.0f}/{b:.0f}）"
+    return ""
 
 
 def _comfy_extract_image(history: dict, node_id: str = "7") -> dict | None:
@@ -3026,12 +3222,48 @@ class ImageClient:
             # 本地 ComfyUI：/prompt + /history 轮询，无需 Key；同样串行化
             self.mock = not self.cfg.get("base_url")
             self._sem = _get_sd_sem()
+            self._comfy_base_cache: tuple[str, float] | None = None
         else:
             self.mock = not (
                 self.cfg.get("api_key")
                 and "填入" not in self.cfg.get("api_key", "")
                 and self.cfg.get("base_url")
             )
+        # 1.9.21 本地线路自动接管：配置的 SD WebUI 没开、而本机 ComfyUI 在跑
+        # （用户日常会开着 ComfyUI 做别的事）时，立即改用 ComfyUI——否则换装/
+        # 重画会一路超时失败（用户实测「换装失效」的根因之一）。只探测
+        # 127.0.0.1，不触碰任何外部地址；config.json 不被改写（运行时接管）。
+        self._maybe_failover_local()
+
+    def _maybe_failover_local(self) -> None:
+        """SD WebUI 不可达而本机 ComfyUI 在线 → 运行时切到 ComfyUI。
+
+        只在**标准 A1111 端口（7860/7861）**上接管：任意自定义/测试地址
+        （例如单测里故意写死的 `127.0.0.1:9`）必须保持原 provider——
+        否则「显式配置的线路」会被环境里开着的 ComfyUI 悄悄改掉，
+        测试/诊断结果失真。接管只发生在内存配置，不写 config.json。
+        """
+        if self.mock or self.provider != "sdwebui":
+            return
+        if not bool(self.cfg.get("auto_local_failover", True)):
+            return
+        hp = _local_host_port(str(self.cfg.get("base_url") or ""))
+        if not hp or hp[1] not in (7860, 7861):
+            return                      # 非本机 / 非标准 SD 端口 → 不接管
+        if _port_open(*hp):
+            return                      # SD 正常在跑 → 不接管
+        for port in COMFY_PORTS:
+            cand = f"http://127.0.0.1:{port}"
+            if not _port_open("127.0.0.1", port):
+                continue
+            log.warning("SD WebUI 未监听 %s，自动改用本机 ComfyUI %s"
+                        "（本次运行生效，不改 config.json）", self.cfg.get("base_url"), cand)
+            self.provider = "comfyui"
+            self.cfg["provider"] = "comfyui"
+            self.cfg["base_url"] = cand
+            self._sem = _get_sd_sem()
+            self._comfy_base_cache = None
+            return
 
     async def generate_portrait(
         self, name: str, appearance: str, emotion: str, emotion_cn: str,
@@ -3095,6 +3327,13 @@ class ImageClient:
                   f"{PORTRAIT_EN_SUFFIX}")
         if hair_neg:
             extra_negative = ", ".join(x for x in [hair_neg, extra_negative] if x)
+        # 1.9.21「更多提示词支持」：玩家可在设置里追加立绘正向词与全局负面词
+        _extra_pos = str(self.cfg.get("portrait_extra") or "").strip()
+        if _extra_pos:
+            prompt += f"，{_extra_pos[:200]}"
+        _extra_neg = str(self.cfg.get("negative_extra_global") or "").strip()
+        if _extra_neg:
+            extra_negative = ", ".join(x for x in [extra_negative, _extra_neg[:200]] if x)
         if self.cfg.get("pink_rim", True):
             prompt += PINK_RIM_SUFFIX
         # 固定制服关键词（防偏差）：学园/制服类世界观锁定服装风格；
@@ -3167,19 +3406,29 @@ class ImageClient:
             extra_negative = ", ".join(x for x in [EYE_PROP_NEG, extra_negative] if x)
         extra_negative = ", ".join(x for x in [EYE_NEG, extra_negative] if x)
         if self.provider == "comfyui":
+            # 1.9.21：ComfyUI 也走「模型预设」——wai/Illustrious 系按
+            # ClipSkip 2 / Euler a / CFG 6 配方出图（此前用通用 DPM++/karras
+            # + 无 ClipSkip，实测换装整幅重绘会出现明显偏青/发灰）
+            preset = await self.comfy_model_preset()
             w, h = self._parse_size(
                 effective_sd_size(self.cfg, "portrait", "sd_portrait_size"))
             neg = ", ".join(x for x in [
                 PORTRAIT_NEG_EN, extra_negative,
+                preset.get("negative_extra", ""),
                 self.cfg.get("uniform_keyword_neg", "")] if x)
             cap = effective_steps_cap(self.cfg, "portrait")
+            p_steps = min(int(preset.get("steps", 30)), cap)
             return await self._sd_retry(
                 prompt, w, h, neg, seed, check=_portrait_check,
                 soft=not strict, soft_last=True, matcher=matcher,
-                steps=int(self._tune("sd_steps", min(30, cap), min(30, cap))),
-                cfg_scale=float(self._tune("sd_cfg", 6.5, 6.5)),
-                sampler=str(self._tune("sd_sampler", "DPM++ 2M", "DPM++ 2M")),
-                scheduler=str(self._tune("sd_scheduler", "karras", "karras")),
+                steps=int(self._tune("sd_steps", p_steps, p_steps)),
+                cfg_scale=float(self._tune("sd_cfg", preset.get("cfg", 6.0),
+                                           preset.get("cfg", 6.0))),
+                sampler=str(self._tune("sd_sampler", preset.get("sampler", "Euler a"),
+                                       preset.get("sampler", "Euler a"))),
+                scheduler=str(self._tune("sd_scheduler",
+                                         preset.get("scheduler", "normal"),
+                                         preset.get("scheduler", "normal"))),
             )
         if self.provider == "sdwebui":
             preset = (await self.current_model_preset()
@@ -3251,7 +3500,12 @@ class ImageClient:
         prompt = (f"{hint}，{style_suffix}"
                   f"{BACKGROUND_EN_SUFFIX}，画面中不得出现任何人物，"
                   f"构图简洁干净（clean simple composition）")
+        # 1.9.21：玩家追加背景正向词 / 全局负面词
+        _bg_extra = str(self.cfg.get("background_extra") or "").strip()
+        if _bg_extra:
+            prompt += f"，{_bg_extra[:200]}"
         if self.provider == "comfyui":
+            preset = await self.comfy_model_preset()
             w, h = self._parse_size(
                 effective_sd_size(self.cfg, "background", "sd_background_size"))
             neg = ", ".join(x for x in [
@@ -3261,14 +3515,20 @@ class ImageClient:
                 ("duplicate objects, cloned buildings, extra windows, "
                  "warped perspective, jpeg artifacts, text, signature, "
                  "cluttered composition, twisted geometry"),
+                preset.get("negative_extra", ""),
                 BACKGROUND_HUMAN_NEG] if x)
             cap = effective_steps_cap(self.cfg, "background")
+            p_steps = min(int(preset.get("steps", 30)), cap)
             return await self._sd_retry(
                 prompt, w, h, neg, None, check=_bg_check,
-                steps=int(self._tune("sd_steps", min(25, cap), min(25, cap))),
-                cfg_scale=float(self._tune("sd_cfg", 6.5, 6.5)),
-                sampler=str(self._tune("sd_sampler", "DPM++ 2M", "DPM++ 2M")),
-                scheduler=str(self._tune("sd_scheduler", "karras", "karras")),
+                steps=int(self._tune("sd_steps", p_steps, p_steps)),
+                cfg_scale=float(self._tune("sd_cfg", preset.get("cfg", 6.0),
+                                           preset.get("cfg", 6.0))),
+                sampler=str(self._tune("sd_sampler", preset.get("sampler", "Euler a"),
+                                       preset.get("sampler", "Euler a"))),
+                scheduler=str(self._tune("sd_scheduler",
+                                         preset.get("scheduler", "normal"),
+                                         preset.get("scheduler", "normal"))),
             )
         if self.provider == "sdwebui":
             preset = (await self.current_model_preset()
@@ -3283,7 +3543,8 @@ class ImageClient:
                  "warped perspective, jpeg artifacts, text, signature, "
                  "cluttered composition, twisted geometry"),
                 BACKGROUND_HUMAN_NEG,
-                preset.get("negative_extra", "")] if x)
+                preset.get("negative_extra", ""),
+                self.cfg.get("negative_extra_global", "")] if x)
             cap = effective_steps_cap(self.cfg, "background")
             preset_steps = min(int(preset.get("steps", 30)), cap)
             return await self._sd_retry(
@@ -3371,91 +3632,379 @@ class ImageClient:
                 return r.content
         raise ImageGenError("生图 API 响应中既无 b64_json 也无 url")
 
+    # ------------------------------------------------------------------
+    # ComfyUI 共用通道（1.9.21「多种使用」优化）
+    #
+    # 场景：这台机器上的 ComfyUI 是**用户自己在用的**服务（浏览器里可能正在
+    # 跑别的 workflow），游戏只是它的另一个使用者。因此这里的原则是：
+    #   · 只提交、只读 history/queue/view，绝不 /interrupt、绝不清空队列；
+    #   · 先看队列长度再定等待预算（排队不误判超时），轮询自适应；
+    #   · 任务被用户在 ComfyUI 界面手动取消时快速失败并重试，而不是干等；
+    #   · 地址可在多个端口/实例间自动选择（comfy_urls 或常见端口）。
+    # ------------------------------------------------------------------
+
+    def _comfy_endpoints(self) -> list[str]:
+        """ComfyUI 候选地址：comfy_urls（列表/逗号串）> base_url。"""
+        urls: list[str] = []
+        raw = self.cfg.get("comfy_urls")
+        if isinstance(raw, list):
+            urls.extend(str(x).strip().rstrip("/") for x in raw if str(x).strip())
+        elif isinstance(raw, str) and raw.strip():
+            urls.extend(x.strip().rstrip("/") for x in raw.split(",") if x.strip())
+        base = str(self.cfg.get("base_url") or "").strip().rstrip("/")
+        if base:
+            urls.append(base)
+        out: list[str] = []
+        for u in urls:
+            if u and u not in out:
+                out.append(u)
+        return out
+
+    async def _comfy_base(self) -> str:
+        """选一个可用 ComfyUI 地址（60 秒缓存，支持多实例 / 故障转移）。"""
+        import time as _time
+        cached = getattr(self, "_comfy_base_cache", None)
+        if cached and _time.time() - cached[1] < 60:
+            return cached[0]
+        cands = self._comfy_endpoints() or [f"http://127.0.0.1:{p}"
+                                            for p in COMFY_PORTS]
+        for base in cands:
+            _validate_url(base, allow_local=True)
+            try:
+                async with httpx.AsyncClient(timeout=2.5) as c:
+                    r = await c.get(f"{base}/system_stats")
+                    r.raise_for_status()
+            except httpx.HTTPError:
+                continue
+            self._comfy_base_cache = (base, _time.time())
+            return base
+        raise ImageGenError("ComfyUI 不可达（已尝试：%s）" % "、".join(cands[:4]))
+
+    async def _comfy_checkpoint(self, base: str) -> str:
+        """当前 ComfyUI 使用的 checkpoint（5 分钟缓存，含存在性校验）。
+
+        配置里写了不存在的 ckpt 时不会直接把 node_errors 抛给玩家：
+        `_comfy_default_checkpoint` 会在可用列表里按偏好重新挑一个。
+        """
+        import time as _time
+        cache = getattr(self, "_comfy_ckpt_cache", None)
+        if cache and _time.time() - cache[1] < 300:
+            return cache[0]
+        pick = await self._comfy_default_checkpoint(base)
+        self._comfy_ckpt_cache = (pick, _time.time())
+        return pick
+
+    async def _comfy_upload(self, client, base: str, headers: dict,
+                            data: bytes, kind: str = "img") -> str:
+        """上传底图/掩膜到 ComfyUI 的 input 目录，返回 LoadImage 可用文件名。"""
+        import uuid as _uuid
+        name = f"tsf_{kind}_{_uuid.uuid4().hex[:10]}.png"
+        resp = await client.post(
+            f"{base}/upload/image",
+            files={"image": (name, data, "image/png")},
+            data={"overwrite": "true", "type": "input"},
+            headers=headers)
+        resp.raise_for_status()
+        body = resp.json() or {}
+        return str(body.get("name") or name)
+
+    async def _comfy_queue_state(self, client, base: str) -> tuple[int, list]:
+        """当前 ComfyUI 队列（运行中数量, 待跑列表）。读失败按空闲处理。"""
+        try:
+            q = (await client.get(f"{base}/queue")).json() or {}
+        except (httpx.HTTPError, ValueError):
+            return 0, []
+        return len(q.get("queue_running") or []), list(q.get("queue_pending") or [])
+
+    async def _comfy_run(self, workflow: dict, base: str, headers: dict,
+                         label: str = "") -> bytes:
+        """提交工作流 → 队列感知等待 → 取图。
+
+        等待预算 = comfy_max_wait + 90s × 队列长度（上限 2 倍），让「用户
+        自己也在用 ComfyUI」时游戏任务排队变慢不被误判成失败；被手动取消
+        时立刻失败（由调用方决定是否重试）。
+        """
+        import time as _time
+        import uuid as _uuid
+        poll_interval = max(0.5, float(self.cfg.get("comfy_poll_interval", 1.0) or 1.0))
+        base_wait = max(120.0, float(self.cfg.get("comfy_max_wait", 1500) or 1500))
+        client_id = _uuid.uuid4().hex
+        last_err: Exception | None = None
+        for _attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    running, pending = await self._comfy_queue_state(client, base)
+                    if running or pending:
+                        log.info("comfy shared queue: running=%d pending=%d "
+                                 "（本机其它用途在跑，游戏任务排队）",
+                                 running, len(pending))
+                    resp = await client.post(
+                        f"{base}/prompt",
+                        json={"prompt": workflow, "client_id": client_id},
+                        headers=headers)
+                    resp.raise_for_status()
+                    body = resp.json() or {}
+                    errors = body.get("node_errors") or {}
+                    if errors:
+                        # 工作流校验失败（模型缺失/节点错误）：重试无意义
+                        raise ImageGenError(
+                            f"ComfyUI 工作流校验失败：{list(errors)[:3]}")
+                    prompt_id = body["prompt_id"]
+                budget = min(base_wait * 2.0,
+                             base_wait + 90.0 * (running + len(pending)))
+                deadline = _time.time() + budget
+                log.info("comfy submitted %s%s (budget %.0fs, queue %d/%d)",
+                         prompt_id, f" [{label}]" if label else "",
+                         budget, running, len(pending))
+                started = _time.time()
+                last_queue_check = started
+                async with httpx.AsyncClient(timeout=30) as poll:
+                    while _time.time() < deadline:
+                        try:
+                            r = await poll.get(f"{base}/history/{prompt_id}")
+                            r.raise_for_status()
+                            data = r.json()
+                        except (httpx.HTTPError, ValueError) as e:
+                            log.debug("comfy poll error: %s", e)
+                            await asyncio.sleep(poll_interval * 2)
+                            continue
+                        node = (data.get(prompt_id) or {}
+                                if isinstance(data, dict) else {})
+                        status = node.get("status") or {}
+                        if status.get("status_str") == "error":
+                            msgs = status.get("messages") or [["error", "unknown"]]
+                            raise ImageGenError(f"ComfyUI 生成失败：{msgs[0]}")
+                        img = (_comfy_extract_image(data, "10")
+                               or _comfy_extract_image(data, "8")
+                               or _comfy_extract_image(data))
+                        if img:
+                            fn = str(img.get("filename", ""))
+                            view = await poll.get(
+                                f"{base}/view",
+                                params={"filename": fn,
+                                        "subfolder": img.get("subfolder", ""),
+                                        "type": img.get("type", "output")})
+                            view.raise_for_status()
+                            log.info("comfy image fetched: %s (%.1fs)",
+                                     fn, _time.time() - started)
+                            return view.content
+                        if _time.time() - last_queue_check >= 6.0:
+                            last_queue_check = _time.time()
+                            try:
+                                q = (await poll.get(f"{base}/queue")).json() or {}
+                            except (httpx.HTTPError, ValueError):
+                                q = {}
+                            ids = []
+                            for item in (q.get("queue_running") or []) + \
+                                    (q.get("queue_pending") or []):
+                                if isinstance(item, list) and len(item) > 1:
+                                    ids.append(str(item[1]))
+                            if ids and prompt_id in ids:
+                                pos = ids.index(prompt_id) + 1
+                                log.info("comfy queue position %d/%d for %s",
+                                         pos, len(ids), prompt_id)
+                            elif ids:
+                                # 复核一次 history：避免「已完成但 history 未落盘」
+                                try:
+                                    h2 = (await poll.get(
+                                        f"{base}/history/{prompt_id}")).json()
+                                except (httpx.HTTPError, ValueError):
+                                    h2 = {}
+                                if not (_comfy_extract_image(h2, "10")
+                                        or _comfy_extract_image(h2, "8")
+                                        or _comfy_extract_image(h2)):
+                                    raise ImageGenError(
+                                        "ComfyUI 队列里已找不到该任务"
+                                        "（可能被手动取消）")
+                        await asyncio.sleep(poll_interval)
+                raise ImageGenError(
+                    f"ComfyUI 生成超时（>{budget:.0f}s；共享队列变慢时可在"
+                    "设置里调大 comfy_max_wait）")
+            except ImageGenError as e:
+                last_err = e
+                if "工作流校验失败" in str(e) or "不可达" in str(e):
+                    raise
+                await asyncio.sleep(3.0)
+            except (httpx.HTTPError, ValueError, KeyError) as e:
+                last_err = ImageGenError(f"ComfyUI 请求失败：{e}")
+                await asyncio.sleep(3.0)
+        raise last_err or ImageGenError("ComfyUI 生成失败")
+
+    async def comfy_model_preset(self) -> dict:
+        """当前 ComfyUI checkpoint 对应的模型预设（60 秒缓存，含 ClipSkip）。
+
+        与 SD WebUI 的 `current_model_preset` 同语义：wai/Illustrious 系
+        自动启用 **ClipSkip 2 / Euler a / normal / CFG 6** 与该模型专属
+        负面词——SD → ComfyUI 自动接管后画风与既有立绘保持一致，也避免
+        「缺 ClipSkip 时明显发灰/偏青」的配方差异。
+        """
+        cached = getattr(self, "_comfy_preset_cache", None)
+        if cached is not None:
+            return cached
+        base = await self._comfy_base()
+        ckpt = await self._comfy_checkpoint(base)
+        preset = match_model_preset(ckpt)
+        adaptive = wai_adapt_enabled({"image": self.cfg}, ckpt)
+        clip_skip = int(preset.get("clip_skip", 0) or 0) if adaptive else 0
+        preset = dict(preset, clip_skip=clip_skip, checkpoint=ckpt)
+        self._comfy_preset_cache = preset
+        return preset
+
     async def _request_comfyui(self, prompt: str, width: int, height: int,
                                extra_negative: str = "", seed: int | None = None,
                                steps: int | None = None,
                                cfg_scale: float | None = None,
                                sampler: str = "", scheduler: str = "",
                                hr: bool = False, **kwargs) -> bytes:
-        """本地 ComfyUI 文本出图：POST /prompt（API 工作流）→ 轮询 /history
-        {prompt_id} → GET /view 取回 PNG。全程以同一信号量串行化。"""
-        import base64
+        """本地 ComfyUI 文本出图：POST /prompt（API 工作流）→ /history → /view。"""
         import time as _time
-        import uuid as _uuid
-        base = (self.cfg.get("base_url") or "http://127.0.0.1:8188").rstrip("/")
-        _validate_url(base, allow_local=True)
-        steps = steps or int(self.cfg.get("sd_steps", 25))
+        base = await self._comfy_base()
+        preset = await self.comfy_model_preset()
+        steps = steps or int(self.cfg.get("sd_steps", preset.get("steps", 25)))
         cfg_scale = float(cfg_scale if cfg_scale is not None
-                          else self.cfg.get("sd_cfg", 6.5))
-        sampler = sampler or self.cfg.get("sd_sampler") or "euler"
-        scheduler = scheduler or (self.cfg.get("sd_scheduler") or "")
+                          else preset.get("cfg", self.cfg.get("sd_cfg", 6.5)))
+        sampler = sampler or preset.get("sampler") or "euler"
+        scheduler = scheduler or preset.get("scheduler") or ""
         sampler, scheduler = _comfy_sampler(sampler, scheduler)
-        ckpt = str(self.cfg.get("comfy_checkpoint", "") or "")
-        if not ckpt:
-            ckpt = await self._comfy_default_checkpoint(base)
         seed_val = int(seed if seed is not None else _time.time()) % (2 ** 31)
-        workflow = _comfy_workflow(prompt, extra_negative, width, height,
+        # 1.9.21：去掉 (x:1.35) 权重语法（ComfyUI 长负面会红通道塌陷，见
+        # comfy_sanitize_text 的实机证据）
+        pos_txt = comfy_sanitize_text(prompt)
+        neg_txt = comfy_sanitize_text(extra_negative)
+        workflow = _comfy_workflow(pos_txt, neg_txt, width, height,
                                    seed_val, steps, cfg_scale,
-                                   sampler, scheduler, ckpt)
-        client_id = _uuid.uuid4().hex
+                                   sampler, scheduler, preset["checkpoint"],
+                                   clip_layer=int(preset.get("clip_skip", 0)))
         headers = self._auth_headers()
-        last_err = None
-        for attempt in range(2):          # ComfyUI：同样走全局串行通道
-            try:
-                async with _SdGate(self._sem, "comfy"):
-                    async with httpx.AsyncClient(timeout=120) as client:
-                        resp = await client.post(
-                            f"{base}/prompt",
-                            json={"prompt": workflow, "client_id": client_id},
-                            headers=headers)
-                        resp.raise_for_status()
-                        body = resp.json()
-                        # node_errors 非空 = 工作流校验失败（模型缺失/节点错误），
-                        # 重试无意义，直接快速失败
-                        errors = body.get("node_errors") or {}
-                        if errors:
-                            raise ImageGenError(
-                                f"ComfyUI 工作流校验失败：{list(errors)[:3]}")
-                        prompt_id = body["prompt_id"]
-                        log.info("comfy submitted prompt %s", prompt_id)
-                    # 轮询直到完成（状态 error 提前退出）：独立客户端，避免
-                    # POST 的请求上下文关闭后继续复用导致连接错误
-                    deadline = _time.time() + 900
-                    async with httpx.AsyncClient(timeout=30) as poll:
-                        while _time.time() < deadline:
-                            r = await poll.get(f"{base}/history/{prompt_id}")
-                            r.raise_for_status()
-                            data = r.json()
-                            node = data.get(prompt_id) or {}
-                            status = node.get("status", {})
-                            if status.get("status_str") == "error":
-                                err = (node.get("status", {}).get("messages")
-                                       or [["error"]])[0]
-                                raise ImageGenError(f"ComfyUI 生成失败：{err}")
-                            # 注意：_comfy_extract_image 接收整个 history 字典
-                            #（pid → node），传单个 node 会永远取不到图
-                            img = _comfy_extract_image(data)
-                            if img:
-                                fn = img.get("filename", "")
-                                sub = img.get("subfolder", "")
-                                typ = img.get("type", "output")
-                                log.info("comfy image fetched: %s", fn)
-                                view = await poll.get(
-                                    f"{base}/view",
-                                    params={"filename": fn, "subfolder": sub,
-                                            "type": typ})
-                                view.raise_for_status()
-                                return view.content
-                            await asyncio.sleep(1.5)
-                        raise ImageGenError("ComfyUI 生成超时（>15 分钟）")
-            except (ImageGenError, ValueError, KeyError) as e:
-                last_err = e if isinstance(e, ImageGenError) \
-                    else ImageGenError(f"ComfyUI 响应异常：{e}")
-                await asyncio.sleep(3.0)
-            except httpx.HTTPError as e:
-                last_err = ImageGenError(f"ComfyUI 请求失败：{e}")
-                await asyncio.sleep(3.0)
-        raise last_err
+        async with _SdGate(self._sem, "comfy"):
+            return await self._comfy_run(
+                workflow, base, headers, label=f"txt2img {width}x{height}")
+
+    async def _request_comfyui_img2img(self, init_b64: str, prompt: str,
+                                       width: int, height: int,
+                                       denoise: float, seed: int,
+                                       negative: str = "",
+                                       steps: int | None = None) -> bytes:
+        """本地 ComfyUI 图生图：上传底图 → LoadImage/VAEEncode/KSampler。
+
+        与 SD WebUI 的 `_request_sdwebui_img2img` 同语义（整幅低重绘）。
+        换装/表情差分/TSF 渐变链都走这里——这是「换装系统在 ComfyUI 上
+        可用」的关键：不再因为没有 img2img 而回退成全量重画（换一个人）。
+        """
+        import base64
+        base = await self._comfy_base()
+        preset = await self.comfy_model_preset()
+        steps = int(steps or best_chain_steps(self.cfg))
+        sampler, scheduler = _comfy_sampler(
+            preset.get("sampler") or "euler",
+            preset.get("scheduler") or "")
+        headers = self._auth_headers()
+        data = base64.b64decode(init_b64)
+        pos_txt = comfy_sanitize_text(prompt)
+        neg_txt = comfy_sanitize_text(negative)
+        last_issue = ""
+        async with _SdGate(self._sem, "comfy-i2i"):
+            async with httpx.AsyncClient(timeout=120) as client:
+                name = await self._comfy_upload(client, base, headers, data, "init")
+            for attempt in range(2):
+                workflow = _comfy_workflow_img2img(
+                    pos_txt, neg_txt, width, height,
+                    (int(seed) + attempt * 1000003) % (2 ** 31),
+                    steps, float(preset.get("cfg", 5.5)), sampler,
+                    scheduler, preset["checkpoint"], name, denoise,
+                    clip_layer=int(preset.get("clip_skip", 0)))
+                raw = await self._comfy_run(
+                    workflow, base, headers,
+                    label=f"img2img {width}x{height}@{denoise:.2f}"
+                          + (f" try{attempt + 1}" if attempt else ""))
+                last_issue = comfy_color_issue(raw)
+                if not last_issue:
+                    return raw
+                log.warning("comfy img2img color collapse (%s), retry %d",
+                            last_issue, attempt + 1)
+        raise ImageGenError(f"ComfyUI 图生图颜色崩坏（{last_issue}），"
+                            "已重试一次；请求上层回退")
+
+    async def _request_comfyui_inpaint(self, init_b64: str, mask_b64: str,
+                                       prompt: str, width: int, height: int,
+                                       denoise: float, seed: int,
+                                       negative: str = "",
+                                       steps: int | None = None,
+                                       padding: int = 32,
+                                       full_res: bool = True) -> bytes:
+        """本地 ComfyUI 掩膜重绘：LoadImageMask + SetLatentNoiseMask。
+
+        实测掩膜外像素差 ≈0（等价 A1111 inpaint 的「只改掩膜区」语义），
+        供脸部细化 / TSF 渐变身体通道使用。padding/full_res 仅为保持与
+        SD 线路相同的调用签名（ComfyUI 由掩膜本身决定范围）。
+        """
+        import base64
+        import io as _io
+        from PIL import Image as _Image
+        base = await self._comfy_base()
+        preset = await self.comfy_model_preset()
+        steps = int(steps or best_chain_steps(self.cfg))
+        sampler, scheduler = _comfy_sampler(
+            preset.get("sampler") or "euler",
+            preset.get("scheduler") or "")
+        headers = self._auth_headers()
+        init_data = base64.b64decode(init_b64)
+        # LoadImageMask 读 "red" 通道：灰度掩膜的 L 通道需要先转成 RGB
+        try:
+            mask_im = _Image.open(_io.BytesIO(base64.b64decode(mask_b64)))
+            buf = _io.BytesIO()
+            mask_im.convert("RGB").save(buf, "PNG")
+            mask_data = buf.getvalue()
+        except Exception as e:                       # noqa: BLE001
+            raise ImageGenError(f"ComfyUI 掩膜编码失败：{e}") from e
+        async with _SdGate(self._sem, "comfy-inpaint"):
+            async with httpx.AsyncClient(timeout=120) as client:
+                image_name = await self._comfy_upload(
+                    client, base, headers, init_data, "base")
+                mask_name = await self._comfy_upload(
+                    client, base, headers, mask_data, "mask")
+            workflow = _comfy_workflow_inpaint(
+                comfy_sanitize_text(prompt), comfy_sanitize_text(negative),
+                width, height, int(seed) % (2 ** 31),
+                steps, float(preset.get("cfg", 5.5)), sampler,
+                scheduler, preset["checkpoint"], image_name, mask_name,
+                denoise, clip_layer=int(preset.get("clip_skip", 0)))
+            return await self._comfy_run(
+                workflow, base, headers,
+                label=f"inpaint {width}x{height}@{denoise:.2f}")
+
+    async def _img2img(self, init_b64: str, prompt: str, width: int, height: int,
+                       denoise: float, seed: int, negative: str = "",
+                       steps: int | None = None) -> bytes:
+        """按线路分派的图生图（SD WebUI / ComfyUI 同语义）。"""
+        if self.provider == "sdwebui":
+            return await self._request_sdwebui_img2img(
+                init_b64, prompt, width, height, denoise, seed,
+                negative=negative, steps=steps)
+        if self.provider == "comfyui":
+            return await self._request_comfyui_img2img(
+                init_b64, prompt, width, height, denoise, seed,
+                negative=negative, steps=steps)
+        raise ImageGenError("图生图仅支持本地绘画服务（SD WebUI / ComfyUI），"
+                            "已请求全量生成回退")
+
+    async def _inpaint(self, init_b64: str, mask_b64: str, prompt: str,
+                       width: int, height: int, denoise: float, seed: int,
+                       negative: str = "", steps: int | None = None,
+                       padding: int = 32, full_res: bool = True) -> bytes:
+        """按线路分派的掩膜重绘（脸部细化 / 渐变身体通道）。"""
+        if self.provider == "sdwebui":
+            return await self._request_sdwebui_inpaint(
+                init_b64, mask_b64, prompt, width, height, denoise, seed,
+                negative=negative, steps=steps, padding=padding,
+                full_res=full_res)
+        if self.provider == "comfyui":
+            return await self._request_comfyui_inpaint(
+                init_b64, mask_b64, prompt, width, height, denoise, seed,
+                negative=negative, steps=steps, padding=padding,
+                full_res=full_res)
+        raise ImageGenError("掩膜重绘仅支持本地绘画服务（SD WebUI / ComfyUI）")
+
 
     async def _comfy_default_checkpoint(self, base: str) -> str:
         """查询 ComfyUI 可用 checkpoint 列表，取配置项或第一个。"""
@@ -3568,8 +4117,10 @@ class ImageClient:
 
         async def _variant(s):
             """按 provider 取一版生成（无重试，外层负责 seed 变体与质检）。"""
-            if init_b64 and self.provider == "sdwebui":
-                return await self._request_sdwebui_img2img(
+            if init_b64 and self.provider in ("sdwebui", "comfyui"):
+                # 1.9.21：ComfyUI 也支持 img2img（CG 角色参考底图/CG 重绘），
+                # 此前 init_b64 在 ComfyUI 线被静默忽略 → CG 丢掉角色相似度
+                return await self._img2img(
                     init_b64, prompt, width, height, denoise, s,
                     negative=extra_negative, steps=kwargs.get("steps"))
             if self.provider == "comfyui":
@@ -4118,20 +4669,28 @@ class ImageClient:
             return mock_background(hint)
         prompt = (f"{cast_en}，{hint}，{style_suffix}{CG_EN_SUFFIX}"
                   if cast_en else f"{hint}，{style_suffix}{CG_EN_SUFFIX}")
+        # 1.9.21：玩家追加 CG 正向词 / 全局负面词
+        _cg_extra = str(self.cfg.get("cg_extra") or "").strip()
+        if _cg_extra:
+            prompt += f"，{_cg_extra[:200]}"
         if self.provider in ("sdwebui", "comfyui"):
             size, cg_cap = effective_cg(self.cfg)
             w, h = self._parse_size(size)
-            preset = (await self.current_model_preset()
-                      if self.provider == "sdwebui" and self.cfg.get(
-                          "model_presets", True) else None)
+            if self.provider == "sdwebui" and self.cfg.get("model_presets", True):
+                preset = await self.current_model_preset()
+            elif self.provider == "comfyui":
+                preset = await self.comfy_model_preset()
+            else:
+                preset = None
             preset_steps = min(int(preset.get("steps", 30)), cg_cap) if preset else min(25, cg_cap)
             preset_cfg = preset.get("cfg", 6.5) if preset else 6.5
             preset_sampler = preset.get("sampler", "DPM++ 2M") if preset else "DPM++ 2M"
             preset_sched = preset.get("scheduler", "karras") if preset else "karras"
             neg = ", ".join(x for x in [
-                self.cfg.get("negative_prompt", ""), CG_NEG] if x)
-            # —— 立绘参考底图（角色相似度）——
-            if sprite_cutouts and self.provider == "sdwebui":
+                self.cfg.get("negative_prompt", ""),
+                (preset or {}).get("negative_extra", ""), CG_NEG] if x)
+            # —— 立绘参考底图（角色相似度）—— 1.9.21：ComfyUI 也走 img2img
+            if sprite_cutouts and self.provider in ("sdwebui", "comfyui"):
                 try:
                     import base64 as _b64
                     from PIL import Image as _Pim
@@ -4285,7 +4844,7 @@ class ImageClient:
         canvas 上占比高得多，五官（虹膜/睫毛/唇）更精致；原图仅脸区重绘，
         发型/服装/姿势零改动 → 表情差分「同一个人换表情」。alpha 硬阈值
         （≥190）防叠脸前的半透明发丝鬼影；异常原样返回。"""
-        if self.mock or self.provider != "sdwebui":
+        if self.mock or self.provider not in ("sdwebui", "comfyui"):
             return cut_png
         try:
             import base64
@@ -4341,7 +4900,7 @@ class ImageClient:
                                      "deformed face, melted face, soft blur, "
                                      "flat face, no detail, different person, "
                                      "different hairstyle, different outfit")
-            new_raw = await self._request_sdwebui_inpaint(
+            new_raw = await self._inpaint(
                 base64.b64encode(buf.getvalue()).decode(),
                 base64.b64encode(mbuf.getvalue()).decode(),
                 prompt + (", beautiful detailed face, refined facial features, "
@@ -4420,7 +4979,7 @@ class ImageClient:
         0.45~0.55 重绘；脸部/四肢零干扰）。
         hair_words 按同化率档由调用方传入（发长渐进词）。任何一步异常都会
         回退（保留已有结果），绝不破坏成品。"""
-        if self.mock or self.provider != "sdwebui":
+        if self.mock or self.provider not in ("sdwebui", "comfyui"):
             return cut_png
         try:
             import base64
@@ -4441,7 +5000,7 @@ class ImageClient:
                          a.resize((nw, nh)))
             buf = io.BytesIO()
             canvas.save(buf, "PNG")
-            step1_raw = await self._request_sdwebui_img2img(
+            step1_raw = await self._img2img(
                 base64.b64encode(buf.getvalue()).decode(),
                 prompt + (", same character evolving gradually, soft smooth "
                           "transition, gentle change, keep same pose"),
@@ -4550,7 +5109,7 @@ class ImageClient:
                                 # 掩膜引导词**置于最前**（位置坑：末尾被稀释）
                                 hair_suffix = ((", " + hair_words)
                                                if hair_words else "")
-                                step2_raw = await self._request_sdwebui_inpaint(
+                                step2_raw = await self._inpaint(
                                     base64.b64encode(bbuf3.getvalue()).decode(),
                                     base64.b64encode(mbuf3.getvalue()).decode(),
                                     ", body gradually developing feminine "
@@ -4626,8 +5185,9 @@ class ImageClient:
         三者提示词均附加「同身形/同比例/同姿态」锁词。"""
         if self.mock:
             return cut_png
-        if self.provider != "sdwebui":
-            raise ImageGenError("换装图生图仅支持 SD WebUI，已请求全量生成回退")
+        if self.provider not in ("sdwebui", "comfyui"):
+            raise ImageGenError("换装图生图仅支持本地绘画服务（SD WebUI / ComfyUI），"
+                                "已请求全量生成回退")
         try:
             import base64
             from PIL import ImageDraw, ImageFilter, ImageChops
@@ -4709,7 +5269,7 @@ class ImageClient:
                 prompt += (", wearing lingerie set, covered torso, "
                            "feminine body shape")
             promotion_extra = ""
-            new_raw = await self._request_sdwebui_img2img(
+            new_raw = await self._img2img(
                 base64.b64encode(buf.getvalue()).decode(),
                 prompt,
                 canvas_w, canvas_h, denoise, seed,
@@ -4839,10 +5399,15 @@ def _comfy_sampler(name: str, scheduler: str) -> tuple[str, str]:
 
 
 def _prefer_checkpoint(names: list[str]) -> str:
-    """模型优选顺序：非 fp8 → 已验证动漫/写实子串 → 列表首个；全 fp8 时退回首项。"""
+    """模型优选顺序：非 fp8 → 已验证动漫/写实子串 → 列表首个；全 fp8 时退回首项。
+
+    1.9.21：把 `waiIllustrious` 放到首位——它是本项目在 SD WebUI 上长期
+    验证过的配方模型（SDXL/ClipSkip2），本机 ComfyUI 里也有同名 ckpt；
+    这样 SD → ComfyUI 自动接管时画风与既有存档立绘保持一致。
+    """
     non_fp8 = [n for n in names if "fp8" not in n.lower()]
     pool = non_fp8 or list(names)
-    for pref in ("zukiAnimeILL", "miaomiaoRealskin"):
+    for pref in ("waiIllustrious", "zukiAnimeILL", "miaomiaoRealskin", "NoobAI"):
         for n in pool:
             if pref.lower() in n.lower():
                 return n

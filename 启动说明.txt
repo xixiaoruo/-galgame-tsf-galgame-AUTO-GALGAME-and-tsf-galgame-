@@ -6,8 +6,8 @@
     或：  start.bat
     或：  start_current.ps1
 
-启动入口固定指向（优先 1.9.20 AI 控制台版）：
-    dist-1.9.20\TSF_Galgame\TSF_Galgame.exe
+启动入口固定指向（优先 1.9.21 一致性检查/换装修复版）：
+    dist-1.9.21\TSF_Galgame\TSF_Galgame.exe
 （若该目录不存在，自动回退到 dist\TSF_Galgame\TSF_Galgame.exe）
 
 每次启动前，统一入口会：
@@ -16,9 +16,9 @@
     3. 启动当前 onedir 版本。
 
 不会按 python、cmd 或端口名匹配，不会误杀其他应用；不会删除存档或配置。
-必须保留整个 dist-1.9.20\TSF_Galgame\ 目录，不能只复制 exe：
-    dist-1.9.20\TSF_Galgame\TSF_Galgame.exe
-    dist-1.9.20\TSF_Galgame\_internal\...
+必须保留整个 dist-1.9.21\TSF_Galgame\ 目录，不能只复制 exe：
+    dist-1.9.21\TSF_Galgame\TSF_Galgame.exe
+    dist-1.9.21\TSF_Galgame\_internal\...
 
 【已移除】
     旧版浏览器启动脚本和旧 Tk 启动器已删除；不要再运行 python server.py

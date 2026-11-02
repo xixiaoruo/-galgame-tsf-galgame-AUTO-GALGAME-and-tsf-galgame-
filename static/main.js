@@ -1243,6 +1243,11 @@ function openSettings() {
     $("cfg-img-size").value = config.image.size || "";
     if ($("cfg-img-hires")) $("cfg-img-hires").checked = !!config.image.hi_res;
     $("cfg-img-neg").value = config.image.negative_prompt || "";
+    // 1.9.21：更多提示词（按类别追加）
+    if ($("cfg-portrait-extra")) $("cfg-portrait-extra").value = config.image.portrait_extra || "";
+    if ($("cfg-bg-extra")) $("cfg-bg-extra").value = config.image.background_extra || "";
+    if ($("cfg-cg-extra")) $("cfg-cg-extra").value = config.image.cg_extra || "";
+    if ($("cfg-neg-extra")) $("cfg-neg-extra").value = config.image.negative_extra_global || "";
     $("cfg-cutout-mode").value = config.image.cutout_mode || "ai";
     $("cfg-portrait-update").value = (config.game || {}).portrait_update || "stage";
     $("cfg-style-mode").value = (config.game || {}).style_mode || "default";
@@ -1422,6 +1427,11 @@ function bindUiPart10() {
         size: $("cfg-img-size").value.trim(),
         hi_res: $("cfg-img-hires") ? $("cfg-img-hires").checked : false,
         negative_prompt: $("cfg-img-neg").value.trim(),
+        // 1.9.21「更多提示词支持」：按类别追加正向词 + 全局负面词
+        portrait_extra: $("cfg-portrait-extra") ? $("cfg-portrait-extra").value.trim() : "",
+        background_extra: $("cfg-bg-extra") ? $("cfg-bg-extra").value.trim() : "",
+        cg_extra: $("cfg-cg-extra") ? $("cfg-cg-extra").value.trim() : "",
+        negative_extra_global: $("cfg-neg-extra") ? $("cfg-neg-extra").value.trim() : "",
         cutout_mode: $("cfg-cutout-mode").value,
         vram_mode: $("cfg-vram-mode").value,
         wai_adapt: $("cfg-wai-adapt") ? $("cfg-wai-adapt").checked : true,
@@ -5032,6 +5042,10 @@ async function openAiConsole() {
   if (!S.sid) { toast("还没有进入对局"); return; }
   $("modal-ai").classList.remove("hidden");
   await refreshAiConsole();
+  const st = S.turn || {};
+  if (st.writing_style) S.writingStyle = st.writing_style;
+  if (typeof st.custom_prompt === "string") S.customPrompt = st.custom_prompt;
+  if (st.consistency) S.consistency = st.consistency;
   switchAiTab("think");
 }
 
@@ -5118,20 +5132,175 @@ function renderAiEntryDetail() {
 }
 
 function switchAiTab(tab) {
-  const t = ["think", "edit", "direct"].includes(tab) ? tab : "think";
+  const t = ["think", "edit", "direct", "prompt", "consistency"].includes(tab)
+    ? tab : "think";
   S.aiTab = t;
   $("ai-pane-think").classList.toggle("hidden", t !== "think");
   $("ai-pane-edit").classList.toggle("hidden", t !== "edit");
   $("ai-pane-direct").classList.toggle("hidden", t !== "direct");
-  $("ai-tab-think").className = "btn mini " + (t === "think" ? "primary" : "ghost");
-  $("ai-tab-edit").className = "btn mini " + (t === "edit" ? "primary" : "ghost");
-  $("ai-tab-direct").className = "btn mini " + (t === "direct" ? "primary" : "ghost");
+  $("ai-pane-prompt").classList.toggle("hidden", t !== "prompt");
+  $("ai-pane-consistency").classList.toggle("hidden", t !== "consistency");
+  ["think", "edit", "direct", "prompt", "consistency"].forEach((k) => {
+    const btn = $("ai-tab-" + k);
+    if (btn) btn.className = "btn mini " + (t === k ? "primary" : "ghost");
+  });
   if (t === "edit") renderAiDialogueEditor((S.aiData && S.aiData.dialogue) || []);
   if (t === "direct") {
     const dir = $("ai-directive");
     if (dir) dir.value = (S.aiData && S.aiData.directive) || "";
   }
+  if (t === "prompt") renderPromptPane();
+  if (t === "consistency") refreshConsistencyPane();
 }
+
+/* ---- 1.9.21：提示词页（写作风格 + 自定义提示词） ---- */
+
+async function loadPromptStyles() {
+  if (S.promptStyles && S.promptStyles.length) return S.promptStyles;
+  try {
+    const r = await api("/api/prompt-presets");
+    S.promptStyles = r.styles || [];
+  } catch (e) {
+    S.promptStyles = [];
+  }
+  return S.promptStyles;
+}
+
+async function renderPromptPane() {
+  const sel = $("ai-style-select");
+  if (!sel) return;
+  const styles = await loadPromptStyles();
+  if (!sel.options.length) {
+    sel.innerHTML = styles.map((s) =>
+      `<option value="${escapeHtml(s.id)}">${escapeHtml((s.icon || "") + " " + s.name)}</option>`
+    ).join("");
+  }
+  sel.value = S.writingStyle || "default";
+  const cur = styles.find((s) => s.id === sel.value);
+  if ($("ai-style-note")) $("ai-style-note").textContent = cur ? cur.note || "" : "";
+  if ($("ai-custom-prompt")) $("ai-custom-prompt").value = S.customPrompt || "";
+}
+
+async function savePromptStyle() {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  const styleId = $("ai-style-select").value || "default";
+  const custom = $("ai-custom-prompt").value || "";
+  try {
+    const r = await api(`/api/game/${S.sid}/prompt-style`, {
+      method: "POST",
+      body: JSON.stringify({ style_id: styleId, custom_prompt: custom }),
+    });
+    S.writingStyle = r.writing_style || styleId;
+    S.customPrompt = r.custom_prompt || "";
+    $("ai-prompt-msg").textContent = "✓ 已保存；下一轮剧情生成生效。";
+    toast("提示词已保存", 2400);
+  } catch (e) {
+    $("ai-prompt-msg").textContent = "保存失败：" + e.message;
+    toast("保存提示词失败：" + e.message);
+  }
+}
+
+/* ---- 1.9.21：一致性检查页 ---- */
+
+function renderConsistencyReport(rep) {
+  const box = $("ai-consistency-report");
+  if (!box) return;
+  if (!rep) {
+    box.textContent = "还没有检查记录。点「🔍 开始检查」让 DeepSeek 审一遍最近的剧情。";
+    return;
+  }
+  const sev = { high: "高", medium: "中", low: "低" };
+  const rows = (rep.issues || []).map((i) => `
+    <div class="ai-consistency-item sev-${escapeHtml(String(i.severity || "medium"))}">
+      <b>${escapeHtml(sev[i.severity] || "中")} · ${escapeHtml(String(i.category || ""))}</b>
+      ${i.turn ? `<small> · 第 ${escapeHtml(String(i.turn))} 幕</small>` : ""}
+      <div>${escapeHtml(String(i.problem || ""))}</div>
+      ${i.evidence ? `<div class="hint">原文：${escapeHtml(String(i.evidence))}</div>` : ""}
+      ${i.fix ? `<div class="hint">建议：${escapeHtml(String(i.fix))}</div>` : ""}
+    </div>`).join("");
+  box.innerHTML = `
+    <div><b>一致性评分 ${escapeHtml(String(rep.score ?? "—"))}</b>
+      <span class="hint"> · ${escapeHtml(String(rep.summary || ""))}</span></div>
+    <div class="model-info">${escapeHtml(String(rep.model || ""))}
+      · 检查范围 ${escapeHtml(String(rep.turns_checked || ""))}
+      · 用时 ${escapeHtml(String(rep.elapsed ?? "—"))}s
+      · 高 ${escapeHtml(String((rep.counts || {}).high || 0))} /
+        中 ${escapeHtml(String((rep.counts || {}).medium || 0))} /
+        低 ${escapeHtml(String((rep.counts || {}).low || 0))}</div>
+    ${rows || `<div class="model-info">未发现明显设定冲突。</div>`}`;
+}
+
+async function refreshConsistencyPane() {
+  if (!S.sid) return;
+  const state = S.consistency || {};
+  const rep = (state.report) || (S.turn && S.turn.consistency && S.turn.consistency.report);
+  renderConsistencyReport(rep);
+  if ($("ai-consistency-auto")) {
+    $("ai-consistency-auto").value = String(state.auto_turns || 0);
+  }
+  if (!Object.keys(state).length) {
+    try {
+      const r = await api(`/api/game/${S.sid}/consistency`);
+      S.consistency = { report: r.report, auto_turns: r.auto_turns || 0 };
+      renderConsistencyReport(r.report);
+      if ($("ai-consistency-auto")) $("ai-consistency-auto").value = String(r.auto_turns || 0);
+    } catch (e) { /* 忽略：CoC 模式不支持 */ }
+  }
+}
+
+async function runConsistency() {
+  if (!S.sid) { toast("还没有进入对局"); return; }
+  const mode = $("ai-consistency-mode").value || "recent";
+  const focus = ($("ai-consistency-focus").value || "").trim();
+  const btn = $("btn-ai-consistency-run");
+  if (btn) btn.disabled = true;
+  $("ai-consistency-msg").textContent = "检查中…（DeepSeek 需要几秒到几十秒）";
+  try {
+    const r = await api(`/api/game/${S.sid}/consistency/check`, {
+      method: "POST",
+      body: JSON.stringify({ mode, turns: mode === "full" ? 16 : 12, focus }),
+    });
+    S.consistency = r.consistency || { report: r.report, auto_turns: 0 };
+    renderConsistencyReport(r.report);
+    $("ai-consistency-msg").textContent = "✓ 检查完成。";
+  } catch (e) {
+    $("ai-consistency-msg").textContent = "检查失败：" + e.message;
+    toast("一致性检查失败：" + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveConsistencyAuto() {
+  if (!S.sid) return;
+  const n = Number($("ai-consistency-auto").value || 0) || 0;
+  try {
+    const r = await api(`/api/game/${S.sid}/consistency/auto`, {
+      method: "POST", body: JSON.stringify({ turns: n }),
+    });
+    S.consistency = S.consistency || {};
+    S.consistency.auto_turns = r.auto_turns;
+    $("ai-consistency-msg").textContent = r.auto_turns
+      ? `✓ 已开启：每 ${r.auto_turns} 幕自动检查一次。`
+      : "✓ 已关闭自动检查。";
+  } catch (e) {
+    $("ai-consistency-msg").textContent = "保存失败：" + e.message;
+  }
+}
+
+async function fixConsistency() {
+  if (!S.sid) return;
+  try {
+    const r = await api(`/api/game/${S.sid}/consistency/fix`, { method: "POST" });
+    if (S.aiData) S.aiData.directive = r.directive || "";
+    if (S.consistency && S.consistency.report) S.consistency.report = r.report || S.consistency.report;
+    $("ai-consistency-msg").textContent = "✓ 已写入导演指令；下一轮生成会按建议修正。";
+    toast("修复建议已写入导演指令", 2600);
+  } catch (e) {
+    $("ai-consistency-msg").textContent = "写入失败：" + e.message;
+  }
+}
+
 
 function renderAiDialogueEditor(dialogue) {
   const box = $("ai-dialogue-editor");
@@ -5275,6 +5444,18 @@ function bindUiPart42() {
   onSafe("ai-tab-think", "click", () => switchAiTab("think"));
   onSafe("ai-tab-edit", "click", () => switchAiTab("edit"));
   onSafe("ai-tab-direct", "click", () => switchAiTab("direct"));
+  // 1.9.21：提示词 / 一致性检查
+  onSafe("ai-tab-prompt", "click", () => switchAiTab("prompt"));
+  onSafe("ai-tab-consistency", "click", () => switchAiTab("consistency"));
+  onSafe("ai-style-select", "change", () => {
+    const styles = S.promptStyles || [];
+    const cur = styles.find((s) => s.id === $("ai-style-select").value);
+    if ($("ai-style-note")) $("ai-style-note").textContent = cur ? cur.note || "" : "";
+  });
+  onSafe("btn-ai-save-prompt", "click", savePromptStyle);
+  onSafe("btn-ai-consistency-run", "click", runConsistency);
+  onSafe("btn-ai-consistency-auto", "click", saveConsistencyAuto);
+  onSafe("btn-ai-consistency-fix", "click", fixConsistency);
   onSafe("btn-ai-add-line", "click", aiAddDialogueLine);
   onSafe("btn-ai-save-dialogue", "click", saveAiDialogue);
   onSafe("btn-ai-save-directive", "click", saveAiDirective);

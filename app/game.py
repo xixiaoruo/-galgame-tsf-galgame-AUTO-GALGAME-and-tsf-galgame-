@@ -450,6 +450,9 @@ def build_story_system(session: dict) -> str:
     if _dir:
         system += ("\n\n【玩家导演指令（本局持续生效，优先级高于默认风格；"
                    "但不得违反内容分级政策）】\n" + _dir[:500])
+    # 1.9.21：写作风格 + 玩家自定义提示词（默认风格/未填写时为空串，零影响）
+    from . import prompt_presets as _pp
+    system += _pp.session_prompt_block(session)
     # API 前置注入：启用中的注入文本拼到 system prompt 最前面（全局生效）
     from . import inject as inject_mod
     return inject_mod.inject_block(system)
@@ -4599,7 +4602,20 @@ def public_state(session: dict) -> dict:
         "mock": session["mock"],
         # 1.9.20：AI 控制台用（导演指令；控制台记录走独立端点）
         "ai_directive": str(session.get("ai_directive") or ""),
+        # 1.9.21：写作风格 / 自定义提示词 / 一致性检查（最近一次报告）
+        "writing_style": str(session.get("writing_style") or "default"),
+        "custom_prompt": str(session.get("custom_prompt") or ""),
+        "consistency": consistency_view(session),
     }
+
+
+def consistency_view(session: dict) -> dict:
+    """一致性检查的前端视图（报告 + 自动检查间隔）。异常时返回空壳。"""
+    try:
+        from . import consistency as _cm
+        return _cm.view(session)
+    except Exception:                       # noqa: BLE001
+        return {"report": None, "auto_turns": 0, "categories": []}
 
 
 def public_state_of(session: dict) -> dict:
@@ -4671,6 +4687,50 @@ def set_ai_directive(sid: str, text: str) -> str:
     session["ai_directive"] = str(text or "").strip()[:500]
     persist(session)
     return session["ai_directive"]
+
+
+def set_writing_style(sid: str, style_id: str = "", custom: str | None = None) -> dict:
+    """设置写作风格与玩家自定义提示词（1.9.21「更多提示词支持」）。"""
+    from . import prompt_presets as _pp
+    session = get_session(sid)
+    sid_style = str(style_id or "").strip()[:30] or "default"
+    if not _pp.get_style(sid_style):
+        raise GameError(f"未知的写作风格：{sid_style}")
+    session["writing_style"] = sid_style
+    if custom is not None:
+        session["custom_prompt"] = _pp.clean_custom(custom)
+    persist(session)
+    return {
+        "writing_style": session["writing_style"],
+        "custom_prompt": session.get("custom_prompt", ""),
+        "styles": _pp.list_styles(),
+    }
+
+
+def set_consistency_auto(sid: str, turns: int = 0) -> int:
+    """设置「每 N 幕自动做一次 DeepSeek 一致性检查」；0 = 关闭。"""
+    session = get_session(sid)
+    try:
+        n = int(turns)
+    except (TypeError, ValueError):
+        n = 0
+    session["consistency_auto"] = max(0, min(50, n))
+    persist(session)
+    return session["consistency_auto"]
+
+
+async def maybe_auto_consistency(session: dict) -> None:
+    """推进一幕之后按配置自动跑一致性检查（失败只记日志，绝不影响剧情）。"""
+    from . import consistency as _cm
+    if not _cm.auto_due(session):
+        return
+    try:
+        await _cm.check(session, mode="recent", turns=12)
+        persist(session)
+        log.info("consistency auto-check done (score %s)",
+                 (session.get("consistency") or {}).get("score"))
+    except Exception as e:                   # noqa: BLE001
+        log.warning("consistency auto-check skipped: %s", e)
 
 
 def history_view(session: dict) -> list[dict]:
@@ -4835,6 +4895,11 @@ async def start_game(payload: dict) -> dict:
         # 1.9.20：AI 控制台 / 玩家导演指令（随存档持久；读档后仍可查看与修改）
         "ai_console": [],
         "ai_directive": "",
+        # 1.9.21：写作风格 / 自定义提示词 / DeepSeek 一致性检查
+        "writing_style": "default",
+        "custom_prompt": "",
+        "consistency": None,
+        "consistency_auto": 0,
         "log": [],
         "assets": {"portraits": {}, "backgrounds": {}},
         "bg_map": {},
@@ -4917,6 +4982,8 @@ async def advance(sid: str, choice_index: int) -> dict:
     _post_turn(session, turn)
     session["log"].append({"turn": turn, "choice": None})
     persist(session)
+    # 1.9.21：到点自动跑一次 DeepSeek 一致性检查（配置为 0 时零开销）
+    await maybe_auto_consistency(session)
     return public_state(session)
 
 
@@ -4947,6 +5014,8 @@ async def speak(sid: str, text: str) -> dict:
     _post_turn(session, turn)
     session["log"].append({"turn": turn, "choice": None})
     persist(session)
+    # 1.9.21：到点自动跑一次 DeepSeek 一致性检查（配置为 0 时零开销）
+    await maybe_auto_consistency(session)
     return public_state(session)
 
 

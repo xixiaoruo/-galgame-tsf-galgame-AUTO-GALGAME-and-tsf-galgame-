@@ -42,9 +42,11 @@
     通义千问   https://dashscope.aliyuncs.com/compatible-mode/v1  qwen-plus
     OpenAI     https://api.openai.com/v1                        gpt-4o-mini
 
-  立绘/背景（二选一）
+  立绘/背景（三选一）
     ① 云端 Images Generations：同上任一家的绘图模型
     ② 本地 SD WebUI：填入 http://127.0.0.1:7860，显卡越好出图越快
+    ③ 本地 ComfyUI：服务类型选 comfyui，默认探测 127.0.0.1:8188
+       （SD 未启动时也可自动切到本机 ComfyUI）
 
   Key 只保存在你自己电脑的 config.json 里，不会上传到任何地方。
 
